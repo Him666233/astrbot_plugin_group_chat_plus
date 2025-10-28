@@ -200,6 +200,12 @@ class ChatPlus(Star):
         """
         # 判断是否是@消息
         is_at_message = MessageProcessor.is_at_message(event)
+
+        # 强制日志：@消息判断结果（用于排查旧版QQ兼容问题）
+        logger.info(
+            f"⭐ [@消息判断] 结果: {'✅是@消息' if is_at_message else '❌非@消息'}"
+        )
+
         if self.debug_mode:
             logger.debug(
                 f"【步骤3】@消息检测: {'是@消息' if is_at_message else '非@消息'}"
@@ -212,6 +218,11 @@ class ChatPlus(Star):
         trigger_keywords = self.config.get("trigger_keywords", [])
         has_trigger_keyword = KeywordChecker.check_trigger_keywords(
             event, trigger_keywords
+        )
+
+        # 强制日志：触发关键词判断结果
+        logger.info(
+            f"⭐ [触发关键词判断] 结果: {'✅包含关键词' if has_trigger_keyword else '❌无关键词'}"
         )
 
         if has_trigger_keyword:
@@ -355,23 +366,62 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug(f"  添加元数据后消息: {message_text[:150]}...")
 
-        # 缓存当前用户消息
-        # 注意：只缓存原始消息+元数据，不包含任何提示词
+        # 处理图片（在缓存之前）
+        # 这样如果图片被过滤，消息就不会被缓存
         if self.debug_mode:
-            logger.debug("【步骤6.5】缓存纯净用户消息")
+            logger.debug("【步骤6.5】处理图片内容")
 
-        # 使用已经添加了元数据的消息（message_text）
-        # 这个消息只包含：时间戳 + 发送者信息 + 原始消息内容
-        # 不包含任何系统提示词
+        should_continue, processed_message = await ImageHandler.process_message_images(
+            event,
+            self.context,
+            self.config.get("enable_image_processing", False),
+            self.config.get("image_to_text_scope", "all"),
+            self.config.get("image_to_text_provider_id", ""),
+            self.config.get("image_to_text_prompt", "请详细描述这张图片的内容"),
+            is_at_message,
+            self.config.get("image_to_text_timeout", 60),
+        )
+
+        if not should_continue:
+            logger.info("图片处理后决定丢弃此消息（图片被过滤或处理失败）")
+            if self.debug_mode:
+                logger.debug("【步骤6.5】图片处理判定丢弃消息，不缓存")
+                logger.debug("=" * 60)
+            return False, None, None, None
+
+        # 缓存当前用户消息（图片处理通过后再缓存）
+        # 注意：缓存处理后的消息（不含元数据），在保存时再添加元数据
+        # processed_message 已经是经过图片处理的最终结果（可能是过滤后、转文字后、或原始消息）
+        if self.debug_mode:
+            logger.debug("【步骤7】缓存处理后的用户消息（不含元数据，保存时再添加）")
+            logger.debug(f"  原始消息（提取自event）: {original_message_text[:200]}...")
+            logger.debug(f"  处理后消息（图片处理后）: {processed_message[:200]}...")
+
+        # 缓存处理后的消息内容，不包含元数据
+        # 保存发送者信息和时间戳，用于后续添加元数据
         cached_message = {
             "role": "user",
-            "content": message_text,  # 这是纯净消息+元数据
+            "content": processed_message,  # 处理后的消息（可能已过滤图片、转文字、或保留原样）
             "timestamp": time.time(),
-            "image_description": None,
+            # 保存发送者信息，用于转正时添加正确的元数据
+            "sender_id": event.get_sender_id(),
+            "sender_name": event.get_sender_name(),
+            "message_timestamp": event.message_obj.timestamp
+            if hasattr(event, "message_obj") and hasattr(event.message_obj, "timestamp")
+            else None,
         }
 
+        # 强制日志：缓存内容（不受debug_mode控制）
+        logger.info(f"🔵 [缓存] 原始消息: {original_message_text[:100]}")
+        logger.info(f"🔵 [缓存] 处理后消息: {processed_message[:100]}")
+        logger.info(f"🔵 [缓存] 已缓存内容: {cached_message['content'][:100]}")
+
         if self.debug_mode:
-            logger.debug(f"  缓存内容: {cached_message['content'][:150]}...")
+            logger.debug(f"  已缓存内容: {cached_message['content'][:200]}...")
+            if processed_message != original_message_text:
+                logger.debug(f"  ⚠️ 消息内容有变化！原始≠处理后")
+            else:
+                logger.debug(f"  消息内容无变化（原始==处理后）")
 
         if chat_id not in self.pending_messages_cache:
             self.pending_messages_cache[chat_id] = []
@@ -395,58 +445,13 @@ class ChatPlus(Star):
         if len(self.pending_messages_cache[chat_id]) > 10:
             removed_msg = self.pending_messages_cache[chat_id].pop(0)
             if self.debug_mode:
-                had_image = (
-                    removed_msg.get("image_description") is not None
-                    if isinstance(removed_msg, dict)
-                    else False
-                )
-                logger.debug(
-                    f"  缓存已满，移除最旧消息{'（含图片描述）' if had_image else ''}"
-                )
+                logger.debug(f"  缓存已满，移除最旧消息")
 
         if self.debug_mode:
             logger.debug(f"  缓存消息数: {len(self.pending_messages_cache[chat_id])}")
 
-        # 处理图片
-        if self.debug_mode:
-            logger.debug("【步骤7】处理图片内容")
-
-        should_continue, processed_message = await ImageHandler.process_message_images(
-            event,
-            self.context,
-            self.config.get("enable_image_processing", False),
-            self.config.get("image_to_text_scope", "all"),
-            self.config.get("image_to_text_provider_id", ""),
-            self.config.get("image_to_text_prompt", "请详细描述这张图片的内容"),
-            is_at_message,
-            self.config.get("image_to_text_timeout", 60),
-        )
-
-        if not should_continue:
-            logger.info("图片处理后决定丢弃此消息")
-            if self.debug_mode:
-                logger.debug("【步骤7】图片处理判定丢弃消息")
-                logger.debug("=" * 60)
-            return False, None, None, None
-
+        # 使用处理后的消息继续后续流程（包含图片描述或原始消息）
         message_text = processed_message
-
-        # 保存图片描述
-        image_processed = (
-            self.config.get("enable_image_processing", False)
-            and self.config.get("image_to_text_provider_id", "")
-            and processed_message != original_message_text
-        )
-
-        if image_processed:
-            if (
-                chat_id in self.pending_messages_cache
-                and self.pending_messages_cache[chat_id]
-            ):
-                last_cached = self.pending_messages_cache[chat_id][-1]
-                last_cached["image_description"] = processed_message
-                if self.debug_mode:
-                    logger.debug(f"【步骤7】已保存图片描述到缓存")
 
         # 提取历史上下文
         max_context = self.config.get("max_context_messages", 20)
@@ -567,14 +572,62 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug("【步骤13】AI回复生成完成")
 
-        # 保存用户消息
+        # 保存用户消息（从缓存读取并添加元数据）
         if self.debug_mode:
             logger.debug("【步骤14】保存用户消息")
 
         try:
-            await ContextManager.save_user_message(event, message_text, self.context)
+            # 从缓存获取处理后的消息
+            message_to_save = ""
+            if (
+                chat_id in self.pending_messages_cache
+                and len(self.pending_messages_cache[chat_id]) > 0
+            ):
+                last_cached = self.pending_messages_cache[chat_id][-1]
+                if isinstance(last_cached, dict) and "content" in last_cached:
+                    # 获取处理后的消息内容（不含元数据）
+                    raw_content = last_cached["content"]
+
+                    # 强制日志：从缓存读取的内容
+                    logger.info(f"🟢 [步骤14-读缓存] 内容: {raw_content[:100]}")
+
+                    if self.debug_mode:
+                        logger.debug(f"  从缓存读取的内容: {raw_content[:200]}...")
+
+                    # 使用缓存中的发送者信息添加元数据
+                    message_to_save = MessageProcessor.add_metadata_from_cache(
+                        raw_content,
+                        last_cached.get("sender_id", event.get_sender_id()),
+                        last_cached.get("sender_name", event.get_sender_name()),
+                        last_cached.get("message_timestamp")
+                        or last_cached.get("timestamp"),
+                        self.config.get("include_timestamp", True),
+                        self.config.get("include_sender_info", True),
+                    )
+
+                    # 强制日志：添加元数据后的内容
+                    logger.info(f"🟢 [步骤14-加元数据后] 内容: {message_to_save[:150]}")
+
+            # 如果从缓存获取失败，使用当前处理后的消息并添加元数据
+            if not message_to_save:
+                logger.debug(
+                    "【步骤14】⚠️ 缓存中无消息，使用当前处理后的消息（这不应该发生！）"
+                )
+                message_to_save = MessageProcessor.add_metadata_to_message(
+                    event,
+                    message_text,  # message_text 就是 processed_message
+                    self.config.get("include_timestamp", True),
+                    self.config.get("include_sender_info", True),
+                )
+
             if self.debug_mode:
-                logger.debug(f"  用户消息已保存: {len(message_text)} 字符")
+                logger.debug(f"  准备保存的完整消息: {message_to_save[:300]}...")
+
+            await ContextManager.save_user_message(event, message_to_save, self.context)
+            if self.debug_mode:
+                logger.debug(
+                    f"  ✅ 用户消息已保存到自定义存储: {len(message_to_save)} 字符"
+                )
         except Exception as e:
             logger.error(f"保存用户消息时发生错误: {e}")
 
@@ -626,6 +679,18 @@ class ChatPlus(Star):
         # 步骤2: 检查消息触发器（决定是否跳过概率判断）
         is_at_message, has_trigger_keyword = await self._check_message_triggers(event)
 
+        # 关键逻辑：触发关键词等同于@消息
+        # 这样在 mention_only 模式下，包含关键词的消息也能正常处理图片
+        should_treat_as_at = is_at_message or has_trigger_keyword
+
+        # 强制日志：显示等同@消息处理的判断结果
+        logger.info(
+            f"⭐ [等同@消息] 判断: {'✅是' if should_treat_as_at else '❌否'} (is_at={is_at_message}, has_keyword={has_trigger_keyword})"
+        )
+
+        if should_treat_as_at and has_trigger_keyword and not is_at_message:
+            logger.info("    ↳ 因包含触发关键词，将按@消息处理（含图片处理）")
+
         # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
         should_process = await self._check_probability_before_processing(
             platform_name, is_private, chat_id, is_at_message, has_trigger_keyword
@@ -634,7 +699,8 @@ class ChatPlus(Star):
             return
 
         # 步骤4-6: 处理消息内容（图片处理等耗时操作）
-        result = await self._process_message_content(event, chat_id, is_at_message)
+        # 使用 should_treat_as_at 而不是 is_at_message，这样触发关键词也能触发图片处理
+        result = await self._process_message_content(event, chat_id, should_treat_as_at)
         if not result[0]:  # should_continue为False
             return
 
@@ -656,12 +722,27 @@ class ChatPlus(Star):
                     and self.pending_messages_cache[chat_id]
                 ):
                     last_cached_msg = self.pending_messages_cache[chat_id][-1]
+
+                    # 获取处理后的消息内容（不含元数据）
+                    raw_content = last_cached_msg["content"]
+
+                    # 使用缓存中的发送者信息添加元数据
+                    message_with_metadata = MessageProcessor.add_metadata_from_cache(
+                        raw_content,
+                        last_cached_msg.get("sender_id", event.get_sender_id()),
+                        last_cached_msg.get("sender_name", event.get_sender_name()),
+                        last_cached_msg.get("message_timestamp")
+                        or last_cached_msg.get("timestamp"),
+                        self.config.get("include_timestamp", True),
+                        self.config.get("include_sender_info", True),
+                    )
+
                     await ContextManager.save_user_message(
                         event,
-                        last_cached_msg["content"],
+                        message_with_metadata,
                         None,
                     )
-                    logger.debug(f"已保存未回复的用户消息到自定义历史")
+                    logger.debug(f"已保存未回复的用户消息到自定义历史（已添加元数据）")
             except Exception as e:
                 logger.warning(f"保存未回复消息失败: {e}")
 
@@ -728,9 +809,8 @@ class ChatPlus(Star):
             await ContextManager.save_bot_message(event, bot_reply_text, self.context)
 
             # 获取用户消息（从缓存的最后一条消息）
-            # 注意：缓存中的消息已经包含了元数据（时间戳+发送者信息）
+            # 注意：缓存中的消息不包含元数据，需要在这里添加
             message_to_save = ""
-            image_desc = None
 
             if (
                 chat_id in self.pending_messages_cache
@@ -738,83 +818,64 @@ class ChatPlus(Star):
             ):
                 last_cached = self.pending_messages_cache[chat_id][-1]
                 if isinstance(last_cached, dict) and "content" in last_cached:
-                    message_to_save = last_cached["content"]  # 已包含元数据
-                    # 检查是否有图片描述
-                    if (
-                        "image_description" in last_cached
-                        and last_cached["image_description"]
-                    ):
-                        image_desc = last_cached["image_description"]
+                    # 获取处理后的消息内容（不含元数据）
+                    raw_content = last_cached["content"]
 
-            # 如果缓存中没有，尝试从event提取纯净原始消息并添加元数据
-            # 注意：使用MessageCleaner确保不会包含系统提示词
+                    # 强制日志：从缓存读取的内容
+                    logger.info(f"🟡 [官方保存-读缓存] 内容: {raw_content[:100]}")
+
+                    if self.debug_mode:
+                        logger.debug(
+                            f"[消息发送后] 从缓存读取内容: {raw_content[:200]}..."
+                        )
+
+                    # 使用缓存中的发送者信息添加元数据
+                    message_to_save = MessageProcessor.add_metadata_from_cache(
+                        raw_content,
+                        last_cached.get("sender_id", event.get_sender_id()),
+                        last_cached.get("sender_name", event.get_sender_name()),
+                        last_cached.get("message_timestamp")
+                        or last_cached.get("timestamp"),
+                        self.config.get("include_timestamp", True),
+                        self.config.get("include_sender_info", True),
+                    )
+
+                    # 强制日志：添加元数据后的内容
+                    logger.info(
+                        f"🟡 [官方保存-加元数据后] 内容: {message_to_save[:150]}"
+                    )
+
+            # 如果缓存中没有，尝试从当前消息提取
             if not message_to_save:
-                logger.debug("[消息发送后] 缓存中无消息，从event提取纯净原始消息")
-                original_message = MessageCleaner.extract_raw_message_from_event(event)
-                if original_message:
+                logger.warning(
+                    "[消息发送后] ⚠️ 缓存中无消息，从event提取消息（不应该发生）"
+                )
+                # 使用当前处理后的消息
+                from .utils import MessageCleaner
+
+                processed = MessageCleaner.extract_raw_message_from_event(event)
+                if processed:
                     message_to_save = MessageProcessor.add_metadata_to_message(
                         event,
-                        original_message,
+                        processed,
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
                     )
                     logger.debug(
-                        f"[消息发送后] 从event提取并处理的消息: {message_to_save[:100]}..."
+                        f"[消息发送后] 从event提取的消息: {message_to_save[:200]}..."
                     )
 
             if not message_to_save:
                 logger.warning("[消息发送后] 无法获取用户消息，跳过官方保存")
                 return
 
-            # 如果有图片描述，使用图片描述作为消息内容
-            # 图片描述已经包含了原始文本和图片说明，无需手动替换
-            if image_desc:
-                # image_desc 已经是完整的处理后消息（包含原文+图片描述）
-                # 由于缓存中已经包含元数据，我们需要提取并保留元数据
-                # 然后用图片描述替换消息主体部分
-
-                # 尝试从 message_to_save 中提取元数据前缀
-                # 元数据格式通常是: [时间] [发送者] 消息内容
-                # 我们需要找到元数据结束的位置
-
-                # 查找第二个 ] 之后的第一个空格（假设有时间戳和发送者两个元数据）
-                first_bracket_end = message_to_save.find("]")
-                if first_bracket_end != -1:
-                    second_bracket_end = message_to_save.find(
-                        "]", first_bracket_end + 1
-                    )
-                    if second_bracket_end != -1:
-                        # 找到了两个括号，元数据应该在这之后
-                        metadata_end = message_to_save.find(" ", second_bracket_end)
-                        if metadata_end != -1:
-                            # 提取元数据前缀并拼接图片描述
-                            metadata_prefix = message_to_save[: metadata_end + 1]
-                            message_to_save = metadata_prefix + image_desc
-                            if self.debug_mode:
-                                logger.debug(
-                                    f"[消息发送后] 已融合图片描述（保留元数据），最终长度: {len(message_to_save)} 字符"
-                                )
-                        else:
-                            # 没找到空格分隔符，直接使用图片描述
-                            message_to_save = image_desc
-                    else:
-                        # 只有一个括号，直接使用图片描述
-                        message_to_save = image_desc
-                else:
-                    # 没有元数据格式，直接使用图片描述
-                    message_to_save = image_desc
-                    if self.debug_mode:
-                        logger.debug(
-                            f"[消息发送后] 使用图片描述（无元数据），长度: {len(message_to_save)} 字符"
-                        )
-
             if self.debug_mode:
                 logger.debug(
-                    f"[消息发送后] 保存消息（已含元数据{'和图片描述' if image_desc else ''}）: {message_to_save[:100]}..."
+                    f"[消息发送后] 准备保存到官方系统的消息: {message_to_save[:300]}..."
                 )
 
             # 准备需要转正的缓存消息（包含那些之前未回复的消息）
-            # 需要处理图片描述：如果缓存消息有图片描述，融合进去
+            # 缓存中的消息不包含元数据，需要在转正时添加
             cached_messages_to_convert = []
             if (
                 chat_id in self.pending_messages_cache
@@ -824,55 +885,23 @@ class ChatPlus(Star):
                 raw_cached = self.pending_messages_cache[chat_id][:-1]
                 logger.info(f"[消息发送后] 发现 {len(raw_cached)} 条待转正的缓存消息")
 
-                # 处理每条缓存消息，融合图片描述
+                # 处理每条缓存消息，使用缓存中的发送者信息添加元数据
                 for cached_msg in raw_cached:
                     if isinstance(cached_msg, dict) and "content" in cached_msg:
-                        msg_content = cached_msg["content"]
+                        # 获取处理后的消息内容（不含元数据）
+                        raw_content = cached_msg["content"]
 
-                        # 检查是否有图片描述
-                        if (
-                            "image_description" in cached_msg
-                            and cached_msg["image_description"]
-                        ):
-                            # 有图片描述，需要融合
-                            # cached_msg['content'] 是带元数据的原始消息
-                            # cached_msg['image_description'] 是处理后的完整消息（包含原文+图片描述）
-                            # 我们需要用图片描述替换消息主体部分，保留元数据
-
-                            # 尝试提取元数据前缀
-                            # 元数据格式通常是: [时间] [发送者] 消息内容
-                            first_bracket_end = msg_content.find("]")
-                            if first_bracket_end != -1:
-                                second_bracket_end = msg_content.find(
-                                    "]", first_bracket_end + 1
-                                )
-                                if second_bracket_end != -1:
-                                    # 找到了两个括号，提取元数据
-                                    metadata_end = msg_content.find(
-                                        " ", second_bracket_end
-                                    )
-                                    if metadata_end != -1:
-                                        # 提取元数据前缀并拼接图片描述
-                                        metadata_prefix = msg_content[
-                                            : metadata_end + 1
-                                        ]
-                                        msg_content = (
-                                            metadata_prefix
-                                            + cached_msg["image_description"]
-                                        )
-                                        if self.debug_mode:
-                                            logger.debug(
-                                                f"[消息发送后] 缓存消息融合图片描述（保留元数据）"
-                                            )
-                                    else:
-                                        # 没找到空格，直接使用图片描述
-                                        msg_content = cached_msg["image_description"]
-                                else:
-                                    # 只有一个括号，直接使用图片描述
-                                    msg_content = cached_msg["image_description"]
-                            else:
-                                # 没有元数据格式，直接使用图片描述
-                                msg_content = cached_msg["image_description"]
+                        # 使用缓存中保存的发送者信息添加元数据
+                        # 这样每条消息都会有正确的发送者信息
+                        msg_content = MessageProcessor.add_metadata_from_cache(
+                            raw_content,
+                            cached_msg.get("sender_id", "unknown"),
+                            cached_msg.get("sender_name", "未知用户"),
+                            cached_msg.get("message_timestamp")
+                            or cached_msg.get("timestamp"),
+                            self.config.get("include_timestamp", True),
+                            self.config.get("include_sender_info", True),
+                        )
 
                         # 添加到转正列表
                         cached_messages_to_convert.append(
@@ -881,6 +910,12 @@ class ChatPlus(Star):
                                 "content": msg_content,
                             }
                         )
+
+                        if self.debug_mode:
+                            sender_info = f"{cached_msg.get('sender_name')}(ID: {cached_msg.get('sender_id')})"
+                            logger.debug(
+                                f"[消息发送后] 转正消息（已添加元数据，发送者: {sender_info}）: {msg_content[:100]}..."
+                            )
             else:
                 logger.debug(f"[消息发送后] 没有待转正的缓存消息")
 
@@ -900,30 +935,18 @@ class ChatPlus(Star):
 
             if success:
                 logger.info(f"[消息发送后] ✅ 成功保存到官方对话系统")
-                # 成功保存后，清空该会话的消息缓存（包括图片描述）
+                # 成功保存后，清空该会话的消息缓存
                 if chat_id in self.pending_messages_cache:
                     cleared_count = len(self.pending_messages_cache[chat_id])
-                    # 统计清空的图片描述数量
-                    image_desc_count = sum(
-                        1
-                        for msg in self.pending_messages_cache[chat_id]
-                        if isinstance(msg, dict) and msg.get("image_description")
-                    )
-                    # 清空整个缓存列表（包括所有消息和图片描述）
+                    # 清空整个缓存列表
                     self.pending_messages_cache[chat_id] = []
 
                     if self.debug_mode:
                         logger.debug(
                             f"[消息发送后] 已清空消息缓存: {cleared_count} 条消息"
                         )
-                        if image_desc_count > 0:
-                            logger.debug(
-                                f"[消息发送后] 已清空图片描述: {image_desc_count} 条"
-                            )
                     else:
-                        logger.debug(
-                            f"[消息发送后] 已清空消息缓存: {cleared_count} 条（含 {image_desc_count} 条图片描述）"
-                        )
+                        logger.debug(f"[消息发送后] 已清空消息缓存: {cleared_count} 条")
             else:
                 logger.warning(f"[消息发送后] ⚠️ 保存到官方对话系统失败")
                 if self.debug_mode:

@@ -84,7 +84,7 @@ class MessageCleaner:
         try:
             # 方法1: 从消息链中提取（最可靠）
             if hasattr(event, "message_obj") and hasattr(event.message_obj, "message"):
-                from astrbot.api.message_components import Plain, At, Image
+                from astrbot.api.message_components import Plain, At, Image, Reply
 
                 raw_parts = []
                 for component in event.message_obj.message:
@@ -98,6 +98,11 @@ class MessageCleaner:
                     elif isinstance(component, Image):
                         # 图片组件，保留图片标记
                         raw_parts.append("[图片]")
+                    elif isinstance(component, Reply):
+                        # 引用消息组件，提取引用信息
+                        reply_text = MessageCleaner._format_reply_component(component)
+                        if reply_text:
+                            raw_parts.append(reply_text)
 
                 if raw_parts:
                     raw_message = "".join(raw_parts).strip()
@@ -123,6 +128,49 @@ class MessageCleaner:
             logger.error(f"[消息清理] 提取原始消息失败: {e}")
             # 发生错误时返回空字符串
             return ""
+
+    @staticmethod
+    def _format_reply_component(reply_component) -> str:
+        """
+        格式化引用消息组件为文本表示
+
+        Args:
+            reply_component: Reply组件
+
+        Returns:
+            格式化后的引用消息文本
+        """
+        try:
+            # 尝试提取引用的消息内容
+            # Reply组件可能包含：sender_name, message_content等字段
+            parts = []
+
+            # 尝试获取发送者名称
+            sender_name = None
+            if hasattr(reply_component, "sender_name"):
+                sender_name = reply_component.sender_name
+            elif hasattr(reply_component, "sender"):
+                if hasattr(reply_component.sender, "nickname"):
+                    sender_name = reply_component.sender.nickname
+
+            # 尝试获取消息内容
+            message_content = None
+            if hasattr(reply_component, "message_str"):
+                message_content = reply_component.message_str
+            elif hasattr(reply_component, "message"):
+                message_content = reply_component.message
+
+            # 构建引用消息格式
+            if sender_name and message_content:
+                return f"[引用消息({sender_name}: {message_content})]"
+            elif message_content:
+                return f"[引用消息: {message_content}]"
+            else:
+                return "[引用消息]"
+
+        except Exception as e:
+            logger.debug(f"[消息清理] 格式化引用消息失败: {e}")
+            return "[引用消息]"
 
     @staticmethod
     def is_empty_at_message(raw_message: str, is_at_message: bool) -> bool:
