@@ -2,6 +2,18 @@
 记忆注入器模块
 负责调用记忆插件获取长期记忆内容
 
+⚠️ 耦合警告：
+本模块与 strbot_plugin_play_sy 插件存在紧密耦合关系。
+具体依赖：
+- 依赖该插件的 get_memories 工具函数
+- 直接访问该工具的 handler 属性（非公开API）
+- 如果 strbot_plugin_play_sy 插件的内部实现发生变化，本模块可能失效
+
+建议：
+- 使用前确保已安装 strbot_plugin_play_sy 插件
+- 如果该插件更新导致兼容性问题，需要相应更新本模块
+- 未来应考虑使用更稳定的插件间通信机制
+
 作者: Him666233
 版本: v1.0.0
 """
@@ -18,6 +30,10 @@ class MemoryInjector:
     1. 检测记忆插件（strbot_plugin_play_sy）是否可用
     2. 调用记忆插件的get_memories工具
     3. 将记忆内容注入到消息中
+
+    ⚠️ 耦合说明：
+    本类通过直接访问 strbot_plugin_play_sy 插件的内部 handler 属性来调用功能。
+    这是一种不稳定的集成方式，可能在插件更新后失效。
     """
 
     @staticmethod
@@ -60,6 +76,11 @@ class MemoryInjector:
 
         通过get_memories工具函数获取长期记忆
 
+        ⚠️ 实现警告：
+        本方法直接访问 get_memories 工具的 handler 属性，这是一种侵入式的调用方式。
+        如果 strbot_plugin_play_sy 插件的内部实现发生变化（例如重命名 handler 属性），
+        本方法将失效。这是一个已知的技术债务，未来应寻找更稳定的集成方案。
+
         Args:
             context: Context对象
             event: 消息事件
@@ -83,13 +104,13 @@ class MemoryInjector:
 
             logger.debug("正在调用记忆插件获取记忆...")
 
-            # 调用工具函数
-            # get_memories工具只接受event参数,不接受context参数
-            # 工具的handler在handler属性中
+            # ⚠️ 紧密耦合点：直接访问内部 handler 属性
+            # 这依赖于 strbot_plugin_play_sy 插件的具体实现细节
+            # 如果插件重构，此处可能需要更新
             if hasattr(get_memories_tool, "handler"):
                 memory_result = await get_memories_tool.handler(event=event)
             else:
-                logger.warning("get_memories工具没有handler属性")
+                logger.warning("get_memories工具没有handler属性，可能插件版本不兼容")
                 return None
 
             if memory_result and isinstance(memory_result, str):

@@ -179,9 +179,9 @@ class DecisionAI:
     @staticmethod
     def _parse_decision(ai_response: str) -> bool:
         """
-        解析AI的决策回复（积极模式）
+        解析AI的决策回复（严格模式）
 
-        包含肯定意图的都视为应该回复，只有明确否定才是不回复
+        严格解析AI的回复，避免误判
 
         Args:
             ai_response: AI的回复文本
@@ -190,8 +190,8 @@ class DecisionAI:
             True=应该回复，False=不回复
         """
         if not ai_response:
-            logger.debug("AI回复为空,默认判定为回复（积极模式）")
-            return True  # 空回复时倾向于回复
+            logger.debug("AI回复为空,默认判定为不回复（谨慎模式）")
+            return False  # 空回复时谨慎处理
 
         # 清理回复文本
         cleaned_response = ai_response.strip().lower()
@@ -199,36 +199,55 @@ class DecisionAI:
         # 移除可能的标点符号
         cleaned_response = cleaned_response.rstrip(".,!?。,!?")
 
-        # 肯定关键词列表（扩展识别范围）
-        positive_keywords = [
-            "yes",
-            "y",
-            "是",
-            "好",
-            "可以",
-            "应该",
-            "回复",
-            "要",
-            "需要",
-        ]
+        # 优先检查完整的yes/no
+        if cleaned_response == "yes" or cleaned_response == "y":
+            logger.debug(f"AI明确回复 '{ai_response}' (yes),判定为回复")
+            return True
 
-        # 否定关键词列表
-        negative_keywords = ["no", "n", "否", "不", "别", "不要", "不应该", "不需要"]
+        if cleaned_response == "no" or cleaned_response == "n":
+            logger.debug(f"AI明确回复 '{ai_response}' (no),判定为不回复")
+            return False
 
-        # 优先检查是否包含肯定关键词
-        for keyword in positive_keywords:
-            if keyword in cleaned_response:
+        # 检查中文的明确回复
+        if (
+            cleaned_response == "是"
+            or cleaned_response == "应该"
+            or cleaned_response == "回复"
+        ):
+            logger.debug(f"AI明确回复 '{ai_response}' (肯定),判定为回复")
+            return True
+
+        if (
+            cleaned_response == "否"
+            or cleaned_response == "不"
+            or cleaned_response == "不应该"
+            or cleaned_response == "不回复"
+        ):
+            logger.debug(f"AI明确回复 '{ai_response}' (否定),判定为不回复")
+            return False
+
+        # 否定关键词列表（检查开头）
+        negative_starts = ["no", "n", "否", "不", "别", "不要", "不应该", "不需要"]
+
+        # 检查是否以否定词开头
+        for keyword in negative_starts:
+            if cleaned_response.startswith(keyword):
                 logger.debug(
-                    f"AI回复 '{ai_response}' 包含肯定关键词 '{keyword}',判定为回复"
+                    f"AI回复 '{ai_response}' 以否定词 '{keyword}' 开头,判定为不回复"
+                )
+                return False
+
+        # 肯定关键词列表（检查开头）
+        positive_starts = ["yes", "y", "是", "好", "可以", "应该", "回复", "要", "需要"]
+
+        # 检查是否以肯定词开头
+        for keyword in positive_starts:
+            if cleaned_response.startswith(keyword):
+                logger.debug(
+                    f"AI回复 '{ai_response}' 以肯定词 '{keyword}' 开头,判定为回复"
                 )
                 return True
 
-        # 检查是否明确否定（只有开头是否定词才算）
-        for keyword in negative_keywords:
-            if cleaned_response.startswith(keyword):
-                logger.debug(f"AI回复 '{ai_response}' 明确否定,判定为不回复")
-                return False
-
-        # 默认情况：如果既不明确肯定也不明确否定，倾向于回复（积极模式）
-        logger.debug(f"AI回复 '{ai_response}' 不明确,默认判定为回复（积极模式）")
-        return True
+        # 默认情况：不明确的回复，采用谨慎策略
+        logger.debug(f"AI回复 '{ai_response}' 不明确,默认判定为不回复（谨慎模式）")
+        return False

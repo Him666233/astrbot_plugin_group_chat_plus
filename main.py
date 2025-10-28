@@ -32,6 +32,7 @@ import random
 import time
 from astrbot.api.all import *
 from astrbot.api.event import filter
+from astrbot.core.star.star_tools import StarTools
 
 # 导入所有工具模块
 from .utils import (
@@ -76,8 +77,10 @@ class ChatPlus(Star):
         # 获取调试日志开关
         self.debug_mode = config.get("enable_debug_log", False)
 
-        # 初始化上下文管理器
-        ContextManager.init()
+        # 初始化上下文管理器（使用插件专属数据目录）
+        # 注意：StarTools.get_data_dir() 会自动检测插件名称
+        data_dir = StarTools.get_data_dir()
+        ContextManager.init(str(data_dir))
 
         # 初始化消息缓存（用于保存"通过筛选但未回复"的消息）
         # 格式: {chat_id: [{"role": "user", "content": "消息内容", "timestamp": 时间戳}]}
@@ -135,30 +138,15 @@ class ChatPlus(Star):
         except Exception as e:
             logger.error(f"处理群消息时发生错误: {e}", exc_info=True)
 
-    async def _process_message(self, event: AstrMessageEvent):
+    async def _perform_initial_checks(self, event: AstrMessageEvent) -> tuple:
         """
-        消息处理主流程
+        执行初始检查
 
-        处理步骤：
-        1. 基础检查 - 群组启用状态、是否bot自己的消息
-        2. 黑名单过滤
-        3. @消息识别
-        4. 触发词检测
-        5. 读空气概率判断（@消息和触发词跳过）
-        6. 添加消息元数据（时间戳、发送者）
-        7. 图片处理
-        8. 上下文提取
-        9. 决策AI判断（@消息和触发词跳过）
-        10. 记忆注入
-        11. 工具提醒
-        12. AI生成回复
-        13. 保存历史
-        14. 概率调整
-
-        Args:
-            event: 消息事件对象
+        Returns:
+            (should_continue, platform_name, is_private, chat_id)
+            - should_continue: 是否继续处理
+            - 其他: 基本信息
         """
-        # === 第1步: 基础检查 ===
         if self.debug_mode:
             logger.debug("=" * 60)
             logger.debug("【步骤1】开始基础检查")
@@ -167,12 +155,12 @@ class ChatPlus(Star):
         if not self._is_enabled(event):
             if self.debug_mode:
                 logger.debug("【步骤1】群组未启用插件,跳过处理")
-            return
+            return False, None, None, None
 
-        # 检查是否是机器人自己的消息,避免自己回复自己
+        # 检查是否是机器人自己的消息
         if MessageProcessor.is_message_from_bot(event):
             logger.debug("忽略机器人自己的消息")
-            return
+            return False, None, None, None
 
         # 获取基本信息
         platform_name = event.get_platform_name()
@@ -188,7 +176,7 @@ class ChatPlus(Star):
                 f"  发送者: {event.get_sender_name()}({event.get_sender_id()})"
             )
 
-        # === 第2步: 黑名单关键词检查 ===
+        # 黑名单关键词检查
         if self.debug_mode:
             logger.debug("【步骤2】检查黑名单关键词")
 
@@ -198,16 +186,25 @@ class ChatPlus(Star):
             if self.debug_mode:
                 logger.debug("【步骤2】黑名单关键词匹配，丢弃消息")
                 logger.debug("=" * 60)
-            return
+            return False, None, None, None
 
-        # === 第3步: 判断是否是@消息 ===
+        return True, platform_name, is_private, chat_id
+
+    async def _check_message_triggers(self, event: AstrMessageEvent) -> tuple:
+        """
+        检查消息触发器（@消息和触发关键词）
+
+        Returns:
+            (is_at_message, has_trigger_keyword)
+        """
+        # 判断是否是@消息
         is_at_message = MessageProcessor.is_at_message(event)
         if self.debug_mode:
             logger.debug(
                 f"【步骤3】@消息检测: {'是@消息' if is_at_message else '非@消息'}"
             )
 
-        # === 第4步: 触发关键词检查 ===
+        # 触发关键词检查
         if self.debug_mode:
             logger.debug("【步骤4】检查触发关键词")
 
@@ -221,42 +218,102 @@ class ChatPlus(Star):
             if self.debug_mode:
                 logger.debug("【步骤4】检测到触发关键词，跳过读空气判断")
 
-        # === 第5步: 读空气概率判断 ===
-        # @消息或触发关键词消息跳过概率判断,一定要处理
+        return is_at_message, has_trigger_keyword
+
+    async def _check_probability_and_ai_decision(
+        self,
+        event: AstrMessageEvent,
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+        is_at_message: bool,
+        has_trigger_keyword: bool,
+        formatted_context: str,
+    ) -> bool:
+        """
+        执行概率判断和AI决策
+
+        Returns:
+            True=应该回复, False=不回复
+        """
+        # @消息或触发关键词消息跳过概率判断
         if not is_at_message and not has_trigger_keyword:
+            # 概率判断
             if self.debug_mode:
                 logger.debug("【步骤5】开始读空气概率判断")
-            should_process = self._check_probability(platform_name, is_private, chat_id)
+
+            should_process = await self._check_probability(
+                platform_name, is_private, chat_id
+            )
             if not should_process:
                 logger.debug("读空气概率判断: 不处理此消息")
                 if self.debug_mode:
                     logger.debug("【步骤5】概率判断失败,丢弃消息")
                     logger.debug("=" * 60)
-                return
+                return False
+
             logger.debug("读空气概率判断: 决定处理此消息")
             if self.debug_mode:
                 logger.debug("【步骤5】概率判断通过,继续处理")
+
+            # 决策AI判断
+            if self.debug_mode:
+                logger.debug("【步骤9】调用决策AI判断是否回复")
+
+            should_reply = await DecisionAI.should_reply(
+                self.context,
+                event,
+                formatted_context,
+                self.config.get("decision_ai_provider_id", ""),
+                self.config.get("decision_ai_extra_prompt", ""),
+                self.config.get("decision_ai_timeout", 30),
+            )
+
+            if not should_reply:
+                logger.info("决策AI判断: 不应该回复此消息")
+                return False
+
+            logger.info("决策AI判断: 应该回复此消息")
+            return True
         else:
+            # @消息或触发关键词，跳过判断
             if is_at_message:
                 logger.info("检测到@消息,跳过概率判断")
                 if self.debug_mode:
                     logger.debug("【步骤5】@消息,跳过概率判断,必定处理")
+
+                # 检查是否已被其他插件处理
+                if ReplyHandler.check_if_already_replied(event):
+                    logger.info("@消息已被其他插件处理,跳过回复")
+                    if self.debug_mode:
+                        logger.debug("【步骤9】@消息已被处理,退出")
+                        logger.debug("=" * 60)
+                    return False
+
             if has_trigger_keyword:
                 logger.info("检测到触发关键词,跳过概率判断")
                 if self.debug_mode:
                     logger.debug("【步骤5】触发关键词消息,跳过概率判断,必定处理")
 
-        # === 第6步: 添加时间戳和发送者信息 ===
+            return True
+
+    async def _process_message_content(
+        self, event: AstrMessageEvent, chat_id: str, is_at_message: bool
+    ) -> tuple:
+        """
+        处理消息内容（元数据、图片、上下文）
+
+        Returns:
+            (should_continue, original_message_text, message_text, formatted_context)
+        """
+        # 添加时间戳和发送者信息
         if self.debug_mode:
             logger.debug("【步骤6】添加消息元数据")
 
-        # 保存原始消息（不含元数据）用于后续保存
         original_message_text = event.get_message_outline()
-
         if self.debug_mode:
             logger.debug(f"  原始消息: {original_message_text[:100]}...")
 
-        # 添加元数据用于AI处理
         message_text = MessageProcessor.add_metadata_to_message(
             event,
             original_message_text,
@@ -267,12 +324,10 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug(f"  处理后消息: {message_text[:150]}...")
 
-        # === 第6.5步: 缓存当前用户消息（用于处理"通过筛选但未回复"的情况）===
+        # 缓存当前用户消息
         if self.debug_mode:
             logger.debug("【步骤6.5】缓存用户消息")
 
-        # 根据配置为消息添加元数据（时间戳+发送者信息）
-        # 这样转正时就不需要额外处理了
         message_with_metadata = MessageProcessor.add_metadata_to_message(
             event,
             original_message_text,
@@ -280,22 +335,19 @@ class ChatPlus(Star):
             self.config.get("include_sender_info", True),
         )
 
-        # 将带元数据的消息添加到缓存（注意：这里只是准备，实际保存在步骤9或after_message_sent）
         cached_message = {
             "role": "user",
-            "content": message_with_metadata,  # 保存带元数据的消息
+            "content": message_with_metadata,
             "timestamp": time.time(),
-            "image_description": None,  # 预留字段，第7步会填充图片描述
+            "image_description": None,
         }
 
-        # 确保缓存列表存在
         if chat_id not in self.pending_messages_cache:
             self.pending_messages_cache[chat_id] = []
 
-        # 清理30分钟前的旧消息（避免缓存积累太久）
-        # 注意：过期的消息会被完全移除，包括其图片描述
+        # 清理旧消息
         current_time = time.time()
-        cache_ttl = 1800  # 30分钟 = 1800秒
+        cache_ttl = 1800
         old_count = len(self.pending_messages_cache[chat_id])
         self.pending_messages_cache[chat_id] = [
             msg
@@ -307,10 +359,9 @@ class ChatPlus(Star):
             removed = old_count - len(self.pending_messages_cache[chat_id])
             logger.debug(f"  已清理过期缓存: {removed} 条（超过30分钟）")
 
-        # 添加到缓存（限制最多10条，避免内存积累）
+        # 添加到缓存
         self.pending_messages_cache[chat_id].append(cached_message)
         if len(self.pending_messages_cache[chat_id]) > 10:
-            # 移除最旧的消息（包括其图片描述）
             removed_msg = self.pending_messages_cache[chat_id].pop(0)
             if self.debug_mode:
                 had_image = (
@@ -325,19 +376,9 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug(f"  缓存消息数: {len(self.pending_messages_cache[chat_id])}")
 
-        # === 第7步: 处理图片 ===
+        # 处理图片
         if self.debug_mode:
             logger.debug("【步骤7】处理图片内容")
-            logger.debug(
-                f"  图片处理: {'启用' if self.config.get('enable_image_processing', False) else '禁用'}"
-            )
-            logger.debug(
-                f"  图片转文字应用范围: {self.config.get('image_to_text_scope', 'all')}"
-            )
-            logger.debug(
-                f"  图片转文字超时: {self.config.get('image_to_text_timeout', 60)} 秒"
-            )
-            logger.debug(f"  当前消息类型: {'@消息' if is_at_message else '普通消息'}")
 
         should_continue, processed_message = await ImageHandler.process_message_images(
             event,
@@ -355,40 +396,28 @@ class ChatPlus(Star):
             if self.debug_mode:
                 logger.debug("【步骤7】图片处理判定丢弃消息")
                 logger.debug("=" * 60)
-            return
+            return False, None, None, None
 
         message_text = processed_message
 
-        # 检查是否进行了图片转文字（三个条件都满足）
+        # 保存图片描述
         image_processed = (
-            self.config.get("enable_image_processing", False)  # 配置开启
-            and self.config.get("image_to_text_provider_id", "")  # 填了provider
-            and processed_message != original_message_text  # 转换成功（内容有变化）
+            self.config.get("enable_image_processing", False)
+            and self.config.get("image_to_text_provider_id", "")
+            and processed_message != original_message_text
         )
 
         if image_processed:
-            # 提取图片描述部分（processed_message相对于original_message_text的增量）
-            # 将图片描述保存到缓存的最后一条消息
             if (
                 chat_id in self.pending_messages_cache
                 and self.pending_messages_cache[chat_id]
             ):
                 last_cached = self.pending_messages_cache[chat_id][-1]
-                last_cached["image_description"] = (
-                    processed_message  # 保存完整的处理后消息
-                )
-
+                last_cached["image_description"] = processed_message
                 if self.debug_mode:
                     logger.debug(f"【步骤7】已保存图片描述到缓存")
-                    logger.debug(f"  原始消息长度: {len(original_message_text)}")
-                    logger.debug(f"  处理后长度: {len(processed_message)}")
 
-        if self.debug_mode:
-            logger.debug(
-                f"【步骤7】图片处理完成，图片描述已{'保存' if image_processed else '无'}"
-            )
-
-        # === 第8步: 提取历史上下文（合并缓存消息）===
+        # 提取历史上下文
         max_context = self.config.get("max_context_messages", 20)
         if self.debug_mode:
             logger.debug("【步骤8】提取历史上下文")
@@ -396,54 +425,36 @@ class ChatPlus(Star):
 
         history_messages = ContextManager.get_history_messages(event, max_context)
 
-        # 合并缓存中的消息（排除当前消息），并去重
+        # 合并缓存消息
         cached_messages_to_merge = []
         if (
             chat_id in self.pending_messages_cache
             and len(self.pending_messages_cache[chat_id]) > 1
         ):
-            # 获取缓存中除了最后一条（当前消息）之外的所有消息
             cached_messages = self.pending_messages_cache[chat_id][:-1]
-
             if cached_messages and history_messages:
-                # 提取历史消息的内容集合（用于去重）
                 history_contents = set()
                 for msg in history_messages:
                     if isinstance(msg, dict) and "content" in msg:
                         history_contents.add(msg["content"])
 
-                # 过滤掉重复的缓存消息（优先保留历史消息）
                 for cached_msg in cached_messages:
                     if isinstance(cached_msg, dict) and "content" in cached_msg:
                         if cached_msg["content"] not in history_contents:
                             cached_messages_to_merge.append(cached_msg)
-                        elif self.debug_mode:
-                            logger.debug(
-                                f"  跳过重复缓存消息: {cached_msg['content'][:50]}..."
-                            )
-
-                if self.debug_mode:
-                    logger.debug(
-                        f"  去重前缓存: {len(cached_messages)} 条，去重后: {len(cached_messages_to_merge)} 条"
-                    )
             elif cached_messages:
-                # 如果没有历史消息，直接使用所有缓存
                 cached_messages_to_merge = cached_messages
 
-        # 合并去重后的缓存消息
         if cached_messages_to_merge:
             if history_messages is None:
                 history_messages = []
             history_messages.extend(cached_messages_to_merge)
-
             if self.debug_mode:
                 logger.debug(f"  合并缓存消息: {len(cached_messages_to_merge)} 条")
 
-        # 应用上下文数量限制
+        # 应用上下文限制
         if history_messages and max_context > 0 and len(history_messages) > max_context:
             history_messages = history_messages[-max_context:]
-            if self.debug_mode:
-                logger.debug(f"  应用上下文限制，截取最近 {max_context} 条")
 
         if self.debug_mode:
             logger.debug(
@@ -459,96 +470,33 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug(f"  格式化后长度: {len(formatted_context)} 字符")
 
-        # === 第9步: 决策AI判断(是否回复) ===
-        # @消息或触发关键词消息跳过这一步,直接回复
-        if not is_at_message and not has_trigger_keyword:
-            if self.debug_mode:
-                logger.debug("【步骤9】调用决策AI判断是否回复")
-                logger.debug(
-                    f"  决策AI提供商: {self.config.get('decision_ai_provider_id', '默认')}"
-                )
-                logger.debug(
-                    f"  决策AI超时: {self.config.get('decision_ai_timeout', 30)} 秒"
-                )
+        return True, original_message_text, message_text, formatted_context
 
-            should_reply = await DecisionAI.should_reply(
-                self.context,
-                event,  # 传入event以获取人格
-                formatted_context,
-                self.config.get("decision_ai_provider_id", ""),
-                self.config.get("decision_ai_extra_prompt", ""),
-                self.config.get("decision_ai_timeout", 30),
-            )
+    async def _generate_and_send_reply(
+        self,
+        event: AstrMessageEvent,
+        formatted_context: str,
+        message_text: str,
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+    ):
+        """
+        生成并发送回复，保存历史
 
-            if not should_reply:
-                logger.info("决策AI判断: 不应该回复此消息")
-                if self.debug_mode:
-                    logger.debug("【步骤9】决策AI返回NO,但保存缓存的用户消息")
-
-                # 虽然不回复，但将缓存的消息保存到自定义历史（避免上下文断裂）
-                try:
-                    if (
-                        chat_id in self.pending_messages_cache
-                        and self.pending_messages_cache[chat_id]
-                    ):
-                        # 保存当前缓存的最后一条消息（即本次用户消息）
-                        last_cached_msg = self.pending_messages_cache[chat_id][-1]
-                        await ContextManager.save_user_message(
-                            event,
-                            last_cached_msg["content"],
-                            None,  # 不保存到官方历史，只保存到自定义存储
-                        )
-                        logger.debug(f"已保存未回复的用户消息到自定义历史")
-
-                        # 注意：不清空缓存，下次触发时仍可使用
-                except Exception as e:
-                    logger.warning(f"保存未回复消息失败: {e}")
-
-                if self.debug_mode:
-                    logger.debug("=" * 60)
-                return
-
-            logger.info("决策AI判断: 应该回复此消息")
-            if self.debug_mode:
-                logger.debug("【步骤9】决策AI返回YES,继续处理")
-        else:
-            # 对于@消息或触发关键词消息,先检查是否已经被其他插件处理
-            if self.debug_mode:
-                if is_at_message:
-                    logger.debug("【步骤9】@消息,跳过决策AI")
-                if has_trigger_keyword:
-                    logger.debug("【步骤9】触发关键词消息,跳过决策AI")
-
-            if is_at_message and ReplyHandler.check_if_already_replied(event):
-                logger.info("@消息已被其他插件处理,跳过回复")
-                if self.debug_mode:
-                    logger.debug("【步骤9】@消息已被处理,退出")
-                    logger.debug("=" * 60)
-                return
-
-        # 标记本插件正在处理此会话（用于after_message_sent识别本插件的回复）
-        self.processing_sessions[chat_id] = True
-        if self.debug_mode:
-            logger.debug(f"  已标记会话 {chat_id} 为本插件处理中")
-
-        # === 第10步: 移除判断提示词(如果有) ===
-        # 决策AI的提示词已经在formatted_context中,但为了确保准确性,重新格式化消息
-        # 所以这里实际上已经自动移除了
-
-        # === 第11步: 注入记忆(如果启用) ===
+        Returns:
+            生成器，用于yield回复
+        """
+        # 注入记忆
         final_message = formatted_context
 
         if self.config.get("enable_memory_injection", False):
             if self.debug_mode:
                 logger.debug("【步骤11】注入记忆内容")
 
-            # 检查记忆插件是否可用
             if MemoryInjector.check_memory_plugin_available(self.context):
                 memories = await MemoryInjector.get_memories(self.context, event)
                 if memories:
-                    if self.debug_mode:
-                        logger.debug(f"  记忆内容预览: {memories[:200]}...")
-
                     final_message = MemoryInjector.inject_memories_to_message(
                         final_message, memories
                     )
@@ -556,18 +504,10 @@ class ChatPlus(Star):
                         logger.debug(
                             f"  已注入记忆,长度增加: {len(final_message) - len(formatted_context)} 字符"
                         )
-                else:
-                    logger.debug("未获取到记忆内容")
-                    if self.debug_mode:
-                        logger.debug("  记忆内容为空")
             else:
                 logger.warning("记忆插件未安装或不可用,跳过记忆注入")
-                if self.debug_mode:
-                    logger.debug("  记忆插件不可用")
-        elif self.debug_mode:
-            logger.debug("【步骤11】跳过记忆注入(未启用)")
 
-        # === 第12步: 注入工具信息(如果启用) ===
+        # 注入工具信息
         if self.config.get("enable_tools_reminder", False):
             if self.debug_mode:
                 logger.debug("【步骤12】注入工具信息")
@@ -576,15 +516,12 @@ class ChatPlus(Star):
             final_message = ToolsReminder.inject_tools_to_message(
                 final_message, self.context
             )
-
             if self.debug_mode:
                 logger.debug(
                     f"  已注入工具信息,长度增加: {len(final_message) - old_len} 字符"
                 )
-        elif self.debug_mode:
-            logger.debug("【步骤12】跳过工具信息注入(未启用)")
 
-        # === 第13步: 调用AI生成回复 ===
+        # 调用AI生成回复
         if self.debug_mode:
             logger.debug("【步骤13】调用AI生成回复")
             logger.debug(f"  最终消息长度: {len(final_message)} 字符")
@@ -599,8 +536,7 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug("【步骤13】AI回复生成完成")
 
-        # === 第14步: 保存用户消息（在发送回复之前）===
-        # 先保存用户消息到自定义存储
+        # 保存用户消息
         if self.debug_mode:
             logger.debug("【步骤14】保存用户消息")
 
@@ -614,19 +550,11 @@ class ChatPlus(Star):
         # 发送回复
         yield reply_result
 
-        # 注意：AI回复的保存将在 after_message_sent 钩子中进行
-        # 因为只有在消息发送后，event.result 才会被正确设置
-
-        # === 第15步: 调整读空气概率 ===
-        # AI已经回复,提升概率以促进连续对话
+        # 调整概率
         if self.debug_mode:
             logger.debug("【步骤15】调整读空气概率")
-            logger.debug(f"  新概率: {self.config.get('after_reply_probability', 0.8)}")
-            logger.debug(
-                f"  持续时间: {self.config.get('probability_duration', 300)}秒"
-            )
 
-        ProbabilityManager.boost_probability(
+        await ProbabilityManager.boost_probability(
             platform_name,
             is_private,
             chat_id,
@@ -640,6 +568,81 @@ class ChatPlus(Star):
             logger.debug("✓ 消息处理流程完成")
 
         logger.info("消息处理完成,已发送回复并保存历史")
+
+    async def _process_message(self, event: AstrMessageEvent):
+        """
+        消息处理主流程
+
+        协调各个子步骤完成消息处理
+
+        Args:
+            event: 消息事件对象
+        """
+        # 步骤1: 执行初始检查
+        (
+            should_continue,
+            platform_name,
+            is_private,
+            chat_id,
+        ) = await self._perform_initial_checks(event)
+        if not should_continue:
+            return
+
+        # 步骤2-4: 检查消息触发器
+        is_at_message, has_trigger_keyword = await self._check_message_triggers(event)
+
+        # 步骤5-8: 处理消息内容
+        result = await self._process_message_content(event, chat_id, is_at_message)
+        if not result[0]:  # should_continue为False
+            return
+
+        _, original_message_text, message_text, formatted_context = result
+
+        # 步骤9: 概率和AI决策判断
+        should_reply = await self._check_probability_and_ai_decision(
+            event,
+            platform_name,
+            is_private,
+            chat_id,
+            is_at_message,
+            has_trigger_keyword,
+            formatted_context,
+        )
+
+        if not should_reply:
+            # 不回复，但保存缓存的用户消息
+            if self.debug_mode:
+                logger.debug("【步骤9】决策AI返回NO,但保存缓存的用户消息")
+
+            try:
+                if (
+                    chat_id in self.pending_messages_cache
+                    and self.pending_messages_cache[chat_id]
+                ):
+                    last_cached_msg = self.pending_messages_cache[chat_id][-1]
+                    await ContextManager.save_user_message(
+                        event,
+                        last_cached_msg["content"],
+                        None,
+                    )
+                    logger.debug(f"已保存未回复的用户消息到自定义历史")
+            except Exception as e:
+                logger.warning(f"保存未回复消息失败: {e}")
+
+            if self.debug_mode:
+                logger.debug("=" * 60)
+            return
+
+        # 标记本插件正在处理此会话
+        self.processing_sessions[chat_id] = True
+        if self.debug_mode:
+            logger.debug(f"  已标记会话 {chat_id} 为本插件处理中")
+
+        # 步骤10-15: 生成并发送回复
+        async for result in self._generate_and_send_reply(
+            event, formatted_context, message_text, platform_name, is_private, chat_id
+        ):
+            yield result
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
@@ -722,32 +725,46 @@ class ChatPlus(Star):
                 logger.warning("[消息发送后] 无法获取用户消息，跳过官方保存")
                 return
 
-            # 如果有图片描述，融合到消息中
+            # 如果有图片描述，使用图片描述作为消息内容
+            # 图片描述已经包含了原始文本和图片说明，无需手动替换
             if image_desc:
-                # 图片描述替换原始消息部分
                 # image_desc 已经是完整的处理后消息（包含原文+图片描述）
-                # 需要用 image_desc 替换 message_to_save 中的原始消息部分
-                # 保留元数据部分（时间戳和发送者信息）
+                # 由于缓存中已经包含元数据，我们需要提取并保留元数据
+                # 然后用图片描述替换消息主体部分
 
-                # 提取元数据前缀（时间戳+发送者信息）
-                original_msg_in_cache = event.get_message_outline()
+                # 尝试从 message_to_save 中提取元数据前缀
+                # 元数据格式通常是: [时间] [发送者] 消息内容
+                # 我们需要找到元数据结束的位置
 
-                # 找到原始消息在 message_to_save 中的位置
-                if original_msg_in_cache in message_to_save:
-                    # 替换原始消息为图片描述消息
-                    message_to_save = message_to_save.replace(
-                        original_msg_in_cache, image_desc
+                # 查找第二个 ] 之后的第一个空格（假设有时间戳和发送者两个元数据）
+                first_bracket_end = message_to_save.find("]")
+                if first_bracket_end != -1:
+                    second_bracket_end = message_to_save.find(
+                        "]", first_bracket_end + 1
                     )
-                    if self.debug_mode:
-                        logger.debug(
-                            f"[消息发送后] 已融合图片描述，最终长度: {len(message_to_save)} 字符"
-                        )
+                    if second_bracket_end != -1:
+                        # 找到了两个括号，元数据应该在这之后
+                        metadata_end = message_to_save.find(" ", second_bracket_end)
+                        if metadata_end != -1:
+                            # 提取元数据前缀并拼接图片描述
+                            metadata_prefix = message_to_save[: metadata_end + 1]
+                            message_to_save = metadata_prefix + image_desc
+                            if self.debug_mode:
+                                logger.debug(
+                                    f"[消息发送后] 已融合图片描述（保留元数据），最终长度: {len(message_to_save)} 字符"
+                                )
+                        else:
+                            # 没找到空格分隔符，直接使用图片描述
+                            message_to_save = image_desc
+                    else:
+                        # 只有一个括号，直接使用图片描述
+                        message_to_save = image_desc
                 else:
-                    # 如果找不到（不应该发生），直接在后面追加
-                    message_to_save = message_to_save + "\n" + image_desc
+                    # 没有元数据格式，直接使用图片描述
+                    message_to_save = image_desc
                     if self.debug_mode:
                         logger.debug(
-                            f"[消息发送后] 追加图片描述，最终长度: {len(message_to_save)} 字符"
+                            f"[消息发送后] 使用图片描述（无元数据），长度: {len(message_to_save)} 字符"
                         )
 
             if self.debug_mode:
@@ -777,44 +794,43 @@ class ChatPlus(Star):
                             and cached_msg["image_description"]
                         ):
                             # 有图片描述，需要融合
-                            # 注意：cached_msg['content'] 是带元数据的原始消息
+                            # cached_msg['content'] 是带元数据的原始消息
                             # cached_msg['image_description'] 是处理后的完整消息（包含原文+图片描述）
-                            # 我们需要用图片描述替换原始消息部分
+                            # 我们需要用图片描述替换消息主体部分，保留元数据
 
-                            # 简化处理：直接用元数据前缀 + 图片描述
-                            # 从 msg_content 提取元数据前缀（时间戳+发送者信息）
-                            # 然后拼接图片描述
-
-                            # 由于无法从缓存中获取原始的 event，简化处理：
-                            # 直接保存图片描述（已包含原文），添加到content后
-                            # 或者替换策略：找到原始消息部分并替换
-
-                            # 更简单的方法：保存时直接用 image_description
-                            # 但要保留元数据（时间戳和发送者信息）
-                            # 假设元数据格式： [时间] [发送者] 原始消息
-                            # 需要保留 [时间] [发送者] 部分，替换后面的内容
-
-                            # 查找最后一个 ] 的位置作为元数据结束标记
-                            last_bracket = msg_content.rfind("]")
-                            if last_bracket != -1:
-                                # 提取元数据部分（到最后一个]后面的空格）
-                                metadata_end = msg_content.find(" ", last_bracket)
-                                if metadata_end != -1:
-                                    metadata_prefix = msg_content[: metadata_end + 1]
-                                    # 拼接元数据 + 图片描述
-                                    msg_content = (
-                                        metadata_prefix
-                                        + cached_msg["image_description"]
+                            # 尝试提取元数据前缀
+                            # 元数据格式通常是: [时间] [发送者] 消息内容
+                            first_bracket_end = msg_content.find("]")
+                            if first_bracket_end != -1:
+                                second_bracket_end = msg_content.find(
+                                    "]", first_bracket_end + 1
+                                )
+                                if second_bracket_end != -1:
+                                    # 找到了两个括号，提取元数据
+                                    metadata_end = msg_content.find(
+                                        " ", second_bracket_end
                                     )
-                                    if self.debug_mode:
-                                        logger.debug(
-                                            f"[消息发送后] 缓存消息融合图片描述"
+                                    if metadata_end != -1:
+                                        # 提取元数据前缀并拼接图片描述
+                                        metadata_prefix = msg_content[
+                                            : metadata_end + 1
+                                        ]
+                                        msg_content = (
+                                            metadata_prefix
+                                            + cached_msg["image_description"]
                                         )
+                                        if self.debug_mode:
+                                            logger.debug(
+                                                f"[消息发送后] 缓存消息融合图片描述（保留元数据）"
+                                            )
+                                    else:
+                                        # 没找到空格，直接使用图片描述
+                                        msg_content = cached_msg["image_description"]
                                 else:
-                                    # 没找到空格，直接用图片描述
+                                    # 只有一个括号，直接使用图片描述
                                     msg_content = cached_msg["image_description"]
                             else:
-                                # 没找到]，说明没有元数据，直接用图片描述
+                                # 没有元数据格式，直接使用图片描述
                                 msg_content = cached_msg["image_description"]
 
                         # 添加到转正列表
@@ -912,7 +928,7 @@ class ChatPlus(Star):
             logger.debug(f"群组 {group_id} 未在启用列表中")
             return False
 
-    def _check_probability(
+    async def _check_probability(
         self, platform_name: str, is_private: bool, chat_id: str
     ) -> bool:
         """
@@ -927,7 +943,7 @@ class ChatPlus(Star):
             True=处理，False=跳过
         """
         # 获取当前概率
-        current_probability = ProbabilityManager.get_current_probability(
+        current_probability = await ProbabilityManager.get_current_probability(
             platform_name,
             is_private,
             chat_id,

@@ -165,6 +165,26 @@ class ImageHandler:
         return has_image, has_text, image_components
 
     @staticmethod
+    def _format_special_component(component: BaseMessageComponent) -> str:
+        """
+        格式化特殊消息组件为文本表示
+
+        Args:
+            component: 消息组件
+
+        Returns:
+            格式化后的文本，如果不是特殊组件返回空字符串
+        """
+        from astrbot.api.message_components import Face, At
+
+        if isinstance(component, Face):
+            return f"[表情:{component.id}]"
+        elif isinstance(component, At):
+            return f"[At:{component.qq}]"
+        else:
+            return ""
+
+    @staticmethod
     def _extract_text_only(message_chain: List[BaseMessageComponent]) -> str:
         """
         从消息链提取纯文字，过滤图片
@@ -185,13 +205,9 @@ class ImageHandler:
                 continue
             else:
                 # 其他类型的组件,尝试转为文本表示
-                # 例如表情、@等
-                from astrbot.api.message_components import Face, At
-
-                if isinstance(component, Face):
-                    text_parts.append(f"[表情:{component.id}]")
-                elif isinstance(component, At):
-                    text_parts.append(f"[At:{component.qq}]")
+                formatted = ImageHandler._format_special_component(component)
+                if formatted:
+                    text_parts.append(formatted)
 
         return "".join(text_parts)
 
@@ -284,13 +300,10 @@ class ImageHandler:
                     else:
                         result_parts.append("[图片]")
                 else:
-                    # 其他组件保持原样
-                    from astrbot.api.message_components import Face, At
-
-                    if isinstance(component, Face):
-                        result_parts.append(f"[表情:{component.id}]")
-                    elif isinstance(component, At):
-                        result_parts.append(f"[At:{component.qq}]")
+                    # 其他组件使用统一的格式化方法
+                    formatted = ImageHandler._format_special_component(component)
+                    if formatted:
+                        result_parts.append(formatted)
 
             result_text = "".join(result_parts)
             logger.info(f"图片转文字完成,处理后的消息: {result_text[:100]}...")

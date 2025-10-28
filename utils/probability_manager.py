@@ -7,7 +7,7 @@
 """
 
 import time
-import threading
+import asyncio
 from typing import Dict, Any
 from astrbot.api.all import *
 
@@ -25,7 +25,7 @@ class ProbabilityManager:
     # 使用字典保存每个聊天的概率状态
     # 格式: {chat_key: {"probability": float, "boosted_until": timestamp}}
     _probability_status: Dict[str, Dict[str, Any]] = {}
-    _lock = threading.Lock()  # 线程安全锁
+    _lock = asyncio.Lock()  # 异步锁
 
     @staticmethod
     def get_chat_key(platform_name: str, is_private: bool, chat_id: str) -> str:
@@ -44,7 +44,7 @@ class ProbabilityManager:
         return f"{platform_name}_{chat_type}_{chat_id}"
 
     @staticmethod
-    def get_current_probability(
+    async def get_current_probability(
         platform_name: str, is_private: bool, chat_id: str, initial_probability: float
     ) -> float:
         """
@@ -64,7 +64,7 @@ class ProbabilityManager:
         chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
         current_time = time.time()
 
-        with ProbabilityManager._lock:
+        async with ProbabilityManager._lock:
             # 如果该聊天没有记录,返回初始概率
             if chat_key not in ProbabilityManager._probability_status:
                 return initial_probability
@@ -87,7 +87,7 @@ class ProbabilityManager:
                 return initial_probability
 
     @staticmethod
-    def boost_probability(
+    async def boost_probability(
         platform_name: str,
         is_private: bool,
         chat_id: str,
@@ -110,7 +110,7 @@ class ProbabilityManager:
         current_time = time.time()
         boosted_until = current_time + duration
 
-        with ProbabilityManager._lock:
+        async with ProbabilityManager._lock:
             ProbabilityManager._probability_status[chat_key] = {
                 "probability": boosted_probability,
                 "boosted_until": boosted_until,
@@ -122,7 +122,9 @@ class ProbabilityManager:
         )
 
     @staticmethod
-    def reset_probability(platform_name: str, is_private: bool, chat_id: str) -> None:
+    async def reset_probability(
+        platform_name: str, is_private: bool, chat_id: str
+    ) -> None:
         """
         重置概率状态
 
@@ -135,7 +137,7 @@ class ProbabilityManager:
         """
         chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
 
-        with ProbabilityManager._lock:
+        async with ProbabilityManager._lock:
             if chat_key in ProbabilityManager._probability_status:
                 del ProbabilityManager._probability_status[chat_key]
                 logger.debug(f"会话 {chat_key} 概率状态已重置")

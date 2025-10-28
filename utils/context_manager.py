@@ -13,10 +13,9 @@
 版本: v1.0.0
 """
 
-from typing import List
+from typing import List, Dict, Any, Optional
 from astrbot.api.all import *
 import os
-import jsonpickle
 import json
 from datetime import datetime
 
@@ -35,14 +34,126 @@ class ContextManager:
     base_storage_path = None
 
     @staticmethod
-    def init():
-        """初始化上下文管理器，创建存储目录"""
-        ContextManager.base_storage_path = os.path.join(
-            os.getcwd(), "data", "chat_history"
-        )
+    def init(data_dir: Optional[str] = None):
+        """
+        初始化上下文管理器，创建存储目录
+
+        Args:
+            data_dir: 数据目录路径，如果为None则使用默认路径
+        """
+        if data_dir:
+            # 使用插件提供的数据目录
+            ContextManager.base_storage_path = os.path.join(data_dir, "chat_history")
+        else:
+            # 向后兼容：使用旧的硬编码路径
+            ContextManager.base_storage_path = os.path.join(
+                os.getcwd(), "data", "chat_history"
+            )
+
         if not os.path.exists(ContextManager.base_storage_path):
             os.makedirs(ContextManager.base_storage_path, exist_ok=True)
             logger.info(f"上下文存储路径初始化: {ContextManager.base_storage_path}")
+
+    @staticmethod
+    def _message_to_dict(msg: AstrBotMessage) -> Dict[str, Any]:
+        """
+        将 AstrBotMessage 对象转换为可JSON序列化的字典
+
+        Args:
+            msg: AstrBotMessage 对象
+
+        Returns:
+            字典表示
+        """
+        try:
+            msg_dict = {
+                "message_str": msg.message_str if hasattr(msg, "message_str") else "",
+                "platform_name": msg.platform_name
+                if hasattr(msg, "platform_name")
+                else "",
+                "timestamp": msg.timestamp if hasattr(msg, "timestamp") else 0,
+                "type": msg.type.value
+                if hasattr(msg, "type") and hasattr(msg.type, "value")
+                else "OtherMessage",
+                "group_id": msg.group_id if hasattr(msg, "group_id") else None,
+                "self_id": msg.self_id if hasattr(msg, "self_id") else "",
+                "session_id": msg.session_id if hasattr(msg, "session_id") else "",
+                "message_id": msg.message_id if hasattr(msg, "message_id") else "",
+            }
+
+            # 处理发送者信息
+            if hasattr(msg, "sender") and msg.sender:
+                msg_dict["sender"] = {
+                    "user_id": msg.sender.user_id
+                    if hasattr(msg.sender, "user_id")
+                    else "",
+                    "nickname": msg.sender.nickname
+                    if hasattr(msg.sender, "nickname")
+                    else "",
+                }
+            else:
+                msg_dict["sender"] = None
+
+            return msg_dict
+        except Exception as e:
+            logger.error(f"转换消息对象为字典失败: {e}")
+            # 返回最小字典
+            return {"message_str": "", "timestamp": 0}
+
+    @staticmethod
+    def _dict_to_message(msg_dict: Dict[str, Any]) -> AstrBotMessage:
+        """
+        将字典转换回 AstrBotMessage 对象
+
+        Args:
+            msg_dict: 消息字典
+
+        Returns:
+            AstrBotMessage 对象
+        """
+        try:
+            msg = AstrBotMessage()
+            msg.message_str = msg_dict.get("message_str", "")
+            msg.platform_name = msg_dict.get("platform_name", "")
+            msg.timestamp = msg_dict.get("timestamp", 0)
+
+            # 处理消息类型
+            # MessageType 是字符串枚举，值如 "GroupMessage", "FriendMessage", "OtherMessage"
+            msg_type = msg_dict.get("type", "OtherMessage")
+            if isinstance(msg_type, str):
+                # 从字符串值创建枚举
+                msg.type = MessageType(msg_type)
+            elif isinstance(msg_type, int):
+                # 兼容旧格式：如果是整数，映射到对应的类型
+                # 这是为了处理可能存在的旧数据
+                type_map = {
+                    0: MessageType.OTHER_MESSAGE,
+                    1: MessageType.GROUP_MESSAGE,
+                    2: MessageType.FRIEND_MESSAGE,
+                }
+                msg.type = type_map.get(msg_type, MessageType.OTHER_MESSAGE)
+            else:
+                # 如果已经是 MessageType 对象，直接使用
+                msg.type = msg_type
+
+            msg.group_id = msg_dict.get("group_id")
+            msg.self_id = msg_dict.get("self_id", "")
+            msg.session_id = msg_dict.get("session_id", "")
+            msg.message_id = msg_dict.get("message_id", "")
+
+            # 处理发送者信息
+            sender_dict = msg_dict.get("sender")
+            if sender_dict:
+                msg.sender = MessageMember(
+                    user_id=sender_dict.get("user_id", ""),
+                    nickname=sender_dict.get("nickname", ""),
+                )
+
+            return msg
+        except Exception as e:
+            logger.error(f"从字典转换为消息对象失败: {e}")
+            # 返回空消息对象
+            return AstrBotMessage()
 
     @staticmethod
     def _get_storage_path(platform_name: str, is_private: bool, chat_id: str) -> str:
@@ -111,11 +222,17 @@ class ContextManager:
                 logger.debug(f"历史消息文件不存在: {file_path}")
                 return []
 
+            # 使用安全的JSON反序列化
             with open(file_path, "r", encoding="utf-8") as f:
-                history = jsonpickle.decode(f.read())
+                history_dicts = json.load(f)
 
-            if not history:
+            if not history_dicts:
                 return []
+
+            # 将字典列表转换为 AstrBotMessage 对象列表
+            history = [
+                ContextManager._dict_to_message(msg_dict) for msg_dict in history_dicts
+            ]
 
             # 如果配置为-1,返回所有历史消息
             if max_messages == -1:
@@ -298,11 +415,11 @@ class ContextManager:
             if len(history) > 200:
                 history = history[-200:]
 
-            # 保存到自定义文件
+            # 保存到自定义文件（使用安全的JSON序列化）
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            json_data = jsonpickle.encode(history, unpicklable=True)
+            history_dicts = [ContextManager._message_to_dict(msg) for msg in history]
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(json_data)
+                json.dump(history_dicts, f, ensure_ascii=False, indent=2)
 
             logger.debug(f"用户消息已保存到自定义历史记录")
 
@@ -454,11 +571,11 @@ class ContextManager:
             if len(history) > 200:
                 history = history[-200:]
 
-            # 保存到自定义文件
+            # 保存到自定义文件（使用安全的JSON序列化）
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            json_data = jsonpickle.encode(history, unpicklable=True)
+            history_dicts = [ContextManager._message_to_dict(msg) for msg in history]
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(json_data)
+                json.dump(history_dicts, f, ensure_ascii=False, indent=2)
 
             logger.debug(f"AI回复消息已保存到自定义历史记录")
 
