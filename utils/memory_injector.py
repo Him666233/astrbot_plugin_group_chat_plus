@@ -1,0 +1,136 @@
+"""
+记忆注入器模块
+负责调用记忆插件获取长期记忆内容
+
+作者: Him666233
+版本: v1.0.0
+"""
+
+from typing import Optional
+from astrbot.api.all import *
+
+
+class MemoryInjector:
+    """
+    记忆注入器
+    
+    主要功能：
+    1. 检测记忆插件（strbot_plugin_play_sy）是否可用
+    2. 调用记忆插件的get_memories工具
+    3. 将记忆内容注入到消息中
+    """
+    
+    @staticmethod
+    def check_memory_plugin_available(context: Context) -> bool:
+        """
+        检查记忆插件是否可用
+        
+        通过检查get_memories工具是否注册来判断
+        
+        Args:
+            context: Context对象
+            
+        Returns:
+            True=可用，False=不可用
+        """
+        try:
+            # 获取LLM工具管理器
+            tool_manager = context.get_llm_tool_manager()
+            if not tool_manager:
+                logger.debug("无法获取LLM工具管理器")
+                return False
+            
+            # 检查是否有get_memories工具
+            get_memories_tool = tool_manager.get_func("get_memories")
+            if get_memories_tool:
+                logger.debug("检测到记忆插件已安装(找到get_memories工具)")
+                return True
+            
+            logger.debug("未检测到记忆插件(未找到get_memories工具)")
+            return False
+            
+        except Exception as e:
+            logger.error(f"检查记忆插件时发生错误: {e}")
+            return False
+    
+    @staticmethod
+    async def get_memories(
+        context: Context,
+        event: AstrMessageEvent
+    ) -> Optional[str]:
+        """
+        调用记忆插件获取记忆内容
+        
+        通过get_memories工具函数获取长期记忆
+        
+        Args:
+            context: Context对象
+            event: 消息事件
+            
+        Returns:
+            记忆文本，失败返回None
+        """
+        try:
+            # 获取LLM工具管理器
+            tool_manager = context.get_llm_tool_manager()
+            if not tool_manager:
+                logger.warning("无法获取LLM工具管理器")
+                return None
+            
+            # 使用get_func方法查找get_memories工具
+            get_memories_tool = tool_manager.get_func("get_memories")
+            
+            if not get_memories_tool:
+                logger.warning("未找到get_memories工具,可能记忆插件未正确注册")
+                return None
+            
+            logger.debug("正在调用记忆插件获取记忆...")
+            
+            # 调用工具函数
+            # get_memories工具只接受event参数,不接受context参数
+            # 工具的handler在handler属性中
+            if hasattr(get_memories_tool, 'handler'):
+                memory_result = await get_memories_tool.handler(event=event)
+            else:
+                logger.warning("get_memories工具没有handler属性")
+                return None
+            
+            if memory_result and isinstance(memory_result, str):
+                logger.info(f"成功获取记忆: {len(memory_result)} 字符")
+                # 详细日志：显示实际获取到的记忆内容
+                logger.debug(f"获取到的记忆内容:\n{memory_result}")
+                return memory_result
+            else:
+                logger.debug("记忆插件返回空内容或无记忆")
+                return "当前没有任何记忆。"
+            
+        except Exception as e:
+            logger.error(f"获取记忆时发生错误: {e}")
+            return None
+    
+    @staticmethod
+    def inject_memories_to_message(
+        original_message: str,
+        memories: str
+    ) -> str:
+        """
+        将记忆内容注入到消息
+        
+        Args:
+            original_message: 原始消息（含上下文）
+            memories: 记忆内容
+            
+        Returns:
+            注入记忆后的文本
+        """
+        if not memories or not memories.strip():
+            logger.debug("没有记忆内容需要注入")
+            return original_message
+        
+        # 在消息末尾添加记忆部分
+        injected_message = original_message + "\n\n=== 你的长期记忆 ===\n" + memories
+        injected_message += "\n\n(以上是你之前保存的重要记忆,请在回复时参考这些记忆)"
+        
+        logger.debug("记忆已注入到消息中")
+        return injected_message
+

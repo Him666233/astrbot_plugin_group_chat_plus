@@ -1,0 +1,123 @@
+{
+    "initial_probability": {
+        "description": "初始读空气概率",
+        "type": "float",
+        "hint": "AI初始判断是否回复消息的概率，范围0-1，如0.1表示10%概率触发读空气判断",
+        "default": 0.3
+    },
+    "after_reply_probability": {
+        "description": "回复后的读空气概率",
+        "type": "float",
+        "hint": "AI回复消息后，临时提升的读空气概率，范围0-1",
+        "default": 0.8
+    },
+    "probability_duration": {
+        "description": "概率提升持续时间(秒)",
+        "type": "int",
+        "hint": "AI回复后，提升的概率持续多长时间(秒)，超过后恢复为初始概率",
+        "default": 120
+    },
+    "decision_ai_provider_id": {
+        "description": "读空气AI提供商ID",
+        "type": "string",
+        "hint": "用于判断是否回复的AI提供商ID，留空则使用默认提供商",
+        "default": ""
+    },
+    "include_timestamp": {
+        "description": "包含时间戳信息",
+        "type": "bool",
+        "hint": "是否在消息前插入发送时间(年月日时分秒)",
+        "default": true
+    },
+    "include_sender_info": {
+        "description": "包含发送者信息",
+        "type": "bool",
+        "hint": "是否在消息前插入发送者ID和名字",
+        "default": true
+    },
+    "decision_ai_extra_prompt": {
+        "description": "读空气AI额外提示词",
+        "type": "string",
+        "hint": "给判断是否回复的AI添加的自定义提示词，留空使用默认积极模式(如果没有把握，建议留空)",
+        "default": ""
+    },
+    "reply_ai_extra_prompt": {
+        "description": "回复AI额外提示词",
+        "type": "string",
+        "hint": "给最终回复消息的AI添加的自定义提示词",
+        "default": ""
+    },
+    "enable_tools_reminder": {
+        "description": "启用工具提醒",
+        "type": "bool",
+        "hint": "是否提示AI当前可用的所有工具",
+        "default": false
+    },
+    "enable_image_processing": {
+        "description": "允许处理图片",
+        "type": "bool",
+        "hint": "是否允许AI回复包含图片的消息",
+        "default": false
+    },
+    "image_to_text_scope": {
+        "description": "图片转文字应用范围",
+        "type": "string",
+        "hint": "选择图片转文字功能的应用范围：all=对所有消息适用；mention_only=只对@机器人的消息适用（非@消息中的图片会被过滤）(建议调为mention_only模式，避免API被频繁调用)",
+        "default": "all"
+    },
+    "image_to_text_provider_id": {
+        "description": "图片转文字AI提供商ID",
+        "type": "string",
+        "hint": "用于图片转文字的AI提供商ID，留空则直接传递图片，请确认接下来的读空气AI和最终回复决定的AI(也就是你在平台设置的默认回复用的AI)都是多模态AI",
+        "default": ""
+    },
+    "image_to_text_prompt": {
+        "description": "图片转文字提示词",
+        "type": "string",
+        "hint": "图片转文字时使用的提示词",
+        "default": "请详细描述这张图片的内容"
+    },
+    "image_to_text_timeout": {
+        "description": "图片转文字超时时间(秒)",
+        "type": "int",
+        "hint": "图片转文字AI调用的超时时间(秒)，超过此时间将放弃转换。建议根据你的AI提供商速度调整，默认60秒",
+        "default": 60
+    },
+    "enable_memory_injection": {
+        "description": "启用强制记忆植入",
+        "type": "bool",
+        "hint": "是否强制调用strbot_plugin_play_sy(又叫：ai_memory)插件获取记忆(需要先安装该插件)(推荐开启)",
+        "default": false
+    },
+    "max_context_messages": {
+        "description": "最大上下文消息数",
+        "type": "int",
+        "hint": "最多获取多少条历史消息作为上下文，0表示不获取，-1表示不限制",
+        "default": -1
+    },
+    "enabled_groups": {
+        "description": "启用的群组列表",
+        "type": "list",
+        "hint": "在哪些群组中启用此插件。留空则在所有群聊中启用；填写群号则只在指定群组中启用",
+        "default": []
+    },
+    "enable_debug_log": {
+        "description": "启用详细日志",
+        "type": "bool",
+        "hint": "开启后会输出更多详细的调试日志，便于排查问题和了解插件运行状态",
+        "default": false
+    },
+    "trigger_keywords": {
+        "description": "触发关键词列表",
+        "type": "list",
+        "hint": "当消息中包含这些关键词时，将跳过读空气判断，直接触发AI回复。留空则不启用该功能",
+        "default": []
+    },
+    "blacklist_keywords": {
+        "description": "黑名单关键词列表",
+        "type": "list",
+        "hint": "当消息中包含这些关键词时，将直接忽略该消息，不进行任何处理。留空则不启用该功能",
+        "default": []
+    }
+}
+
