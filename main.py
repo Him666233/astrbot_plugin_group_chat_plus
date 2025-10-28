@@ -220,21 +220,19 @@ class ChatPlus(Star):
 
         return is_at_message, has_trigger_keyword
 
-    async def _check_probability_and_ai_decision(
+    async def _check_probability_before_processing(
         self,
-        event: AstrMessageEvent,
         platform_name: str,
         is_private: bool,
         chat_id: str,
         is_at_message: bool,
         has_trigger_keyword: bool,
-        formatted_context: str,
     ) -> bool:
         """
-        执行概率判断和AI决策
+        执行概率判断（在图片处理之前）
 
         Returns:
-            True=应该回复, False=不回复
+            True=继续处理, False=丢弃消息
         """
         # @消息或触发关键词消息跳过概率判断
         if not is_at_message and not has_trigger_keyword:
@@ -255,7 +253,35 @@ class ChatPlus(Star):
             logger.debug("读空气概率判断: 决定处理此消息")
             if self.debug_mode:
                 logger.debug("【步骤5】概率判断通过,继续处理")
+        else:
+            # @消息或触发关键词，跳过概率判断
+            if is_at_message:
+                logger.info("检测到@消息,跳过概率判断")
+                if self.debug_mode:
+                    logger.debug("【步骤5】@消息,跳过概率判断,必定处理")
 
+            if has_trigger_keyword:
+                logger.info("检测到触发关键词,跳过概率判断")
+                if self.debug_mode:
+                    logger.debug("【步骤5】触发关键词消息,跳过概率判断,必定处理")
+
+        return True
+
+    async def _check_ai_decision(
+        self,
+        event: AstrMessageEvent,
+        formatted_context: str,
+        is_at_message: bool,
+        has_trigger_keyword: bool,
+    ) -> bool:
+        """
+        执行AI决策判断（在处理完消息内容后）
+
+        Returns:
+            True=应该回复, False=不回复
+        """
+        # @消息或触发关键词消息跳过AI决策判断
+        if not is_at_message and not has_trigger_keyword:
             # 决策AI判断
             if self.debug_mode:
                 logger.debug("【步骤9】调用决策AI判断是否回复")
@@ -276,13 +302,8 @@ class ChatPlus(Star):
             logger.info("决策AI判断: 应该回复此消息")
             return True
         else:
-            # @消息或触发关键词，跳过判断
+            # @消息，检查是否已被其他插件处理
             if is_at_message:
-                logger.info("检测到@消息,跳过概率判断")
-                if self.debug_mode:
-                    logger.debug("【步骤5】@消息,跳过概率判断,必定处理")
-
-                # 检查是否已被其他插件处理
                 if ReplyHandler.check_if_already_replied(event):
                     logger.info("@消息已被其他插件处理,跳过回复")
                     if self.debug_mode:
@@ -290,10 +311,9 @@ class ChatPlus(Star):
                         logger.debug("=" * 60)
                     return False
 
-            if has_trigger_keyword:
-                logger.info("检测到触发关键词,跳过概率判断")
-                if self.debug_mode:
-                    logger.debug("【步骤5】触发关键词消息,跳过概率判断,必定处理")
+            # @消息或触发关键词，必定回复
+            if self.debug_mode:
+                logger.debug("【步骤9】@消息或触发关键词,跳过AI决策,必定回复")
 
             return True
 
@@ -575,10 +595,14 @@ class ChatPlus(Star):
 
         协调各个子步骤完成消息处理
 
+        流程优化说明：
+        - 概率判断在最前面，快速过滤不需要处理的消息
+        - 避免对不需要处理的消息进行图片识别等耗时操作
+
         Args:
             event: 消息事件对象
         """
-        # 步骤1: 执行初始检查
+        # 步骤1: 执行初始检查（最基本的过滤）
         (
             should_continue,
             platform_name,
@@ -588,25 +612,26 @@ class ChatPlus(Star):
         if not should_continue:
             return
 
-        # 步骤2-4: 检查消息触发器
+        # 步骤2: 检查消息触发器（决定是否跳过概率判断）
         is_at_message, has_trigger_keyword = await self._check_message_triggers(event)
 
-        # 步骤5-8: 处理消息内容
+        # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
+        should_process = await self._check_probability_before_processing(
+            platform_name, is_private, chat_id, is_at_message, has_trigger_keyword
+        )
+        if not should_process:
+            return
+
+        # 步骤4-6: 处理消息内容（图片处理等耗时操作）
         result = await self._process_message_content(event, chat_id, is_at_message)
         if not result[0]:  # should_continue为False
             return
 
         _, original_message_text, message_text, formatted_context = result
 
-        # 步骤9: 概率和AI决策判断
-        should_reply = await self._check_probability_and_ai_decision(
-            event,
-            platform_name,
-            is_private,
-            chat_id,
-            is_at_message,
-            has_trigger_keyword,
-            formatted_context,
+        # 步骤7: AI决策判断（第二道核心过滤）
+        should_reply = await self._check_ai_decision(
+            event, formatted_context, is_at_message, has_trigger_keyword
         )
 
         if not should_reply:
