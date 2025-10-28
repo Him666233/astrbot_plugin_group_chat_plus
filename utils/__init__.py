@@ -25,6 +25,5 @@ __all__ = [
     "ReplyHandler",
     "MemoryInjector",
     "ToolsReminder",
-    "KeywordChecker"
+    "KeywordChecker",
 ]
-

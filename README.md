@@ -121,6 +121,7 @@
   "initial_probability": 0.3,
   "after_reply_probability": 0.8,
   "probability_duration": 120,
+  "decision_ai_timeout": 30,
   "max_context_messages": -1,
   "include_timestamp": true,
   "include_sender_info": true,
@@ -149,6 +150,7 @@
 |--------|------|--------|------|
 | `decision_ai_provider_id` | string | "" | **读空气AI提供商ID**<br>用于判断是否回复的AI，留空使用默认<br>建议: 使用轻量快速的模型 |
 | `decision_ai_extra_prompt` | string | "" | **读空气AI额外提示词**<br>自定义判断逻辑，留空使用默认积极模式 |
+| `decision_ai_timeout` | int | 30 | **读空气AI超时时间（秒）**<br>AI判断的超时时间，超时将默认不回复<br>• 快速AI: 20-30秒<br>• 较慢AI: 40-60秒 |
 | `reply_ai_extra_prompt` | string | "" | **回复AI额外提示词**<br>自定义回复风格 |
 
 #### 📝 消息元数据
@@ -273,9 +275,10 @@
     │   └─ ✅ 是 → 跳过决策AI
     └─ ❌ 否 → 调用决策AI
         ├─ 构建完整提示词（含人格+上下文）
-        ├─ 调用AI判断（30秒超时）
+        ├─ 调用AI判断（使用配置的超时时间 decision_ai_timeout）
         └─ 解析yes/no结果
-            ├─ ❌ no → 保存用户消息到自定义历史，退出
+            ├─ 超时 → 默认不回复，将消息保存到缓存中后退出
+            ├─ ❌ no → 保存用户消息到缓存中，退出
             └─ ✅ yes → 继续
     ↓
 【步骤10】标记会话
@@ -627,14 +630,15 @@
 <details>
 <summary><b>Q10: 决策AI超时怎么办？</b></summary>
 
-**A**: 插件有30秒超时保护：
+**A**: 插件有超时保护机制：
 
 - 超时后默认判定为"不回复"
 - 不会卡住或影响其他消息
-- 如果经常超时，建议：
-  - 更换更快的AI模型
-  - 减少 `max_context_messages` 降低输入长度
-  - 检查AI服务的响应速度
+- 如果经常超时，可以：
+  - **调整超时时间**: 增加 `decision_ai_timeout` 配置值（默认30秒）
+  - **更换AI模型**: 使用更快的AI提供商
+  - **减少上下文**: 降低 `max_context_messages` 减少输入长度
+  - **检查网络**: 确认AI服务的响应速度正常
 </details>
 
 ---

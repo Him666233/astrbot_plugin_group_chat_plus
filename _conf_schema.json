@@ -41,6 +41,12 @@
         "hint": "给判断是否回复的AI添加的自定义提示词，留空使用默认积极模式(如果没有把握，建议留空)",
         "default": ""
     },
+    "decision_ai_timeout": {
+        "description": "读空气AI超时时间(秒)",
+        "type": "int",
+        "hint": "读空气AI判断的超时时间(秒)，超过此时间将默认不回复。建议根据你的AI提供商速度调整，默认30秒",
+        "default": 30
+    },
     "reply_ai_extra_prompt": {
         "description": "回复AI额外提示词",
         "type": "string",

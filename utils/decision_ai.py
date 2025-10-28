@@ -13,13 +13,13 @@ from astrbot.api.all import *
 class DecisionAI:
     """
     决策AI，负责读空气判断
-    
+
     主要功能：
     1. 构建判断提示词
     2. 调用AI分析是否应该回复
     3. 解析yes/no结果
     """
-    
+
     # 系统判断提示词模板（积极参与模式）
     SYSTEM_DECISION_PROMPT = """
 你是一个活跃、友好的群聊参与者，请判断是否回复当前这条新消息。
@@ -51,25 +51,27 @@ class DecisionAI:
 
 请开始判断：
 """
-    
+
     @staticmethod
     async def should_reply(
         context: Context,
         event: AstrMessageEvent,
         formatted_message: str,
         provider_id: str,
-        extra_prompt: str
+        extra_prompt: str,
+        timeout: int = 30,
     ) -> bool:
         """
         调用AI判断是否应该回复
-        
+
         Args:
             context: Context对象
             event: 消息事件
             formatted_message: 格式化后的消息（含上下文）
             provider_id: AI提供商ID，空=默认
             extra_prompt: 用户自定义补充提示词
-            
+            timeout: 超时时间（秒）
+
         Returns:
             True=应该回复，False=不回复
         """
@@ -82,51 +84,65 @@ class DecisionAI:
                     provider = context.get_using_provider()
             else:
                 provider = context.get_using_provider()
-            
+
             if not provider:
                 logger.error("无法获取AI提供商")
                 return False
-            
+
             # 获取人格的system_prompt (参考SpectreCore的方式)
             try:
                 # 尝试获取personas列表
-                if hasattr(context, 'provider_manager') and hasattr(context.provider_manager, 'personas'):
+                if hasattr(context, "provider_manager") and hasattr(
+                    context.provider_manager, "personas"
+                ):
                     personas = context.provider_manager.personas
                     # 获取默认人格
                     default_persona = None
-                    if hasattr(context.provider_manager, 'selected_default_persona'):
-                        default_persona = context.provider_manager.selected_default_persona
-                    
+                    if hasattr(context.provider_manager, "selected_default_persona"):
+                        default_persona = (
+                            context.provider_manager.selected_default_persona
+                        )
+
                     if default_persona:
-                        persona_prompt = default_persona.get('prompt', '')
-                        logger.debug(f"已获取人格提示词（provider_manager方式），长度: {len(persona_prompt)} 字符")
+                        persona_prompt = default_persona.get("prompt", "")
+                        logger.debug(
+                            f"已获取人格提示词（provider_manager方式），长度: {len(persona_prompt)} 字符"
+                        )
                     else:
                         # fallback: 使用persona_manager
-                        default_persona = await context.persona_manager.get_default_persona_v3(
-                            event.unified_msg_origin
+                        default_persona = (
+                            await context.persona_manager.get_default_persona_v3(
+                                event.unified_msg_origin
+                            )
                         )
-                        persona_prompt = default_persona.get('prompt', '')
-                        logger.debug(f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符")
+                        persona_prompt = default_persona.get("prompt", "")
+                        logger.debug(
+                            f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
+                        )
                 else:
                     # fallback: 使用persona_manager
-                    default_persona = await context.persona_manager.get_default_persona_v3(
-                        event.unified_msg_origin
+                    default_persona = (
+                        await context.persona_manager.get_default_persona_v3(
+                            event.unified_msg_origin
+                        )
                     )
-                    persona_prompt = default_persona.get('prompt', '')
-                    logger.debug(f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符")
+                    persona_prompt = default_persona.get("prompt", "")
+                    logger.debug(
+                        f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
+                    )
             except Exception as e:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
-            
+
             # 构建完整的提示词
             full_prompt = formatted_message + "\n\n" + DecisionAI.SYSTEM_DECISION_PROMPT
-            
+
             # 如果有用户自定义提示词,添加进去
             if extra_prompt and extra_prompt.strip():
                 full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}"
-            
+
             logger.debug(f"正在调用决策AI判断是否回复...")
-            
+
             # 调用AI,添加超时控制
             async def call_decision_ai():
                 response = await provider.text_chat(
@@ -134,72 +150,85 @@ class DecisionAI:
                     contexts=[],
                     image_urls=[],
                     func_tool=None,
-                    system_prompt=persona_prompt  # 包含人格设定
+                    system_prompt=persona_prompt,  # 包含人格设定
                 )
                 return response.completion_text
-            
-            # 30秒超时
-            ai_response = await asyncio.wait_for(call_decision_ai(), timeout=30)
-            
+
+            # 使用用户配置的超时时间
+            ai_response = await asyncio.wait_for(call_decision_ai(), timeout=timeout)
+
             # 解析AI的回复
             decision = DecisionAI._parse_decision(ai_response)
-            
+
             if decision:
                 logger.info("决策AI判断: 应该回复这条消息 (yes)")
             else:
                 logger.info("决策AI判断: 不应该回复这条消息 (no)")
-            
+
             return decision
-            
+
         except asyncio.TimeoutError:
-            logger.warning("决策AI调用超时,默认不回复")
+            logger.warning(
+                f"决策AI调用超时（超过 {timeout} 秒），默认不回复，可在配置中调整 decision_ai_timeout 参数"
+            )
             return False
         except Exception as e:
             logger.error(f"调用决策AI时发生错误: {e}")
             return False
-    
+
     @staticmethod
     def _parse_decision(ai_response: str) -> bool:
         """
         解析AI的决策回复（积极模式）
-        
+
         包含肯定意图的都视为应该回复，只有明确否定才是不回复
-        
+
         Args:
             ai_response: AI的回复文本
-            
+
         Returns:
             True=应该回复，False=不回复
         """
         if not ai_response:
             logger.debug("AI回复为空,默认判定为回复（积极模式）")
             return True  # 空回复时倾向于回复
-        
+
         # 清理回复文本
         cleaned_response = ai_response.strip().lower()
-        
+
         # 移除可能的标点符号
-        cleaned_response = cleaned_response.rstrip('.,!?。,!?')
-        
+        cleaned_response = cleaned_response.rstrip(".,!?。,!?")
+
         # 肯定关键词列表（扩展识别范围）
-        positive_keywords = ['yes', 'y', '是', '好', '可以', '应该', '回复', '要', '需要']
-        
+        positive_keywords = [
+            "yes",
+            "y",
+            "是",
+            "好",
+            "可以",
+            "应该",
+            "回复",
+            "要",
+            "需要",
+        ]
+
         # 否定关键词列表
-        negative_keywords = ['no', 'n', '否', '不', '别', '不要', '不应该', '不需要']
-        
+        negative_keywords = ["no", "n", "否", "不", "别", "不要", "不应该", "不需要"]
+
         # 优先检查是否包含肯定关键词
         for keyword in positive_keywords:
             if keyword in cleaned_response:
-                logger.debug(f"AI回复 '{ai_response}' 包含肯定关键词 '{keyword}',判定为回复")
+                logger.debug(
+                    f"AI回复 '{ai_response}' 包含肯定关键词 '{keyword}',判定为回复"
+                )
                 return True
-        
+
         # 检查是否明确否定（只有开头是否定词才算）
         for keyword in negative_keywords:
             if cleaned_response.startswith(keyword):
                 logger.debug(f"AI回复 '{ai_response}' 明确否定,判定为不回复")
                 return False
-        
+
         # 默认情况：如果既不明确肯定也不明确否定，倾向于回复（积极模式）
         logger.debug(f"AI回复 '{ai_response}' 不明确,默认判定为回复（积极模式）")
         return True
-
