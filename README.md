@@ -1,0 +1,2 @@
+# astrbot_plugin_group_chat_plus
+一个为AstrBot平台提供的以AI读空气为核心的群聊增强插件，让你的Bot更懂氛围、更自然地参与群聊互动
