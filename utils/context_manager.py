@@ -284,7 +284,22 @@ class ContextManager:
                         sender_name = msg.sender.nickname or "未知用户"
                         sender_id = msg.sender.user_id or "unknown"
                         # 判断是否是机器人自己的消息
-                        is_bot = sender_id == bot_id
+                        # 确保类型一致性：统一转换为字符串进行比较
+                        is_bot = str(sender_id) == str(bot_id)
+
+                        # 调试日志（仅在第一条消息时输出，避免刷屏）
+                        if formatted_parts and len(formatted_parts) == 1:
+                            logger.debug(
+                                f"[上下文格式化] 机器人ID: {bot_id}, 当前消息发送者ID: {sender_id}, 是否为机器人: {is_bot}"
+                            )
+
+                    # 如果还没有判定为bot，尝试通过 self_id 判断
+                    # 有时候消息没有正确的sender，但有self_id
+                    if not is_bot and hasattr(msg, "self_id") and msg.self_id:
+                        # 如果消息的 self_id 等于当前 bot_id，说明这是机器人发出的消息
+                        # 但需要注意：self_id 通常表示"当前机器人的ID"
+                        # 对于bot发送的消息，sender.user_id 应该等于 self_id
+                        pass
 
                     # 获取消息时间
                     time_str = "未知时间"
@@ -310,8 +325,9 @@ class ContextManager:
                     # 格式化消息
                     if is_bot:
                         # AI自己的回复,特殊标注
+                        # 明确告诉AI这是它自己的历史回复，使用昵称来增强识别
                         formatted_parts.append(
-                            f"[{time_str}] 你自己回复: {message_content}"
+                            f"[{time_str}] {sender_name}(你自己，ID:{sender_id}): {message_content}"
                         )
                     else:
                         # 其他用户的消息
@@ -555,8 +571,22 @@ class ContextManager:
                 bot_msg.group_id = chat_id
 
             # 设置发送者信息（AI自己）
+            # 尝试获取机器人的真实昵称
+            bot_nickname = "AI"  # 默认昵称
+            try:
+                # 尝试从平台获取机器人信息
+                if hasattr(event, "get_self_name") and callable(event.get_self_name):
+                    bot_nickname = event.get_self_name() or "AI"
+                elif hasattr(event, "message_obj") and hasattr(
+                    event.message_obj, "self_id"
+                ):
+                    # 有些平台可能在 message_obj 中保存了机器人名称
+                    pass
+            except Exception as e:
+                logger.debug(f"无法获取机器人昵称: {e}")
+
             bot_msg.sender = MessageMember(
-                user_id=event.get_self_id(), nickname="AstrBot"
+                user_id=event.get_self_id(), nickname=bot_nickname
             )
             bot_msg.self_id = event.get_self_id()
             bot_msg.session_id = (
