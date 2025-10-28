@@ -15,6 +15,7 @@ from .reply_handler import ReplyHandler
 from .memory_injector import MemoryInjector
 from .tools_reminder import ToolsReminder
 from .keyword_checker import KeywordChecker
+from .message_cleaner import MessageCleaner
 
 __all__ = [
     "ProbabilityManager",
@@ -26,4 +27,5 @@ __all__ = [
     "MemoryInjector",
     "ToolsReminder",
     "KeywordChecker",
+    "MessageCleaner",
 ]

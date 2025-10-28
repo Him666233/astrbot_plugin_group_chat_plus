@@ -45,6 +45,7 @@ from .utils import (
     MemoryInjector,
     ToolsReminder,
     KeywordChecker,
+    MessageCleaner,
 )
 
 
@@ -328,11 +329,21 @@ class ChatPlus(Star):
         """
         # 添加时间戳和发送者信息
         if self.debug_mode:
-            logger.debug("【步骤6】添加消息元数据")
+            logger.debug("【步骤6】提取纯净原始消息并添加元数据")
 
-        original_message_text = event.get_message_outline()
+        # 使用MessageCleaner提取纯净的原始消息（不含系统提示词）
+        original_message_text = MessageCleaner.extract_raw_message_from_event(event)
         if self.debug_mode:
-            logger.debug(f"  原始消息: {original_message_text[:100]}...")
+            logger.debug(f"  纯净原始消息: {original_message_text[:100]}...")
+
+        # 检查是否是空@消息
+        is_empty_at = MessageCleaner.is_empty_at_message(
+            original_message_text, is_at_message
+        )
+        if is_empty_at:
+            logger.info("检测到纯@消息（无其他内容）")
+            if self.debug_mode:
+                logger.debug("  纯@消息将使用特殊处理")
 
         message_text = MessageProcessor.add_metadata_to_message(
             event,
@@ -342,25 +353,25 @@ class ChatPlus(Star):
         )
 
         if self.debug_mode:
-            logger.debug(f"  处理后消息: {message_text[:150]}...")
+            logger.debug(f"  添加元数据后消息: {message_text[:150]}...")
 
         # 缓存当前用户消息
+        # 注意：只缓存原始消息+元数据，不包含任何提示词
         if self.debug_mode:
-            logger.debug("【步骤6.5】缓存用户消息")
+            logger.debug("【步骤6.5】缓存纯净用户消息")
 
-        message_with_metadata = MessageProcessor.add_metadata_to_message(
-            event,
-            original_message_text,
-            self.config.get("include_timestamp", True),
-            self.config.get("include_sender_info", True),
-        )
-
+        # 使用已经添加了元数据的消息（message_text）
+        # 这个消息只包含：时间戳 + 发送者信息 + 原始消息内容
+        # 不包含任何系统提示词
         cached_message = {
             "role": "user",
-            "content": message_with_metadata,
+            "content": message_text,  # 这是纯净消息+元数据
             "timestamp": time.time(),
             "image_description": None,
         }
+
+        if self.debug_mode:
+            logger.debug(f"  缓存内容: {cached_message['content'][:150]}...")
 
         if chat_id not in self.pending_messages_cache:
             self.pending_messages_cache[chat_id] = []
@@ -735,15 +746,20 @@ class ChatPlus(Star):
                     ):
                         image_desc = last_cached["image_description"]
 
-            # 如果缓存中没有，尝试从event获取原始消息并添加元数据
+            # 如果缓存中没有，尝试从event提取纯净原始消息并添加元数据
+            # 注意：使用MessageCleaner确保不会包含系统提示词
             if not message_to_save:
-                original_message = event.get_message_plain()
+                logger.debug("[消息发送后] 缓存中无消息，从event提取纯净原始消息")
+                original_message = MessageCleaner.extract_raw_message_from_event(event)
                 if original_message:
                     message_to_save = MessageProcessor.add_metadata_to_message(
                         event,
                         original_message,
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
+                    )
+                    logger.debug(
+                        f"[消息发送后] 从event提取并处理的消息: {message_to_save[:100]}..."
                     )
 
             if not message_to_save:
