@@ -437,11 +437,32 @@ class AttentionManager:
             enabled: 是否启用注意力机制
 
         Returns:
-            调整后的概率值
+            调整后的概率值（保证在 [0, 1] 范围内）
         """
-        # 如果未启用注意力机制，直接返回原概率
+        # 如果未启用注意力机制，直接返回原概率（确保在有效范围）
         if not enabled:
-            return current_probability
+            return max(0.0, min(1.0, current_probability))
+
+        # === 输入参数边界检测 ===
+        # 确保所有概率参数都在 [0, 1] 范围内
+        current_probability = max(0.0, min(1.0, current_probability))
+        attention_increased_probability = max(
+            0.0, min(1.0, attention_increased_probability)
+        )
+        attention_decreased_probability = max(
+            0.0, min(1.0, attention_decreased_probability)
+        )
+
+        # 确保逻辑关系正确：increased >= decreased
+        if attention_increased_probability < attention_decreased_probability:
+            logger.warning(
+                f"[注意力机制-边界检测] 配置异常: increased({attention_increased_probability:.2f}) < "
+                f"decreased({attention_decreased_probability:.2f})，已自动修正"
+            )
+            attention_increased_probability, attention_decreased_probability = (
+                attention_decreased_probability,
+                attention_increased_probability,
+            )
 
         chat_key = AttentionManager.get_chat_key(platform_name, is_private, chat_id)
         current_time = time.time()
@@ -503,14 +524,20 @@ class AttentionManager:
                 adjusted_probability = current_probability + actual_boost
 
                 # 情绪修正（正面情绪进一步提升，负面情绪降低）
+                # emotion 范围确保在 [-1, 1]，影响因子在 [0.7, 1.3]
+                emotion = max(-1.0, min(1.0, emotion))  # 边界检测
                 emotion_factor = 1.0 + (emotion * 0.3)  # emotion范围-1到1，影响±30%
                 adjusted_probability *= emotion_factor
 
-                # 限制在合理范围
+                # === 严格的边界限制（三重保障）===
+                # 1. 首先限制不超过 0.98（防止 100% 回复）
+                adjusted_probability = min(adjusted_probability, 0.98)
+                # 2. 然后限制不低于 attention_decreased_probability
                 adjusted_probability = max(
-                    attention_decreased_probability,  # 最低不低于这个
-                    min(adjusted_probability, 0.98),  # 最高不超过98%
+                    adjusted_probability, attention_decreased_probability
                 )
+                # 3. 最终强制限制在 [0, 1] 范围（防止任何异常情况）
+                adjusted_probability = max(0.0, min(1.0, adjusted_probability))
 
                 logger.info(
                     f"[注意力机制-增强] 🎯 {current_user_name}(ID:{current_user_id}), "
@@ -527,6 +554,9 @@ class AttentionManager:
                     current_probability * 0.8,  # 降低20%
                     attention_decreased_probability,
                 )
+
+                # === 最终边界检测（确保在 [0, 1] 范围内）===
+                adjusted_probability = max(0.0, min(1.0, adjusted_probability))
 
                 logger.debug(
                     f"[注意力机制-增强] 👤 {current_user_name}(ID:{current_user_id}), "
