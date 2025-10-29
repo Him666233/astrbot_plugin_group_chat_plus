@@ -3,7 +3,7 @@
 负责调用AI判断是否应该回复消息（读空气功能）
 
 作者: Him666233
-版本: v1.0.0
+版本: v1.0.1
 """
 
 import asyncio
@@ -60,6 +60,7 @@ class DecisionAI:
         provider_id: str,
         extra_prompt: str,
         timeout: int = 30,
+        prompt_mode: str = "append",
     ) -> bool:
         """
         调用AI判断是否应该回复
@@ -71,6 +72,7 @@ class DecisionAI:
             provider_id: AI提供商ID，空=默认
             extra_prompt: 用户自定义补充提示词
             timeout: 超时时间（秒）
+            prompt_mode: 提示词模式，append=拼接，override=覆盖
 
         Returns:
             True=应该回复，False=不回复
@@ -134,12 +136,21 @@ class DecisionAI:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
 
-            # 构建完整的提示词
-            full_prompt = formatted_message + "\n\n" + DecisionAI.SYSTEM_DECISION_PROMPT
+            # 构建完整的提示词，根据prompt_mode决定拼接还是覆盖
+            if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
+                # 覆盖模式：直接使用用户自定义提示词
+                full_prompt = formatted_message + "\n\n" + extra_prompt.strip()
+                logger.debug("使用覆盖模式：用户自定义提示词完全替代默认系统提示词")
+            else:
+                # 拼接模式（默认）：使用默认提示词，如果有用户自定义则追加
+                full_prompt = (
+                    formatted_message + "\n\n" + DecisionAI.SYSTEM_DECISION_PROMPT
+                )
 
-            # 如果有用户自定义提示词,添加进去
-            if extra_prompt and extra_prompt.strip():
-                full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}"
+                # 如果有用户自定义提示词,添加进去
+                if extra_prompt and extra_prompt.strip():
+                    full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}"
+                    logger.debug("使用拼接模式：在默认系统提示词后追加用户自定义提示词")
 
             logger.debug(f"正在调用决策AI判断是否回复...")
 

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)](https://github.com/Him666233/astrbot_plugin_group_chat_plus)
+[![Version](https://img.shields.io/badge/version-v1.0.1-blue.svg)](https://github.com/Him666233/astrbot_plugin_group_chat_plus)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%E2%89%A5v4.0.0-green.svg)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)](LICENSE)
 
@@ -34,6 +34,7 @@
 
 - **🧠 AI读空气** - 通过专门的AI判断是否应该回复当前消息
 - **📈 动态概率** - 回复后自动提升触发概率，促进连续对话
+- **🎯 注意力机制** - 像真人一样专注对话，避免频繁切换话题（v1.0.1新增）
 - **💾 智能缓存** - 保存未回复消息的上下文，避免记忆断裂
 - **🔄 官方同步** - 自动同步到AstrBot官方对话系统
 - **🤝 最大兼容** - 仅监听消息不拦截，不影响其他插件
@@ -48,6 +49,7 @@
 |------|------|------|
 | **AI读空气判断** | 两层过滤机制：概率筛选 + AI智能判断 | 精准控制回复时机，避免过度活跃 |
 | **动态概率调整** | AI回复后自动提升触发概率 | 促进连续对话，营造自然互动 |
+| **注意力机制** | 回复某用户后持续关注ta的发言（v1.0.1新增） | 像真人一样专注对话，避免频繁切换话题 |
 | **智能缓存系统** | 保存"通过筛选但未回复"的消息 | 下次回复时保持完整上下文 |
 | **官方历史同步** | 自动保存到AstrBot对话系统 | 与官方功能完美集成 |
 | **@消息优先** | @消息跳过所有判断直接回复 | 确保重要消息不遗漏 |
@@ -116,6 +118,7 @@
 
 如果你是第一次使用，推荐使用以下配置快速开始：
 
+**方案1: 传统动态概率模式**
 ```json
 {
   "initial_probability": 0.3,
@@ -129,6 +132,25 @@
 }
 ```
 
+**方案2: 注意力机制模式（v1.0.1新增，推荐）**
+```json
+{
+  "initial_probability": 0.1,
+  "after_reply_probability": 0.1,
+  "enable_attention_mechanism": true,
+  "attention_increased_probability": 0.9,
+  "attention_decreased_probability": 0.05,
+  "attention_duration": 120,
+  "decision_ai_timeout": 30,
+  "max_context_messages": -1,
+  "include_timestamp": true,
+  "include_sender_info": true,
+  "enabled_groups": []
+}
+```
+
+> 💡 **配置建议**: 两种模式二选一。注意力机制更适合希望Bot专注对话的场景，传统模式则更灵活。
+
 ### 详细配置说明
 
 #### 📊 概率控制（核心配置）
@@ -136,7 +158,7 @@
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `initial_probability` | float | 0.3 | **初始读空气概率**<br>AI初始判断是否回复消息的概率，范围0.0-1.0<br>示例: 0.1=10%概率触发 |
-| `after_reply_probability` | float | 0.8 | **回复后概率**<br>AI回复后临时提升的概率，促进连续对话<br>建议: 设置为0.7-0.9 |
+| `after_reply_probability` | float | 0.8 | **回复后概率**<br>AI回复后临时提升的概率，促进连续对话<br>建议: 设置为0.7-0.9<br>⚠️ 注意：启用注意力机制后此项将被覆盖 |
 | `probability_duration` | int | 120 | **概率提升持续时间（秒）**<br>提升概率的持续时间，超时后恢复初始概率<br>建议: 120-600秒 |
 
 > 💡 **概率调整建议**:
@@ -144,14 +166,32 @@
 > - 中度活跃: `0.1` → `0.8` (持续300秒)
 > - 高度活跃: `0.3` → `0.95` (持续600秒)
 
+#### 🎯 注意力机制（v1.0.1 新增）
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `enable_attention_mechanism` | bool | false | **启用注意力机制**<br>开启后，AI会更关注刚刚回复过的用户<br>同一用户继续对话时提升回复概率，不同用户时降低概率<br>⚠️ 启用后会覆盖 `after_reply_probability` 设置 |
+| `attention_increased_probability` | float | 0.9 | **注意力提升概率**<br>当前消息发送者是AI刚刚回复的用户时，概率提升到此值<br>建议: 0.9或更高 |
+| `attention_decreased_probability` | float | 0.1 | **注意力降低概率**<br>当前消息发送者不是AI刚刚回复的用户时，概率降低到此值<br>建议: 0.05-0.15 |
+| `attention_duration` | int | 120 | **注意力持续时间（秒）**<br>注意力机制生效的时间窗口，超过此时间后恢复为普通概率判断<br>建议: 与 `probability_duration` 保持一致或略短 |
+
+> 💡 **注意力机制说明**:
+> - 这个机制让Bot像真人一样，和某人对话后会持续关注ta的发言
+> - 同一用户继续说话时，Bot更容易回复（高概率）
+> - 其他用户插话时，Bot不太会回复（低概率），避免频繁切换话题
+> - 启用后建议将 `after_reply_probability` 设置为与 `initial_probability` 相同，避免混淆
+> - 示例配置：`initial_probability=0.1`, `attention_increased_probability=0.9`, `attention_decreased_probability=0.05`
+
 #### 🤖 AI提供商配置
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `decision_ai_provider_id` | string | "" | **读空气AI提供商ID**<br>用于判断是否回复的AI，留空使用默认<br>建议: 使用轻量快速的模型 |
 | `decision_ai_extra_prompt` | string | "" | **读空气AI额外提示词**<br>自定义判断逻辑，留空使用默认积极模式 |
+| `decision_ai_prompt_mode` | string | "append" | **读空气AI提示词模式**<br>• `append`: 拼接在默认系统提示词后面<br>• `override`: 完全覆盖默认系统提示词（需填写额外提示词） |
 | `decision_ai_timeout` | int | 30 | **读空气AI超时时间（秒）**<br>AI判断的超时时间，超时将默认不回复<br>• 快速AI: 20-30秒<br>• 较慢AI: 40-60秒 |
 | `reply_ai_extra_prompt` | string | "" | **回复AI额外提示词**<br>自定义回复风格 |
+| `reply_ai_prompt_mode` | string | "append" | **回复AI提示词模式**<br>• `append`: 拼接在默认系统提示词后面<br>• `override`: 完全覆盖默认系统提示词（需填写额外提示词） |
 
 #### 📝 消息元数据
 
@@ -235,7 +275,16 @@
     ├─ 包含触发关键词？
     └─ 记录状态 → 继续
     ↓
-【步骤5】读空气概率判断
+【步骤5】注意力机制调整（可选）
+    ├─ 启用注意力机制？
+    │   └─ ✅ 是 → 检查当前发送者
+    │       ├─ 是上次回复的用户？
+    │       │   └─ ✅ 是 → 提升概率到 attention_increased_probability
+    │       │   └─ ❌ 否 → 降低概率到 attention_decreased_probability
+    │       └─ 超过注意力时间窗口？ → 恢复原概率
+    └─ ❌ 否 → 使用普通概率（after_reply_probability或initial_probability）
+    ↓
+【步骤6】读空气概率判断
     ├─ 是@消息或触发关键词？
     │   └─ ✅ 是 → 跳过概率判断
     └─ ❌ 否 → 概率判断
@@ -243,12 +292,12 @@
         └─ ❌ 否 → 丢弃消息
         └─ ✅ 是 → 继续
     ↓
-【步骤6】添加消息元数据
+【步骤7】添加消息元数据
     ├─ 添加时间戳（可选）
     ├─ 添加发送者信息（可选）
     └─ ✅ 元数据处理完成
     ↓
-【步骤6.5】处理图片（在缓存之前）
+【步骤8】处理图片（在缓存之前）
     ├─ mention_only模式检查
     │   └─ 非@消息的图片 → 丢弃（不缓存）
     ├─ 未启用图片处理？
@@ -261,20 +310,20 @@
     │       └─ 超时或失败 → 降级处理（移除图片或丢弃）
     └─ 否 → 使用多模态AI直接处理
     ↓
-【步骤7】缓存纯净用户消息（图片处理通过后）
+【步骤9】缓存纯净用户消息（图片处理通过后）
     ├─ 只缓存原始消息（不含元数据）
     ├─ 如有图片描述，一并缓存
     ├─ 添加到pending_messages_cache
     ├─ 清理超过30分钟的旧消息
     └─ 限制缓存最多10条
     ↓
-【步骤8】提取历史上下文
+【步骤10】提取历史上下文
     ├─ 从官方存储读取历史消息
     ├─ 合并缓存中的消息（去重）
     ├─ 应用max_context_messages限制
     └─ 格式化为AI可读文本
     ↓
-【步骤9】决策AI判断
+【步骤11】决策AI判断
     ├─ 是@消息或触发关键词？
     │   └─ ✅ 是 → 跳过决策AI
     └─ ❌ 否 → 调用决策AI
@@ -285,32 +334,35 @@
             ├─ ❌ no → 保存用户消息到缓存中，退出
             └─ ✅ yes → 继续
     ↓
-【步骤10】标记会话
+【步骤12】标记会话
     └─ 添加到processing_sessions（用于after_message_sent识别）
     ↓
-【步骤11】注入记忆（可选）
+【步骤13】注入记忆（可选）
     ├─ 启用记忆植入？
     └─ ✅ 是 → 调用记忆插件获取记忆
         └─ 注入到消息中
     ↓
-【步骤12】注入工具信息（可选）
+【步骤14】注入工具信息（可选）
     ├─ 启用工具提醒？
     └─ ✅ 是 → 获取可用工具列表
         └─ 注入到消息中
     ↓
-【步骤13】调用AI生成回复
+【步骤15】调用AI生成回复
     ├─ 构建完整消息（上下文+记忆+工具+额外提示词）
     ├─ 调用默认AI生成回复
     └─ ✅ 生成回复
     ↓
-【步骤14】保存用户消息
+【步骤16】保存用户消息
     └─ 保存到自定义历史存储
     ↓
-【步骤15】发送回复
+【步骤17】发送回复
     └─ yield 返回回复内容
     ↓
-【步骤16】调整读空气概率
-    └─ 提升概率至after_reply_probability
+【步骤18】调整读空气概率 / 记录注意力
+    ├─ 启用注意力机制？
+    │   └─ ✅ 是 → 记录被回复的用户ID和名字
+    │       └─ 下次消息判断时应用注意力机制
+    └─ ❌ 否 → 提升概率至after_reply_probability
         └─ 持续probability_duration秒
     ↓
 【after_message_sent钩子】
@@ -435,6 +487,28 @@
   "enabled_groups": ["123456789", "987654321"]
 }
 ```
+
+### 场景6: 注意力机制Bot（v1.0.1 新增）
+
+**适用**: 希望Bot像真人一样"专注对话"的场景
+
+```json
+{
+  "initial_probability": 0.1,
+  "after_reply_probability": 0.1,
+  "enable_attention_mechanism": true,
+  "attention_increased_probability": 0.9,
+  "attention_decreased_probability": 0.05,
+  "attention_duration": 120,
+  "decision_ai_extra_prompt": "你是一个专注的对话者，倾向于与一个人深入交流，而不是频繁切换话题。"
+}
+```
+
+**说明**: 
+- 启用后，Bot回复某人后会持续关注ta的发言（0.9高概率回复）
+- 其他人插话时概率降低到0.05，避免频繁切换对话对象
+- 实现更自然的"一对一"对话体验
+- 注意：建议将 `after_reply_probability` 设为与 `initial_probability` 相同
 
 ---
 
@@ -645,6 +719,57 @@
   - **检查网络**: 确认AI服务的响应速度正常
 </details>
 
+<details>
+<summary><b>Q11: 注意力机制是什么？如何使用？</b></summary>
+
+**A**: 注意力机制让Bot像真人一样"专注对话"：
+
+**工作原理**:
+- Bot回复某用户后，会记录该用户的ID和名字
+- 该用户继续发言时，Bot回复概率提升（attention_increased_probability，默认0.9）
+- 其他用户插话时，Bot回复概率降低（attention_decreased_probability，默认0.1）
+- 超过时间窗口（attention_duration）后恢复正常判断
+
+**使用方法**:
+1. 设置 `enable_attention_mechanism` 为 `true`
+2. 配置 `attention_increased_probability`（建议0.9或更高）
+3. 配置 `attention_decreased_probability`（建议0.05-0.15）
+4. 配置 `attention_duration`（建议与 `probability_duration` 相同）
+5. 建议将 `after_reply_probability` 设为与 `initial_probability` 相同
+
+**适用场景**:
+- 希望Bot与用户进行深入对话，而非频繁切换话题
+- 避免Bot在多人对话中"三心二意"
+- 营造更自然的一对一交流体验
+
+**注意事项**:
+- 启用后会覆盖 `after_reply_probability` 设置
+- 两种模式互斥：注意力机制 vs 传统概率提升
+</details>
+
+<details>
+<summary><b>Q12: 提示词模式 append 和 override 有什么区别？</b></summary>
+
+**A**: 两种模式的区别：
+
+**append 模式（推荐）**:
+- 将额外提示词拼接在默认系统提示词后面
+- 保留插件的默认判断逻辑
+- 只需填写补充说明，可以留空
+- 适合大部分场景
+
+**override 模式（高级）**:
+- 完全覆盖默认系统提示词
+- 需要自己编写完整的提示词
+- 不能留空，否则AI无法正常工作
+- 适合有特殊需求的高级用户
+
+**使用建议**:
+- 默认使用 append 模式
+- 只有在完全了解插件工作原理，且需要完全自定义时才使用 override
+- override 模式需要编写完整的判断逻辑提示词
+</details>
+
 ---
 
 ## 🔍 技术细节
@@ -660,7 +785,9 @@ astrbot_plugin_group_chat_plus/
 └── utils/                       # 工具模块
     ├── __init__.py              # 模块导出
     ├── probability_manager.py   # 概率管理器（动态概率调整）
+    ├── attention_manager.py     # 注意力机制管理器（v1.0.1新增）
     ├── message_processor.py     # 消息处理器（元数据添加）
+    ├── message_cleaner.py       # 消息清理器（移除不必要的元数据）
     ├── image_handler.py         # 图片处理器（转文字/多模态）
     ├── context_manager.py       # 上下文管理器（历史消息/缓存）
     ├── decision_ai.py           # 决策AI（读空气判断）
@@ -769,6 +896,33 @@ pending_messages_cache = {
 
 ## 📝 更新日志
 
+### v1.0.1 (2025-10-29)
+
+**🎯 新增注意力机制**
+
+**核心更新**:
+- ✨ **注意力机制（Attention Mechanism）**: 让Bot像真人一样专注对话
+  - 回复某用户后会持续关注ta的发言（可配置提升概率）
+  - 其他用户插话时降低回复概率（避免频繁切换话题）
+  - 支持时间窗口配置，超时后恢复普通判断
+  - 提供 `enable_attention_mechanism`、`attention_increased_probability`、`attention_decreased_probability`、`attention_duration` 四个配置项
+
+**功能增强**:
+- 🔧 **提示词模式选择**: 新增 `decision_ai_prompt_mode` 和 `reply_ai_prompt_mode` 配置
+  - `append` 模式：拼接在默认系统提示词后面（推荐）
+  - `override` 模式：完全覆盖默认系统提示词（需填写完整提示词）
+  
+**工作流程优化**:
+- 📋 完整处理流程新增"步骤5：注意力机制调整"
+- 📋 "步骤18：调整读空气概率"更新为"步骤18：调整读空气概率 / 记录注意力"
+- 🔄 支持注意力机制与传统概率提升两种模式（互斥）
+
+**使用场景**:
+- 💡 新增"场景6：注意力机制Bot"配置示例
+- 💡 适用于需要Bot专注单一对话的场景
+
+---
+
 ### v1.0.0 (2025-10-28)
 
 **🎉 初始版本发布**
@@ -792,7 +946,7 @@ pending_messages_cache = {
 **技术特性**:
 - ✅ 最大兼容性设计（仅监听不拦截）
 - ✅ 完善的错误处理（30秒超时保护）
-- ✅ 详细的调试日志（15步骤可追踪）
+- ✅ 详细的调试日志（可追踪完整流程）
 - ✅ 线程安全（并发处理支持）
 - ✅ 智能去重（缓存转正时自动去重）
 

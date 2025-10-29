@@ -15,7 +15,7 @@
 - 未来应考虑使用更稳定的插件间通信机制
 
 作者: Him666233
-版本: v1.0.0
+版本: v1.0.1
 """
 
 from typing import Optional
@@ -143,8 +143,8 @@ class MemoryInjector:
             return original_message
 
         # 在消息末尾添加记忆部分
-        injected_message = original_message + "\n\n=== 你的长期记忆 ===\n" + memories
-        injected_message += "\n\n(以上是你之前保存的重要记忆,请在回复时参考这些记忆)"
+        injected_message = original_message + "\n\n=== 背景信息 ===\n" + memories
+        injected_message += "\n\n(这些信息可能对理解当前对话有帮助，请自然地融入到你的回答中，而不要明确提及)"
 
         logger.debug("记忆已注入到消息中")
         return injected_message

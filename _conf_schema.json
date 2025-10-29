@@ -38,8 +38,14 @@
     "decision_ai_extra_prompt": {
         "description": "读空气AI额外提示词",
         "type": "string",
-        "hint": "给判断是否回复的AI添加的自定义提示词，留空使用默认积极模式(如果没有把握，建议留空)",
+        "hint": "给判断是否回复的AI添加的自定义提示词，append模式下可以留空，留空使用默认积极模式(如果没有把握，建议留空)",
         "default": ""
+    },
+    "decision_ai_prompt_mode": {
+        "description": "读空气AI提示词模式",
+        "type": "string",
+        "hint": "选择额外提示词的应用方式：append=拼接在默认系统提示词后面，override=完全覆盖默认系统提示词（填写此选项为override后，额外提示词不能为空）",
+        "default": "append"
     },
     "decision_ai_timeout": {
         "description": "读空气AI超时时间(秒)",
@@ -50,8 +56,14 @@
     "reply_ai_extra_prompt": {
         "description": "回复AI额外提示词",
         "type": "string",
-        "hint": "给最终回复消息的AI添加的自定义提示词",
+        "hint": "给最终回复消息的AI添加的自定义提示词，append模式下可以留空，",
         "default": ""
+    },
+    "reply_ai_prompt_mode": {
+        "description": "回复AI提示词模式",
+        "type": "string",
+        "hint": "选择额外提示词的应用方式：append=拼接在默认系统提示词后面；override=完全覆盖默认系统提示词（填写此选项为override后，额外提示词不能为空）",
+        "default": "append"
     },
     "enable_tools_reminder": {
         "description": "启用工具提醒",
@@ -124,6 +136,30 @@
         "type": "list",
         "hint": "当消息中包含这些关键词时，将直接忽略该消息，不进行任何处理。留空则不启用该功能",
         "default": []
+    },
+    "enable_attention_mechanism": {
+        "description": "启用注意力机制",
+        "type": "bool",
+        "hint": "开启后，AI会更关注刚刚回复过的用户。同一用户继续对话时提升回复概率，不同用户时降低概率，实现更精确的对话焦点。⚠️注意：启用后会覆盖'回复后的读空气概率'设置，建议将after_reply_probability设置为与initial_probability相同",
+        "default": false
+    },
+    "attention_increased_probability": {
+        "description": "注意力提升概率",
+        "type": "float",
+        "hint": "当前消息发送者是AI刚刚回复的用户时，概率提升到此值（范围0-1）。建议设置为0.9或更高",
+        "default": 0.9
+    },
+    "attention_decreased_probability": {
+        "description": "注意力降低概率",
+        "type": "float",
+        "hint": "当前消息发送者不是AI刚刚回复的用户时，概率降低到此值（范围0-1）。建议设置为0.05-0.15",
+        "default": 0.1
+    },
+    "attention_duration": {
+        "description": "注意力持续时间(秒)",
+        "type": "int",
+        "hint": "注意力机制生效的时间窗口(秒)。超过此时间后不再应用注意力调整，恢复为普通概率判断。建议与probability_duration保持一致或略短",
+        "default": 120
     }
 }
 

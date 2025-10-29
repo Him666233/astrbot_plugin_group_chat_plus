@@ -3,7 +3,7 @@
 负责消息预处理，添加时间戳、发送者信息等元数据
 
 作者: Him666233
-版本: v1.0.0
+版本: v1.0.1
 """
 
 from datetime import datetime
@@ -30,6 +30,9 @@ class MessageProcessor:
         """
         为消息添加元数据（时间戳和发送者）
 
+        格式与历史消息保持一致，便于AI识别：
+        [时间] 发送者名字(ID:xxx): 消息内容
+
         Args:
             event: 消息事件
             message_text: 原始消息
@@ -39,29 +42,40 @@ class MessageProcessor:
         Returns:
             添加元数据后的文本
         """
-        metadata_parts = []
-
         try:
-            # 添加时间戳信息
+            # 获取时间戳（格式：YYYY-MM-DD HH:MM:SS，与历史消息一致）
+            timestamp_str = ""
             if include_timestamp:
-                timestamp_str = MessageProcessor._format_timestamp(event)
-                if timestamp_str:
-                    metadata_parts.append(f"[时间: {timestamp_str}]")
+                timestamp_str = MessageProcessor._format_timestamp_unified(event)
 
-            # 添加发送者信息
+            # 获取发送者信息
+            sender_prefix = ""
             if include_sender_info:
-                sender_info = MessageProcessor._format_sender_info(event)
-                if sender_info:
-                    metadata_parts.append(sender_info)
+                sender_id = event.get_sender_id()
+                sender_name = event.get_sender_name()
+                if sender_name:
+                    # 格式：发送者名字(ID:xxx)，与历史消息完全一致
+                    sender_prefix = f"{sender_name}(ID:{sender_id})"
+                else:
+                    sender_prefix = f"用户(ID:{sender_id})"
 
-            # 如果有元数据,则拼接到消息前面
-            if metadata_parts:
-                metadata_prefix = " ".join(metadata_parts)
-                processed_message = f"{metadata_prefix}\n{message_text}"
-                logger.debug(f"消息已添加元数据: {metadata_prefix}")
-                return processed_message
+            # 组合格式：[时间] 发送者(ID:xxx): 消息内容
+            # 与上下文格式化保持一致
+            if timestamp_str and sender_prefix:
+                processed_message = f"[{timestamp_str}] {sender_prefix}: {message_text}"
+            elif timestamp_str:
+                processed_message = f"[{timestamp_str}] {message_text}"
+            elif sender_prefix:
+                processed_message = f"{sender_prefix}: {message_text}"
             else:
-                return message_text
+                processed_message = message_text
+
+            if timestamp_str or sender_prefix:
+                logger.debug(
+                    f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
+                )
+
+            return processed_message
 
         except Exception as e:
             logger.error(f"添加消息元数据时发生错误: {e}")
@@ -80,6 +94,8 @@ class MessageProcessor:
         """
         使用缓存中的发送者信息为消息添加元数据
 
+        格式与历史消息保持一致：[时间] 发送者名字(ID:xxx): 消息内容
+
         用于缓存消息转正时，使用原始发送者的信息而不是当前event的发送者
 
         Args:
@@ -93,36 +109,43 @@ class MessageProcessor:
         Returns:
             添加元数据后的文本
         """
-        metadata_parts = []
-
         try:
-            # 添加时间戳信息
+            # 获取时间戳（格式：YYYY-MM-DD HH:MM:SS）
+            timestamp_str = ""
             if include_timestamp and message_timestamp:
                 try:
                     dt = datetime.fromtimestamp(message_timestamp)
-                    timestamp_str = dt.strftime("%Y年%m月%d日 %H:%M:%S")
-                    metadata_parts.append(f"[时间: {timestamp_str}]")
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                 except:
                     # 如果时间戳转换失败，使用当前时间
                     dt = datetime.now()
-                    timestamp_str = dt.strftime("%Y年%m月%d日 %H:%M:%S")
-                    metadata_parts.append(f"[时间: {timestamp_str}]")
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S")
 
-            # 添加发送者信息
+            # 获取发送者信息
+            sender_prefix = ""
             if include_sender_info:
                 if sender_name:
-                    metadata_parts.append(f"[发送者: {sender_name}(ID: {sender_id})]")
+                    # 格式：发送者名字(ID:xxx)，与历史消息完全一致
+                    sender_prefix = f"{sender_name}(ID:{sender_id})"
                 else:
-                    metadata_parts.append(f"[发送者ID: {sender_id}]")
+                    sender_prefix = f"用户(ID:{sender_id})"
 
-            # 如果有元数据，则拼接到消息前面
-            if metadata_parts:
-                metadata_prefix = " ".join(metadata_parts)
-                processed_message = f"{metadata_prefix}\n{message_text}"
-                logger.debug(f"消息已添加元数据（从缓存）: {metadata_prefix}")
-                return processed_message
+            # 组合格式：[时间] 发送者(ID:xxx): 消息内容
+            if timestamp_str and sender_prefix:
+                processed_message = f"[{timestamp_str}] {sender_prefix}: {message_text}"
+            elif timestamp_str:
+                processed_message = f"[{timestamp_str}] {message_text}"
+            elif sender_prefix:
+                processed_message = f"{sender_prefix}: {message_text}"
             else:
-                return message_text
+                processed_message = message_text
+
+            if timestamp_str or sender_prefix:
+                logger.debug(
+                    f"消息已添加元数据（从缓存，统一格式）: [{timestamp_str}] {sender_prefix}"
+                )
+
+            return processed_message
 
         except Exception as e:
             logger.error(f"从缓存添加消息元数据时发生错误: {e}")
@@ -130,9 +153,40 @@ class MessageProcessor:
             return message_text
 
     @staticmethod
+    def _format_timestamp_unified(event: AstrMessageEvent) -> str:
+        """
+        格式化时间戳（统一格式，与历史消息一致）
+
+        格式：YYYY-MM-DD HH:MM:SS
+
+        Args:
+            event: 消息事件
+
+        Returns:
+            格式化的时间戳，失败返回空
+        """
+        try:
+            # 尝试从消息对象获取时间戳
+            if hasattr(event, "message_obj") and hasattr(
+                event.message_obj, "timestamp"
+            ):
+                timestamp = event.message_obj.timestamp
+                if timestamp:
+                    dt = datetime.fromtimestamp(timestamp)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            # 如果消息对象没有时间戳,使用当前时间
+            dt = datetime.now()
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        except Exception as e:
+            logger.warning(f"格式化时间戳失败: {e}")
+            return ""
+
+    @staticmethod
     def _format_timestamp(event: AstrMessageEvent) -> str:
         """
-        格式化时间戳
+        格式化时间戳（旧格式，保留用于兼容性）
 
         格式：YYYY年MM月DD日 HH:MM:SS
 

@@ -2,6 +2,6 @@ name: astrbot_plugin_group_chat_plus # 插件唯一识别名
 display_name: chat_plus
 desc: 一个以AI读空气为主的群聊聊天效果增强插件 # 插件简短描述
 help: 通过AI智能判断是否回复群聊消息,支持概率调整、图片处理、记忆植入等功能 # 插件的帮助信息
-version: v1.0.0 # 插件版本号
+version: v1.0.1 # 插件版本号
 author: Him666233 # 作者
 repo: https://github.com/Him666233/astrbot_plugin_group_chat_plus # 插件的仓库地址

@@ -3,7 +3,7 @@
 负责调用AI生成回复
 
 作者: Him666233
-版本: v1.0.0
+版本: v1.0.1
 """
 
 import asyncio
@@ -23,14 +23,14 @@ class ReplyHandler:
 
     # 系统回复提示词
     SYSTEM_REPLY_PROMPT = """
-请根据历史消息、当前消息、长期记忆和人格设定生成合适的回复。
+请根据上述对话和背景信息生成自然的回复。
 
 注意事项：
 1. 回复应自然、符合上下文
 2. 遵循你的人格设定和回复风格
-3. 合理利用长期记忆
-4. 根据需要调用可用工具
-5. 保持连贯性和相关性
+3. 根据需要调用可用工具
+4. 保持连贯性和相关性
+5. 不要在回复中明确提及"记忆"、"根据记忆"等词语，而是自然地融入相关信息
 
 请开始回复：
 """
@@ -41,6 +41,7 @@ class ReplyHandler:
         context: Context,
         formatted_message: str,
         extra_prompt: str,
+        prompt_mode: str = "append",
     ) -> ProviderRequest:
         """
         生成AI回复
@@ -50,17 +51,27 @@ class ReplyHandler:
             context: Context对象
             formatted_message: 格式化后的完整消息（含上下文、记忆、工具等）
             extra_prompt: 用户自定义补充提示词
+            prompt_mode: 提示词模式，append=拼接，override=覆盖
 
         Returns:
             ProviderRequest对象
         """
         try:
-            # 构建完整的提示词
-            full_prompt = formatted_message + "\n\n" + ReplyHandler.SYSTEM_REPLY_PROMPT
+            # 构建完整的提示词，根据prompt_mode决定拼接还是覆盖
+            if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
+                # 覆盖模式：直接使用用户自定义提示词
+                full_prompt = formatted_message + "\n\n" + extra_prompt.strip()
+                logger.debug("使用覆盖模式：用户自定义提示词完全替代默认系统提示词")
+            else:
+                # 拼接模式（默认）：使用默认提示词，如果有用户自定义则追加
+                full_prompt = (
+                    formatted_message + "\n\n" + ReplyHandler.SYSTEM_REPLY_PROMPT
+                )
 
-            # 如果有用户自定义提示词,添加进去
-            if extra_prompt and extra_prompt.strip():
-                full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}"
+                # 如果有用户自定义提示词,添加进去
+                if extra_prompt and extra_prompt.strip():
+                    full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}"
+                    logger.debug("使用拼接模式：在默认系统提示词后追加用户自定义提示词")
 
             logger.debug("正在调用AI生成回复...")
 

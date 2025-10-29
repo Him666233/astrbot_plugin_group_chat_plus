@@ -25,7 +25,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.0
+版本: v1.0.1
 """
 
 import random
@@ -46,6 +46,7 @@ from .utils import (
     ToolsReminder,
     KeywordChecker,
     MessageCleaner,
+    AttentionManager,
 )
 
 
@@ -98,6 +99,21 @@ class ChatPlus(Star):
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
         logger.info(f"启用的群组: {config.get('enabled_groups', [])} (留空=全部)")
         logger.info(f"详细日志模式: {'开启' if self.debug_mode else '关闭'}")
+
+        # 注意力机制配置
+        attention_enabled = config.get("enable_attention_mechanism", False)
+        logger.info(f"注意力机制: {'开启' if attention_enabled else '关闭'}")
+        if attention_enabled:
+            logger.info(
+                f"  - 同用户提升概率: {config.get('attention_increased_probability', 0.9)}"
+            )
+            logger.info(
+                f"  - 异用户降低概率: {config.get('attention_decreased_probability', 0.1)}"
+            )
+            logger.info(
+                f"  - 注意力持续时间: {config.get('attention_duration', 120)}秒"
+            )
+
         logger.info("=" * 50)
 
         if self.debug_mode:
@@ -234,6 +250,7 @@ class ChatPlus(Star):
 
     async def _check_probability_before_processing(
         self,
+        event: AstrMessageEvent,
         platform_name: str,
         is_private: bool,
         chat_id: str,
@@ -253,7 +270,7 @@ class ChatPlus(Star):
                 logger.debug("【步骤5】开始读空气概率判断")
 
             should_process = await self._check_probability(
-                platform_name, is_private, chat_id
+                platform_name, is_private, chat_id, event
             )
             if not should_process:
                 logger.debug("读空气概率判断: 不处理此消息")
@@ -305,6 +322,7 @@ class ChatPlus(Star):
                 self.config.get("decision_ai_provider_id", ""),
                 self.config.get("decision_ai_extra_prompt", ""),
                 self.config.get("decision_ai_timeout", 30),
+                self.config.get("decision_ai_prompt_mode", "append"),
             )
 
             if not should_reply:
@@ -333,14 +351,18 @@ class ChatPlus(Star):
         self, event: AstrMessageEvent, chat_id: str, is_at_message: bool
     ) -> tuple:
         """
-        处理消息内容（元数据、图片、上下文）
+        处理消息内容（图片处理、上下文格式化）
 
         Returns:
-            (should_continue, original_message_text, message_text, formatted_context)
+            (should_continue, original_message_text, processed_message, formatted_context)
+            - should_continue: 是否继续处理
+            - original_message_text: 纯净的原始消息（不含元数据）
+            - processed_message: 处理后的消息（图片已处理，不含元数据，用于保存）
+            - formatted_context: 格式化后的完整上下文（历史消息+当前消息，当前消息已添加元数据）
         """
-        # 添加时间戳和发送者信息
+        # 提取纯净原始消息
         if self.debug_mode:
-            logger.debug("【步骤6】提取纯净原始消息并添加元数据")
+            logger.debug("【步骤6】提取纯净原始消息")
 
         # 使用MessageCleaner提取纯净的原始消息（不含系统提示词）
         original_message_text = MessageCleaner.extract_raw_message_from_event(event)
@@ -355,16 +377,6 @@ class ChatPlus(Star):
             logger.info("检测到纯@消息（无其他内容）")
             if self.debug_mode:
                 logger.debug("  纯@消息将使用特殊处理")
-
-        message_text = MessageProcessor.add_metadata_to_message(
-            event,
-            original_message_text,
-            self.config.get("include_timestamp", True),
-            self.config.get("include_sender_info", True),
-        )
-
-        if self.debug_mode:
-            logger.debug(f"  添加元数据后消息: {message_text[:150]}...")
 
         # 处理图片（在缓存之前）
         # 这样如果图片被过滤，消息就不会被缓存
@@ -450,8 +462,19 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug(f"  缓存消息数: {len(self.pending_messages_cache[chat_id])}")
 
-        # 使用处理后的消息继续后续流程（包含图片描述或原始消息）
-        message_text = processed_message
+        # 为当前消息添加元数据（用于发送给AI）
+        # 使用处理后的消息（可能包含图片描述），添加统一格式的元数据
+        message_text_for_ai = MessageProcessor.add_metadata_to_message(
+            event,
+            processed_message,  # 使用处理后的消息（图片已处理）
+            self.config.get("include_timestamp", True),
+            self.config.get("include_sender_info", True),
+        )
+
+        if self.debug_mode:
+            logger.debug("【步骤7.5】为当前消息添加元数据（用于AI识别）")
+            logger.debug(f"  处理后消息: {processed_message[:100]}...")
+            logger.debug(f"  添加元数据后: {message_text_for_ai[:150]}...")
 
         # 提取历史上下文
         max_context = self.config.get("max_context_messages", 20)
@@ -500,13 +523,14 @@ class ChatPlus(Star):
         # 格式化上下文
         bot_id = event.get_self_id()
         formatted_context = await ContextManager.format_context_for_ai(
-            history_messages, message_text, bot_id
+            history_messages, message_text_for_ai, bot_id
         )
 
         if self.debug_mode:
             logger.debug(f"  格式化后长度: {len(formatted_context)} 字符")
 
-        return True, original_message_text, message_text, formatted_context
+        # 返回：原始消息文本、处理后的消息（不含元数据，用于保存）、格式化的上下文
+        return True, original_message_text, processed_message, formatted_context
 
     async def _generate_and_send_reply(
         self,
@@ -567,6 +591,7 @@ class ChatPlus(Star):
             self.context,
             final_message,
             self.config.get("reply_ai_extra_prompt", ""),
+            self.config.get("reply_ai_prompt_mode", "append"),
         )
 
         if self.debug_mode:
@@ -648,6 +673,26 @@ class ChatPlus(Star):
 
         if self.debug_mode:
             logger.debug("【步骤15】概率调整完成")
+
+        # 记录被回复的用户信息（用于注意力机制）
+        if self.config.get("enable_attention_mechanism", False):
+            if self.debug_mode:
+                logger.debug("【步骤16】记录被回复用户信息（注意力机制）")
+
+            # 获取被回复的用户信息
+            replied_user_id = event.get_sender_id()
+            replied_user_name = event.get_sender_name()
+
+            await AttentionManager.record_replied_user(
+                platform_name, is_private, chat_id, replied_user_id, replied_user_name
+            )
+
+            if self.debug_mode:
+                logger.debug(
+                    f"【步骤16】已记录: {replied_user_name}(ID: {replied_user_id})"
+                )
+
+        if self.debug_mode:
             logger.debug("=" * 60)
             logger.debug("✓ 消息处理流程完成")
 
@@ -693,7 +738,12 @@ class ChatPlus(Star):
 
         # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
         should_process = await self._check_probability_before_processing(
-            platform_name, is_private, chat_id, is_at_message, has_trigger_keyword
+            event,
+            platform_name,
+            is_private,
+            chat_id,
+            is_at_message,
+            has_trigger_keyword,
         )
         if not should_process:
             return
@@ -993,7 +1043,11 @@ class ChatPlus(Star):
             return False
 
     async def _check_probability(
-        self, platform_name: str, is_private: bool, chat_id: str
+        self,
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+        event: AstrMessageEvent,
     ) -> bool:
         """
         读空气概率检查，决定是否处理消息
@@ -1002,6 +1056,7 @@ class ChatPlus(Star):
             platform_name: 平台名称
             is_private: 是否私聊
             chat_id: 聊天ID
+            event: 消息事件对象（用于获取发送者信息）
 
         Returns:
             True=处理，False=跳过
@@ -1020,6 +1075,42 @@ class ChatPlus(Star):
                 f"  初始概率: {self.config.get('initial_probability', 0.1):.2f}"
             )
             logger.debug(f"  会话ID: {chat_id}")
+
+        # 应用注意力机制调整概率
+        attention_enabled = self.config.get("enable_attention_mechanism", False)
+        if attention_enabled:
+            if self.debug_mode:
+                logger.debug("  【注意力机制】开始调整概率")
+
+            # 获取当前消息发送者信息
+            current_user_id = event.get_sender_id()
+            current_user_name = event.get_sender_name()
+
+            # 根据注意力机制调整概率
+            adjusted_probability = await AttentionManager.get_adjusted_probability(
+                platform_name,
+                is_private,
+                chat_id,
+                current_user_id,
+                current_user_name,
+                current_probability,
+                self.config.get("attention_increased_probability", 0.9),
+                self.config.get("attention_decreased_probability", 0.1),
+                self.config.get("attention_duration", 120),
+                attention_enabled,
+            )
+
+            if adjusted_probability != current_probability:
+                if self.debug_mode:
+                    logger.debug(
+                        f"  【注意力机制】概率已调整: {current_probability:.2f} -> {adjusted_probability:.2f}"
+                    )
+                current_probability = adjusted_probability
+            else:
+                if self.debug_mode:
+                    logger.debug(
+                        f"  【注意力机制】无需调整，使用原概率: {current_probability:.2f}"
+                    )
 
         # 随机判断
         roll = random.random()

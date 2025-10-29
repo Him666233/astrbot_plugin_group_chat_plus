@@ -3,7 +3,7 @@
 导出所有工具类供主插件使用
 
 作者: Him666233
-版本: v1.0.0
+版本: v1.0.1
 """
 
 from .probability_manager import ProbabilityManager
@@ -16,6 +16,7 @@ from .memory_injector import MemoryInjector
 from .tools_reminder import ToolsReminder
 from .keyword_checker import KeywordChecker
 from .message_cleaner import MessageCleaner
+from .attention_manager import AttentionManager
 
 __all__ = [
     "ProbabilityManager",
@@ -28,4 +29,5 @@ __all__ = [
     "ToolsReminder",
     "KeywordChecker",
     "MessageCleaner",
+    "AttentionManager",
 ]
