@@ -138,28 +138,118 @@
         "default": []
     },
     "enable_attention_mechanism": {
-        "description": "启用注意力机制",
+        "description": "启用增强注意力机制",
         "type": "bool",
-        "hint": "开启后，AI会更关注刚刚回复过的用户。同一用户继续对话时提升回复概率，不同用户时降低概率，实现更精确的对话焦点。⚠️注意：启用后会覆盖'回复后的读空气概率'设置，建议将after_reply_probability设置为与initial_probability相同",
+        "hint": "【v1.0.2开始的增强】开启后，AI会智能追踪多个用户的注意力和情绪态度。支持：①多用户同时追踪 ②渐进式概率调整 ③情绪系统影响回复倾向 ④指数衰减，自然过渡。⚠️开启后会替换掉原来的传统概率提升模式，建议将after_reply_probability设置为与initial_probability相同，让注意力机制完全接管",
         "default": false
     },
     "attention_increased_probability": {
-        "description": "注意力提升概率",
+        "description": "注意力提升参考值",
         "type": "float",
-        "hint": "当前消息发送者是AI刚刚回复的用户时，概率提升到此值（范围0-1）。建议设置为0.9或更高",
+        "hint": "【v1.0.2开始的增强】作为最大提升概率的参考值（范围0-1）。实际概率会根据注意力分数(0-1)渐进式计算，不再是固定值。建议0.9",
         "default": 0.9
     },
     "attention_decreased_probability": {
-        "description": "注意力降低概率",
+        "description": "注意力降低参考值",
         "type": "float",
-        "hint": "当前消息发送者不是AI刚刚回复的用户时，概率降低到此值（范围0-1）。建议设置为0.05-0.15",
+        "hint": "【v1.0.2开始的增强】作为最低概率的参考值（范围0-1）。注意力很低或情绪负面时会降到此值附近。建议0.05-0.15",
         "default": 0.1
     },
     "attention_duration": {
-        "description": "注意力持续时间(秒)",
+        "description": "注意力数据清理周期(秒)",
         "type": "int",
-        "hint": "注意力机制生效的时间窗口(秒)。超过此时间后不再应用注意力调整，恢复为普通概率判断。建议与probability_duration保持一致或略短",
+        "hint": "【v1.0.2开始的新增】超过此时间×3未互动的用户会被清理。注意力会按指数衰减（半衰期5分钟），不再突然清零。建议120-300秒",
         "default": 120
+    },
+    "attention_max_tracked_users": {
+        "description": "【v1.0.2开始的新增】最大追踪用户数",
+        "type": "int",
+        "hint": "每个群聊最多同时追踪多少个用户的注意力和情绪。超过后会移除注意力最低的用户。建议5-15",
+        "default": 10
+    },
+    "attention_decay_halflife": {
+        "description": "【新增】注意力衰减半衰期(秒)",
+        "type": "int",
+        "hint": "注意力分数减半所需的时间。值越小衰减越快，AI更容易转移注意力。建议300秒(5分钟)",
+        "default": 300
+    },
+    "emotion_decay_halflife": {
+        "description": "【新增】情绪衰减半衰期(秒)",
+        "type": "int",
+        "hint": "情绪值减半所需的时间。值越小情绪恢复越快。建议600秒(10分钟)",
+        "default": 600
+    },
+    "enable_emotion_system": {
+        "description": "【新增】启用情绪态度系统",
+        "type": "bool",
+        "hint": "开启后，AI会对每个用户维护情绪态度（-1负面到+1正面）。负面情绪会降低回复概率，正面情绪会提升。情绪随时间自动恢复中性。需要同时启用注意力机制",
+        "default": true
+    },
+    "attention_boost_step": {
+        "description": "【新增】被回复用户注意力增加幅度",
+        "type": "float",
+        "hint": "每次回复某用户后，该用户的注意力分数增加多少（范围0-1）。值越大，AI对该用户的关注提升越快。建议0.2-0.5，默认0.4",
+        "default": 0.4
+    },
+    "attention_decrease_step": {
+        "description": "【新增】其他用户注意力减少幅度",
+        "type": "float",
+        "hint": "回复某用户后，其他用户的注意力分数减少多少（范围0-1）。值越大，AI注意力转移越明显。建议0.05-0.15，默认0.1",
+        "default": 0.1
+    },
+    "emotion_boost_step": {
+        "description": "【新增】被回复用户情绪增加幅度",
+        "type": "float",
+        "hint": "每次回复某用户后，该用户的情绪值增加多少（范围0-1）。值越大，情绪变化越快。建议0.05-0.2，默认0.1",
+        "default": 0.1
+    },
+    "enable_typo_generator": {
+        "description": "启用打字错误生成器",
+        "type": "bool",
+        "hint": "【v1.0.2开始的新增】开启后，AI的回复会有小概率出现错别字（如‘的’→‘得’），让回复更像真人打字。建议开启，错字率很低（2%），不影响理解",
+        "default": true
+    },
+    "typo_error_rate": {
+        "description": "打字错误概率",
+        "type": "float",
+        "hint": "【v1.0.2开始的新增】单个字被替换为错别字的概率（范围0-1），默认0.02即2%。建议保持默认值，设置过高会影响阅读",
+        "default": 0.02
+    },
+    "enable_mood_system": {
+        "description": "启用情绪系统",
+        "type": "bool",
+        "hint": "【v1.0.2开始的新增】开启后，AI会根据聊天内容产生情绪变化（如开心、难过等），回复会更有情感。情绪会随时间自动衰减",
+        "default": true
+    },
+    "enable_frequency_adjuster": {
+        "description": "启用频率动态调整",
+        "type": "bool",
+        "hint": "【v1.0.2开始的新增】开启后，AI会定期分析自己的发言频率，自动调整回复概率。如果发言过多会降低概率，过少会提升概率。建议开启",
+        "default": true
+    },
+    "frequency_check_interval": {
+        "description": "频率检查间隔(秒)",
+        "type": "int",
+        "hint": "【v1.0.2开始的新增】多久检查一次发言频率并调整概率。默认180秒(3分钟)。设置过短可能频繁调整，过长反应迟钝",
+        "default": 180
+    },
+    "enable_typing_simulator": {
+        "description": "启用回复延迟模拟",
+        "type": "bool",
+        "hint": "【v1.0.2开始的新增】开启后，AI回复会根据消息长度添加延迟，模拟真人打字速度。避免秒回，更真实",
+        "default": true
+    },
+    "typing_speed": {
+        "description": "模拟打字速度(字/秒)",
+        "type": "float",
+        "hint": "【v1.0.2开始的新增】模拟的打字速度，默认15字/秒（900字/分钟，接近真人速度）。设置越小延迟越长",
+        "default": 15.0
+    },
+    "typing_max_delay": {
+        "description": "最大延迟时间(秒)",
+        "type": "float",
+        "hint": "【v1.0.2开始的新增】无论消息多长，延迟不会超过此值。默认3秒。避免用户等待过久",
+        "default": 3.0
     }
 }
 

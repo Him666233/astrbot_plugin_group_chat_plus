@@ -3,7 +3,7 @@
 负责调用AI判断是否应该回复消息（读空气功能）
 
 作者: Him666233
-版本: v1.0.1
+版本: v1.0.2
 """
 
 import asyncio
@@ -186,6 +186,96 @@ class DecisionAI:
         except Exception as e:
             logger.error(f"调用决策AI时发生错误: {e}")
             return False
+
+    @staticmethod
+    async def call_decision_ai(
+        context: Context,
+        event: AstrMessageEvent,
+        prompt: str,
+        provider_id: str = "",
+        timeout: int = 30,
+        prompt_mode: str = "append",
+    ) -> str:
+        """
+        通用AI调用方法（供其他模块使用）
+
+        Args:
+            context: Context对象
+            event: 消息事件
+            prompt: 提示词内容
+            provider_id: AI提供商ID，空=默认
+            timeout: 超时时间（秒）
+            prompt_mode: 提示词模式（暂未使用，保留以兼容调用）
+
+        Returns:
+            AI的回复文本，失败返回空字符串
+        """
+        try:
+            # 获取AI提供商
+            if provider_id:
+                provider = context.get_provider_by_id(provider_id)
+                if not provider:
+                    logger.warning(f"无法找到提供商 {provider_id},使用默认提供商")
+                    provider = context.get_using_provider()
+            else:
+                provider = context.get_using_provider()
+
+            if not provider:
+                logger.error("无法获取AI提供商")
+                return ""
+
+            # 获取人格设定
+            try:
+                if hasattr(context, "provider_manager") and hasattr(
+                    context.provider_manager, "personas"
+                ):
+                    default_persona = None
+                    if hasattr(context.provider_manager, "selected_default_persona"):
+                        default_persona = (
+                            context.provider_manager.selected_default_persona
+                        )
+
+                    if default_persona:
+                        persona_prompt = default_persona.get("prompt", "")
+                    else:
+                        default_persona = (
+                            await context.persona_manager.get_default_persona_v3(
+                                event.unified_msg_origin
+                            )
+                        )
+                        persona_prompt = default_persona.get("prompt", "")
+                else:
+                    default_persona = (
+                        await context.persona_manager.get_default_persona_v3(
+                            event.unified_msg_origin
+                        )
+                    )
+                    persona_prompt = default_persona.get("prompt", "")
+            except Exception as e:
+                logger.warning(f"获取人格设定失败: {e}，使用空人格")
+                persona_prompt = ""
+
+            # 调用AI
+            async def _call_ai():
+                response = await provider.text_chat(
+                    prompt=prompt,
+                    contexts=[],
+                    image_urls=[],
+                    func_tool=None,
+                    system_prompt=persona_prompt,
+                )
+                return response.completion_text
+
+            # 使用超时控制
+            ai_response = await asyncio.wait_for(_call_ai(), timeout=timeout)
+            return ai_response or ""
+
+        except asyncio.TimeoutError:
+            logger.warning(f"AI调用超时（超过 {timeout} 秒）")
+            return ""
+        except Exception as e:
+            logger.error(f"调用AI时发生错误: {e}")
+            return ""
 
     @staticmethod
     def _parse_decision(ai_response: str) -> bool:

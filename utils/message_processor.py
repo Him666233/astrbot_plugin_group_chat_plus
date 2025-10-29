@@ -3,7 +3,7 @@
 负责消息预处理，添加时间戳、发送者信息等元数据
 
 作者: Him666233
-版本: v1.0.1
+版本: v1.0.2
 """
 
 from datetime import datetime

@@ -25,7 +25,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.1
+版本: v1.0.2
 """
 
 import random
@@ -92,27 +92,118 @@ class ChatPlus(Star):
         # 格式: {chat_id: True}
         self.processing_sessions = {}
 
+        # ========== v1.0.2 新增功能初始化 ==========
+
+        # 1. 打字错误生成器
+        self.typo_enabled = config.get("enable_typo_generator", True)
+        if self.typo_enabled:
+            from .utils import TypoGenerator
+
+            self.typo_generator = TypoGenerator(
+                error_rate=config.get("typo_error_rate", 0.02)
+            )
+        else:
+            self.typo_generator = None
+
+        # 2. 情绪追踪系统
+        self.mood_enabled = config.get("enable_mood_system", True)
+        if self.mood_enabled:
+            from .utils import MoodTracker
+
+            self.mood_tracker = MoodTracker()
+        else:
+            self.mood_tracker = None
+
+        # 3. 频率动态调整器
+        self.frequency_adjuster_enabled = config.get("enable_frequency_adjuster", True)
+        if self.frequency_adjuster_enabled:
+            from .utils import FrequencyAdjuster
+
+            self.frequency_adjuster = FrequencyAdjuster(context)
+            # 设置检查间隔
+            FrequencyAdjuster.CHECK_INTERVAL = config.get(
+                "frequency_check_interval", 180
+            )
+        else:
+            self.frequency_adjuster = None
+
+        # 4. 回复延迟模拟器
+        self.typing_simulator_enabled = config.get("enable_typing_simulator", True)
+        if self.typing_simulator_enabled:
+            from .utils import TypingSimulator
+
+            self.typing_simulator = TypingSimulator(
+                typing_speed=config.get("typing_speed", 15.0),
+                max_delay=config.get("typing_max_delay", 3.0),
+            )
+        else:
+            self.typing_simulator = None
+
+        # ========== 注意力机制增强配置 ==========
+        # 初始化注意力管理器（持久化存储）
+        AttentionManager.initialize(str(data_dir))
+
+        # 应用自定义配置到AttentionManager
+        attention_enabled = config.get("enable_attention_mechanism", False)
+        if attention_enabled:
+            # 设置最大追踪用户数
+            AttentionManager.MAX_TRACKED_USERS = config.get(
+                "attention_max_tracked_users", 10
+            )
+            # 设置注意力衰减半衰期
+            AttentionManager.ATTENTION_DECAY_HALFLIFE = config.get(
+                "attention_decay_halflife", 300
+            )
+            # 设置情绪衰减半衰期
+            AttentionManager.EMOTION_DECAY_HALFLIFE = config.get(
+                "emotion_decay_halflife", 600
+            )
+
+        # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.0")
+        logger.info("群聊增强插件已加载 - v1.0.2")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
         logger.info(f"启用的群组: {config.get('enabled_groups', [])} (留空=全部)")
         logger.info(f"详细日志模式: {'开启' if self.debug_mode else '关闭'}")
 
-        # 注意力机制配置
+        # 注意力机制配置（增强版）
         attention_enabled = config.get("enable_attention_mechanism", False)
-        logger.info(f"注意力机制: {'开启' if attention_enabled else '关闭'}")
+        logger.info(f"增强注意力机制: {'✓ 开启' if attention_enabled else '✗ 关闭'}")
         if attention_enabled:
             logger.info(
-                f"  - 同用户提升概率: {config.get('attention_increased_probability', 0.9)}"
+                f"  - 提升参考概率: {config.get('attention_increased_probability', 0.9)}"
             )
             logger.info(
-                f"  - 异用户降低概率: {config.get('attention_decreased_probability', 0.1)}"
+                f"  - 降低参考概率: {config.get('attention_decreased_probability', 0.1)}"
+            )
+            logger.info(f"  - 数据清理周期: {config.get('attention_duration', 120)}秒")
+            logger.info(
+                f"  - 最大追踪用户: {config.get('attention_max_tracked_users', 10)}人"
             )
             logger.info(
-                f"  - 注意力持续时间: {config.get('attention_duration', 120)}秒"
+                f"  - 注意力半衰期: {config.get('attention_decay_halflife', 300)}秒"
             )
+            logger.info(
+                f"  - 情绪半衰期: {config.get('emotion_decay_halflife', 600)}秒"
+            )
+            logger.info(
+                f"  - 情绪系统: {'✓ 启用' if config.get('enable_emotion_system', True) else '✗ 禁用'}"
+            )
+
+        # v1.0.2 新功能状态
+        logger.info("\n【v1.0.2 开始的新功能】")
+        logger.info(
+            f"打字错误生成器: {'✓ 已启用' if self.typo_enabled else '✗ 已禁用'}"
+        )
+        logger.info(f"情绪追踪系统: {'✓ 已启用' if self.mood_enabled else '✗ 已禁用'}")
+        logger.info(
+            f"频率动态调整: {'✓ 已启用' if self.frequency_adjuster_enabled else '✗ 已禁用'}"
+        )
+        logger.info(
+            f"回复延迟模拟: {'✓ 已启用' if self.typing_simulator_enabled else '✗ 已禁用'}"
+        )
 
         logger.info("=" * 50)
 
@@ -581,6 +672,16 @@ class ChatPlus(Star):
                     f"  已注入工具信息,长度增加: {len(final_message) - old_len} 字符"
                 )
 
+        # 🆕 v1.0.2: 注入情绪状态（如果启用）
+        if self.mood_enabled and self.mood_tracker:
+            if self.debug_mode:
+                logger.debug("【步骤12.5】注入情绪状态")
+
+            # 使用格式化后的上下文来判断情绪
+            final_message = self.mood_tracker.inject_mood_to_prompt(
+                chat_id, final_message, formatted_context
+            )
+
         # 调用AI生成回复
         if self.debug_mode:
             logger.debug("【步骤13】调用AI生成回复")
@@ -596,6 +697,28 @@ class ChatPlus(Star):
 
         if self.debug_mode:
             logger.debug("【步骤13】AI回复生成完成")
+
+        # 🆕 v1.0.2: 处理回复文本（添加错别字）
+        if self.typo_enabled and self.typo_generator and reply_result:
+            if self.debug_mode:
+                logger.debug("【步骤13.5】处理回复文本（可能添加错别字）")
+
+            # 提取回复文本
+            original_reply = str(reply_result)
+            processed_reply = self.typo_generator.process_reply(original_reply)
+
+            if processed_reply != original_reply:
+                # 回复被修改了，更新reply_result
+                reply_result = processed_reply
+                if self.debug_mode:
+                    logger.debug("  已添加错别字")
+
+        # 🆕 v1.0.2: 模拟打字延迟
+        if self.typing_simulator_enabled and self.typing_simulator and reply_result:
+            if self.debug_mode:
+                logger.debug("【步骤13.6】模拟打字延迟")
+
+            await self.typing_simulator.simulate_if_needed(str(reply_result))
 
         # 保存用户消息（从缓存读取并添加元数据）
         if self.debug_mode:
@@ -659,38 +782,134 @@ class ChatPlus(Star):
         # 发送回复
         yield reply_result
 
-        # 调整概率
-        if self.debug_mode:
-            logger.debug("【步骤15】调整读空气概率")
+        # 调整概率 / 记录注意力（二选一）
+        attention_enabled = self.config.get("enable_attention_mechanism", False)
 
-        await ProbabilityManager.boost_probability(
-            platform_name,
-            is_private,
-            chat_id,
-            self.config.get("after_reply_probability", 0.8),
-            self.config.get("probability_duration", 300),
-        )
-
-        if self.debug_mode:
-            logger.debug("【步骤15】概率调整完成")
-
-        # 记录被回复的用户信息（用于注意力机制）
-        if self.config.get("enable_attention_mechanism", False):
+        if attention_enabled:
+            # 启用注意力机制：使用注意力机制，不使用传统概率提升
             if self.debug_mode:
-                logger.debug("【步骤16】记录被回复用户信息（注意力机制）")
+                logger.debug("【步骤15】跳过传统概率调整，使用注意力机制")
+                logger.debug("【步骤16】记录被回复用户信息（注意力机制-增强版）")
 
             # 获取被回复的用户信息
             replied_user_id = event.get_sender_id()
             replied_user_name = event.get_sender_name()
 
+            # 获取消息预览（用于注意力机制的上下文记录）
+            message_preview = message_text[:50] if message_text else ""
+
             await AttentionManager.record_replied_user(
-                platform_name, is_private, chat_id, replied_user_id, replied_user_name
+                platform_name,
+                is_private,
+                chat_id,
+                replied_user_id,
+                replied_user_name,
+                message_preview=message_preview,
+                attention_boost_step=self.config.get("attention_boost_step", 0.4),
+                attention_decrease_step=self.config.get("attention_decrease_step", 0.1),
+                emotion_boost_step=self.config.get("emotion_boost_step", 0.1),
             )
 
             if self.debug_mode:
                 logger.debug(
-                    f"【步骤16】已记录: {replied_user_name}(ID: {replied_user_id})"
+                    f"【步骤16】已记录: {replied_user_name}(ID: {replied_user_id}), 消息预览: {message_preview}"
                 )
+        else:
+            # 未启用注意力机制：使用传统概率提升
+            if self.debug_mode:
+                logger.debug("【步骤15】调整读空气概率（传统模式）")
+
+            await ProbabilityManager.boost_probability(
+                platform_name,
+                is_private,
+                chat_id,
+                self.config.get("after_reply_probability", 0.8),
+                self.config.get("probability_duration", 300),
+            )
+
+            if self.debug_mode:
+                logger.debug("【步骤15】概率调整完成")
+
+        # 🆕 v1.0.2: 频率动态调整检查
+        if self.frequency_adjuster_enabled and self.frequency_adjuster:
+            try:
+                # 检查是否需要进行频率调整
+                message_count = self.frequency_adjuster.get_message_count(chat_id)
+
+                if self.frequency_adjuster.should_check_frequency(
+                    chat_id, message_count
+                ):
+                    if self.debug_mode:
+                        logger.debug("【步骤17】开始频率动态调整检查")
+
+                    # 获取最近的消息用于分析
+                    recent_messages = ContextManager.get_history_messages(event, 10)
+                    if recent_messages:
+                        # 构建可读的消息文本
+                        # AstrBotMessage 对象的属性访问方式
+                        bot_id = event.get_self_id()
+                        recent_text_parts = []
+                        for msg in recent_messages[-10:]:  # 最近10条
+                            # 判断消息角色（用户还是bot）
+                            role = "user"
+                            if hasattr(msg, "sender") and msg.sender:
+                                sender_id = (
+                                    msg.sender.user_id
+                                    if hasattr(msg.sender, "user_id")
+                                    else ""
+                                )
+                                if str(sender_id) == str(bot_id):
+                                    role = "assistant"
+
+                            # 提取消息内容
+                            content = ""
+                            if hasattr(msg, "message_str"):
+                                content = msg.message_str[:100]
+
+                            recent_text_parts.append(f"{role}: {content}")
+
+                        recent_text = "\n".join(recent_text_parts)
+
+                        # 使用AI分析频率
+                        decision = await self.frequency_adjuster.analyze_frequency(
+                            self.context,
+                            event,
+                            recent_text,
+                            self.config.get("decision_ai_provider_id", ""),
+                            20,  # 20秒超时
+                        )
+
+                        if decision:
+                            # 获取当前概率
+                            current_prob = (
+                                await ProbabilityManager.get_current_probability(
+                                    platform_name,
+                                    is_private,
+                                    chat_id,
+                                    self.config.get("initial_probability", 0.1),
+                                )
+                            )
+
+                            # 调整概率
+                            new_prob = self.frequency_adjuster.adjust_probability(
+                                current_prob, decision
+                            )
+
+                            # 如果概率有变化，更新初始概率配置（临时）
+                            if abs(new_prob - current_prob) > 0.01:
+                                # 注意：这里不修改config，而是通过调整概率管理器
+                                # 可以考虑添加一个方法来临时覆盖概率
+                                logger.info(
+                                    f"[频率调整] 建议将初始概率从 {current_prob:.2f} 调整为 {new_prob:.2f}"
+                                )
+
+                        # 更新检查状态
+                        self.frequency_adjuster.update_check_state(chat_id)
+
+                    if self.debug_mode:
+                        logger.debug("【步骤17】频率调整检查完成")
+            except Exception as e:
+                logger.error(f"频率调整检查失败: {e}")
 
         if self.debug_mode:
             logger.debug("=" * 60)
@@ -720,6 +939,10 @@ class ChatPlus(Star):
         ) = await self._perform_initial_checks(event)
         if not should_continue:
             return
+
+        # 🆕 v1.0.2: 记录消息（用于频率调整统计）
+        if self.frequency_adjuster_enabled and self.frequency_adjuster:
+            self.frequency_adjuster.record_message(chat_id)
 
         # 步骤2: 检查消息触发器（决定是否跳过概率判断）
         is_at_message, has_trigger_keyword = await self._check_message_triggers(event)
@@ -901,8 +1124,6 @@ class ChatPlus(Star):
                     "[消息发送后] ⚠️ 缓存中无消息，从event提取消息（不应该发生）"
                 )
                 # 使用当前处理后的消息
-                from .utils import MessageCleaner
-
                 processed = MessageCleaner.extract_raw_message_from_event(event)
                 if processed:
                     message_to_save = MessageProcessor.add_metadata_to_message(
