@@ -106,22 +106,46 @@ class MessageCleaner:
 
                 if raw_parts:
                     raw_message = "".join(raw_parts).strip()
-                    logger.debug(
-                        f"[消息清理] 从消息链提取原始消息: {raw_message[:100]}..."
-                    )
-                    return raw_message
+                    # 只有当提取到非空消息时才返回
+                    if raw_message:
+                        logger.debug(
+                            f"[消息清理] 从消息链提取原始消息: {raw_message[:100]}..."
+                        )
+                        return raw_message
+                    else:
+                        # 提取到空消息，记录警告并继续尝试其他方法
+                        logger.warning(
+                            f"[消息清理] 方法1提取到空消息！raw_parts={raw_parts[:5]}，尝试方法2"
+                        )
 
-            # 方法2: 使用get_message_plain（可能包含提示词，需要清理）
-            plain_message = event.get_message_plain()
+            # 方法2: 使用get_message_str（可能包含提示词，需要清理）
+            plain_message = event.get_message_str()
+            logger.debug(
+                f"[消息清理] 方法2: get_message_str()={plain_message[:100] if plain_message else '(空)'}"
+            )
             if plain_message:
                 cleaned = MessageCleaner.clean_message(plain_message)
-                logger.debug(f"[消息清理] 从plain提取并清理: {cleaned[:100]}...")
-                return cleaned
+                logger.debug(
+                    f"[消息清理] 从plain提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
+                )
+                if cleaned:
+                    return cleaned
+                else:
+                    logger.warning("[消息清理] 方法2清理后为空，尝试方法3")
 
             # 方法3: 使用get_message_outline（最后的备选）
             outline_message = event.get_message_outline()
+            logger.debug(
+                f"[消息清理] 方法3: get_message_outline()={outline_message[:100] if outline_message else '(空)'}"
+            )
             cleaned = MessageCleaner.clean_message(outline_message)
-            logger.debug(f"[消息清理] 从outline提取并清理: {cleaned[:100]}...")
+            logger.debug(
+                f"[消息清理] 从outline提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
+            )
+            if not cleaned:
+                logger.warning(
+                    f"[消息清理] 所有方法都返回空消息！event.message_str={event.message_str[:100] if event.message_str else '(空)'}"
+                )
             return cleaned
 
         except Exception as e:

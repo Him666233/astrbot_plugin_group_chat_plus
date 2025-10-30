@@ -924,24 +924,26 @@ class ContextManager:
         try:
             # 1. 获取unified_msg_origin（会话标识）
             unified_msg_origin = event.unified_msg_origin
-            logger.info(f"========== [官方保存+缓存转正] 开始保存 ==========")
-            logger.info(f"[官方保存+缓存转正] unified_msg_origin: {unified_msg_origin}")
-            logger.info(f"[官方保存+缓存转正] 缓存消息: {len(cached_messages)} 条")
-            logger.info(f"[官方保存+缓存转正] 用户消息长度: {len(user_message)} 字符")
-            logger.info(f"[官方保存+缓存转正] AI回复长度: {len(bot_message)} 字符")
+            logger.debug(f"========== [官方保存+缓存转正] 开始保存 ==========")
+            logger.debug(
+                f"[官方保存+缓存转正] unified_msg_origin: {unified_msg_origin}"
+            )
+            logger.debug(f"[官方保存+缓存转正] 缓存消息: {len(cached_messages)} 条")
+            logger.debug(f"[官方保存+缓存转正] 用户消息长度: {len(user_message)} 字符")
+            logger.debug(f"[官方保存+缓存转正] AI回复长度: {len(bot_message)} 字符")
 
             # 2. 获取conversation_manager
             cm = context.conversation_manager
-            logger.info(
+            logger.debug(
                 f"[官方保存+缓存转正] ConversationManager类型: {type(cm).__name__}"
             )
 
             # 3. 获取当前对话ID，如果没有则创建
             curr_cid = await cm.get_curr_conversation_id(unified_msg_origin)
-            logger.info(f"[官方保存+缓存转正] 当前对话ID: {curr_cid}")
+            logger.debug(f"[官方保存+缓存转正] 当前对话ID: {curr_cid}")
 
             if not curr_cid:
-                logger.info(
+                logger.debug(
                     f"[官方保存+缓存转正] ❗ 会话 {unified_msg_origin} 没有对话，准备创建新对话"
                 )
                 # 获取群名作为标题
@@ -955,8 +957,8 @@ class ContextManager:
                     if not event.is_private_chat()
                     else f"私聊 {event.get_sender_name()}"
                 )
-                logger.info(f"[官方保存+缓存转正] 新对话标题: {title}")
-                logger.info(f"[官方保存+缓存转正] 平台ID: {event.get_platform_id()}")
+                logger.debug(f"[官方保存+缓存转正] 新对话标题: {title}")
+                logger.debug(f"[官方保存+缓存转正] 平台ID: {event.get_platform_id()}")
 
                 # 使用new_conversation创建
                 try:
@@ -981,19 +983,19 @@ class ContextManager:
                 return False
 
             # 4. 获取当前对话的历史记录
-            logger.info(f"[官方保存+缓存转正] 正在获取对话历史...")
+            logger.debug(f"[官方保存+缓存转正] 正在获取对话历史...")
             try:
                 conversation = await cm.get_conversation(
                     unified_msg_origin=unified_msg_origin, conversation_id=curr_cid
                 )
-                logger.info(
+                logger.debug(
                     f"[官方保存+缓存转正] 获取对话对象: {conversation is not None}"
                 )
                 if conversation:
-                    logger.info(
+                    logger.debug(
                         f"[官方保存+缓存转正] 对话对象类型: {type(conversation).__name__}"
                     )
-                    logger.info(
+                    logger.debug(
                         f"[官方保存+缓存转正] 对话标题: {getattr(conversation, 'title', 'N/A')}"
                     )
             except Exception as get_err:
@@ -1007,26 +1009,27 @@ class ContextManager:
                 # history是JSON字符串，需要解析
                 try:
                     history_list = json.loads(conversation.history)
-                    logger.info(
+                    logger.debug(
                         f"[官方保存+缓存转正] 解析历史记录成功: {len(history_list)} 条"
                     )
                 except (json.JSONDecodeError, TypeError) as parse_err:
                     logger.warning(f"[官方保存+缓存转正] 解析历史记录失败: {parse_err}")
                     history_list = []
             else:
-                logger.info(f"[官方保存+缓存转正] 对话历史为空，从头开始")
+                logger.debug(f"[官方保存+缓存转正] 对话历史为空，从头开始")
                 history_list = []
 
             # 6. 添加需要转正的缓存消息（去重）
+            cache_converted = 0
             if cached_messages:
-                logger.info(f"[官方保存+缓存转正] 开始处理缓存消息转正...")
+                logger.debug(f"[官方保存+缓存转正] 开始处理缓存消息转正...")
                 # 提取现有历史中的消息内容（用于去重）
                 existing_contents = set()
                 for msg in history_list:
                     if isinstance(msg, dict) and "content" in msg:
                         existing_contents.add(msg["content"])
 
-                logger.info(
+                logger.debug(
                     f"[官方保存+缓存转正] 现有历史内容数: {len(existing_contents)} 条"
                 )
 
@@ -1046,24 +1049,25 @@ class ContextManager:
                         else:
                             skipped_count += 1
 
-                logger.info(
+                cache_converted = added_count
+                logger.debug(
                     f"[官方保存+缓存转正] 缓存消息处理完成: 总数={len(cached_messages)}, 添加={added_count}, 跳过(重复)={skipped_count}"
                 )
             else:
-                logger.info(f"[官方保存+缓存转正] 无缓存消息需要转正")
+                logger.debug(f"[官方保存+缓存转正] 无缓存消息需要转正")
 
             # 7. 添加当前用户消息
             history_list.append({"role": "user", "content": user_message})
-            logger.info(f"[官方保存+缓存转正] 添加用户消息: {user_message[:50]}...")
+            logger.debug(f"[官方保存+缓存转正] 添加用户消息: {user_message[:50]}...")
 
             # 8. 添加AI回复
             history_list.append({"role": "assistant", "content": bot_message})
-            logger.info(f"[官方保存+缓存转正] 添加AI回复: {bot_message[:50]}...")
+            logger.debug(f"[官方保存+缓存转正] 添加AI回复: {bot_message[:50]}...")
 
-            logger.info(
+            logger.debug(
                 f"[官方保存+缓存转正] 准备保存，总消息数: {len(history_list)} 条"
             )
-            logger.info(f"[官方保存+缓存转正] ========== 调用底层保存方法 ==========")
+            logger.debug(f"[官方保存+缓存转正] ========== 调用底层保存方法 ==========")
 
             # 9. 使用官方API保存
             success = await ContextManager._try_official_save(

@@ -220,7 +220,12 @@ class ImageHandler:
                 if formatted:
                     text_parts.append(formatted)
 
-        return "".join(text_parts)
+        result = "".join(text_parts).strip()
+        if not result:
+            logger.warning(
+                f"[图片处理] _extract_text_only 提取到空文本！text_parts={text_parts[:5]}"
+            )
+        return result
 
     @staticmethod
     async def _convert_images_to_text(

@@ -322,7 +322,7 @@ class MessageProcessor:
                         bot_name = origin_parts[0]
 
                 # 获取消息文本
-                message_text = event.get_message_plain()
+                message_text = event.get_message_str()
 
                 # 强制日志：显示文本@检测的详细信息（用于排查）
                 logger.debug(

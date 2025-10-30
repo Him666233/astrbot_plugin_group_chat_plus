@@ -308,15 +308,13 @@ class ChatPlus(Star):
         # 判断是否是@消息
         is_at_message = MessageProcessor.is_at_message(event)
 
-        # 强制日志：@消息判断结果（用于排查旧版QQ兼容问题）
-        logger.info(
-            f"⭐ [@消息判断] 结果: {'✅是@消息' if is_at_message else '❌非@消息'}"
-        )
-
+        # 只在debug模式或是@消息时记录
         if self.debug_mode:
             logger.debug(
                 f"【步骤3】@消息检测: {'是@消息' if is_at_message else '非@消息'}"
             )
+        elif is_at_message:
+            logger.info("⭐ [@消息判断] 是@消息")
 
         # 触发关键词检查
         if self.debug_mode:
@@ -327,13 +325,9 @@ class ChatPlus(Star):
             event, trigger_keywords
         )
 
-        # 强制日志：触发关键词判断结果
-        logger.info(
-            f"⭐ [触发关键词判断] 结果: {'✅包含关键词' if has_trigger_keyword else '❌无关键词'}"
-        )
-
+        # 只在检测到关键词时记录
         if has_trigger_keyword:
-            logger.info("消息包含触发关键词，跳过读空气判断")
+            logger.info("⭐ [触发关键词] 检测到关键词，跳过读空气判断")
             if self.debug_mode:
                 logger.debug("【步骤4】检测到触发关键词，跳过读空气判断")
 
@@ -514,10 +508,25 @@ class ChatPlus(Star):
             else None,
         }
 
-        # 强制日志：缓存内容（不受debug_mode控制）
-        logger.info(f"🔵 [缓存] 原始消息: {original_message_text[:100]}")
-        logger.info(f"🔵 [缓存] 处理后消息: {processed_message[:100]}")
-        logger.info(f"🔵 [缓存] 已缓存内容: {cached_message['content'][:100]}")
+        # 缓存内容日志
+        if not original_message_text:
+            logger.warning("⚠️ [缓存] 原始消息为空！可能存在消息提取问题")
+        if not processed_message:
+            logger.warning("⚠️ [缓存] 处理后消息为空！可能存在图片处理问题")
+
+        # 简化日志：只显示一条缓存成功的消息
+        if self.debug_mode:
+            logger.debug(
+                f"【缓存详情】原始: {original_message_text[:100] if original_message_text else '(空)'}"
+            )
+            logger.debug(
+                f"【缓存详情】处理后: {processed_message[:100] if processed_message else '(空)'}"
+            )
+            logger.debug(
+                f"【缓存详情】已缓存: {cached_message['content'][:100] if cached_message['content'] else '(空)'}"
+            )
+        else:
+            logger.info("🔵 已缓存消息")
 
         if self.debug_mode:
             logger.debug(f"  已缓存内容: {cached_message['content'][:200]}...")
@@ -736,11 +745,10 @@ class ChatPlus(Star):
                     # 获取处理后的消息内容（不含元数据）
                     raw_content = last_cached["content"]
 
-                    # 强制日志：从缓存读取的内容
-                    logger.info(f"🟢 [步骤14-读缓存] 内容: {raw_content[:100]}")
-
                     if self.debug_mode:
-                        logger.debug(f"  从缓存读取的内容: {raw_content[:200]}...")
+                        logger.debug(f"【步骤14-读缓存】内容: {raw_content[:100]}")
+                    else:
+                        logger.info("🟢 读取缓存中")
 
                     # 使用缓存中的发送者信息添加元数据
                     message_to_save = MessageProcessor.add_metadata_from_cache(
@@ -753,8 +761,10 @@ class ChatPlus(Star):
                         self.config.get("include_sender_info", True),
                     )
 
-                    # 强制日志：添加元数据后的内容
-                    logger.info(f"🟢 [步骤14-加元数据后] 内容: {message_to_save[:150]}")
+                    if self.debug_mode:
+                        logger.debug(
+                            f"【步骤14-加元数据后】内容: {message_to_save[:150]}"
+                        )
 
             # 如果从缓存获取失败，使用当前处理后的消息并添加元数据
             if not message_to_save:
@@ -951,13 +961,13 @@ class ChatPlus(Star):
         # 这样在 mention_only 模式下，包含关键词的消息也能正常处理图片
         should_treat_as_at = is_at_message or has_trigger_keyword
 
-        # 强制日志：显示等同@消息处理的判断结果
-        logger.info(
-            f"⭐ [等同@消息] 判断: {'✅是' if should_treat_as_at else '❌否'} (is_at={is_at_message}, has_keyword={has_trigger_keyword})"
-        )
-
-        if should_treat_as_at and has_trigger_keyword and not is_at_message:
-            logger.info("    ↳ 因包含触发关键词，将按@消息处理（含图片处理）")
+        # 只在debug模式下显示详细判断，或在特殊情况下记录
+        if self.debug_mode:
+            logger.debug(
+                f"【等同@消息】判断: {'是' if should_treat_as_at else '否'} (is_at={is_at_message}, has_keyword={has_trigger_keyword})"
+            )
+        elif should_treat_as_at and has_trigger_keyword and not is_at_message:
+            logger.info("⭐ [等同@消息] 因包含触发关键词，按@消息处理")
 
         # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
         should_process = await self._check_probability_before_processing(
@@ -1074,9 +1084,10 @@ class ChatPlus(Star):
                 logger.debug(f"[消息发送后] 会话 {chat_id} 回复文本为空，跳过")
                 return
 
-            logger.info(
-                f"[消息发送后] 会话 {chat_id} - 开始保存AI回复到官方系统，长度: {len(bot_reply_text)} 字符"
-            )
+            if self.debug_mode:
+                logger.debug(
+                    f"【消息发送后】会话 {chat_id} - 保存AI回复，长度: {len(bot_reply_text)} 字符"
+                )
 
             # 保存AI回复到自定义存储
             await ContextManager.save_bot_message(event, bot_reply_text, self.context)
