@@ -12,6 +12,7 @@
 7. @消息快速响应 - 跳过概率判断直接回复
 8. 智能缓存 - 避免对话上下文丢失
 9. 官方历史同步 - 自动保存到系统对话记录
+10. @提及智能识别 - 正确理解@别人的消息（v1.0.3新增）
 
 缓存工作原理：
 - 通过初筛的消息先放入缓存
@@ -25,7 +26,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.2
+版本: v1.0.3
 """
 
 import random
@@ -54,7 +55,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.0",
+    "v1.0.3",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -161,7 +162,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.2")
+        logger.info("群聊增强插件已加载 - v1.0.3")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -433,10 +434,20 @@ class ChatPlus(Star):
             return True
 
     async def _process_message_content(
-        self, event: AstrMessageEvent, chat_id: str, is_at_message: bool
+        self,
+        event: AstrMessageEvent,
+        chat_id: str,
+        is_at_message: bool,
+        mention_info: dict = None,
     ) -> tuple:
         """
         处理消息内容（图片处理、上下文格式化）
+
+        Args:
+            event: 消息事件对象
+            chat_id: 聊天ID
+            is_at_message: 是否为@消息
+            mention_info: @别人的信息字典（如果存在）
 
         Returns:
             (should_continue, original_message_text, processed_message, formatted_context)
@@ -506,6 +517,8 @@ class ChatPlus(Star):
             "message_timestamp": event.message_obj.timestamp
             if hasattr(event, "message_obj") and hasattr(event.message_obj, "timestamp")
             else None,
+            # 保存@别人的信息（如果存在）
+            "mention_info": mention_info,
         }
 
         # 缓存内容日志
@@ -569,6 +582,7 @@ class ChatPlus(Star):
             processed_message,  # 使用处理后的消息（图片已处理）
             self.config.get("include_timestamp", True),
             self.config.get("include_sender_info", True),
+            mention_info,  # 传递@信息
         )
 
         if self.debug_mode:
@@ -759,6 +773,7 @@ class ChatPlus(Star):
                         or last_cached.get("timestamp"),
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
+                        last_cached.get("mention_info"),  # 传递@信息
                     )
 
                     if self.debug_mode:
@@ -776,6 +791,7 @@ class ChatPlus(Star):
                     message_text,  # message_text 就是 processed_message
                     self.config.get("include_timestamp", True),
                     self.config.get("include_sender_info", True),
+                    None,  # 这种情况下没有mention_info（从event提取的fallback）
                 )
 
             if self.debug_mode:
@@ -981,9 +997,14 @@ class ChatPlus(Star):
         if not should_process:
             return
 
+        # 步骤3.5: 检测@提及信息（在图片处理之前，避免不必要的开销）
+        mention_info = await self._check_mention_others(event)
+
         # 步骤4-6: 处理消息内容（图片处理等耗时操作）
         # 使用 should_treat_as_at 而不是 is_at_message，这样触发关键词也能触发图片处理
-        result = await self._process_message_content(event, chat_id, should_treat_as_at)
+        result = await self._process_message_content(
+            event, chat_id, should_treat_as_at, mention_info
+        )
         if not result[0]:  # should_continue为False
             return
 
@@ -1018,6 +1039,7 @@ class ChatPlus(Star):
                         or last_cached_msg.get("timestamp"),
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
+                        last_cached_msg.get("mention_info"),  # 传递@信息
                     )
 
                     await ContextManager.save_user_message(
@@ -1122,6 +1144,7 @@ class ChatPlus(Star):
                         or last_cached.get("timestamp"),
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
+                        last_cached.get("mention_info"),  # 传递@信息
                     )
 
                     # 强制日志：添加元数据后的内容
@@ -1142,6 +1165,7 @@ class ChatPlus(Star):
                         processed,
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
+                        None,  # 这种情况下没有mention_info（从event提取的fallback）
                     )
                     logger.debug(
                         f"[消息发送后] 从event提取的消息: {message_to_save[:200]}..."
@@ -1183,6 +1207,7 @@ class ChatPlus(Star):
                             or cached_msg.get("timestamp"),
                             self.config.get("include_timestamp", True),
                             self.config.get("include_sender_info", True),
+                            cached_msg.get("mention_info"),  # 传递@信息
                         )
 
                         # 添加到转正列表
@@ -1273,6 +1298,66 @@ class ChatPlus(Star):
         else:
             logger.debug(f"群组 {group_id} 未在启用列表中")
             return False
+
+    async def _check_mention_others(self, event: AstrMessageEvent) -> dict:
+        """
+        检测消息中是否@了别人（不是机器人自己）
+
+        Args:
+            event: 消息事件对象
+
+        Returns:
+            dict: 包含@信息的字典，如果没有@别人则返回None
+                  格式: {"mentioned_user_id": "xxx", "mentioned_user_name": "xxx"}
+        """
+        try:
+            # 获取机器人自己的ID
+            bot_id = event.get_self_id()
+
+            # 获取消息组件列表
+            messages = event.get_messages()
+            if not messages:
+                return None
+
+            # 检查消息中的At组件
+            from astrbot.core.message.components import At
+
+            for component in messages:
+                if isinstance(component, At):
+                    # 获取被@的用户ID
+                    mentioned_id = str(component.qq)
+
+                    # 如果@的不是机器人自己，且不是@全体成员
+                    if mentioned_id != bot_id and mentioned_id.lower() != "all":
+                        mentioned_name = (
+                            component.name
+                            if hasattr(component, "name") and component.name
+                            else ""
+                        )
+
+                        # 强制输出 @ 检测日志（使用 INFO 级别确保可见）
+                        logger.info(
+                            f"🔍 [@检测-@别人] 发现@其他用户: ID={mentioned_id}, 名称={mentioned_name or '未知'}"
+                        )
+                        if self.debug_mode:
+                            logger.debug(
+                                f"【@检测】详细信息: mentioned_id={mentioned_id}, mentioned_name={mentioned_name}"
+                            )
+
+                        return {
+                            "mentioned_user_id": mentioned_id,
+                            "mentioned_user_name": mentioned_name,
+                        }
+
+            # 未检测到@别人，输出日志（仅在debug模式）
+            if self.debug_mode:
+                logger.debug("【@检测】未检测到@其他用户")
+            return None
+
+        except Exception as e:
+            # 出错时不影响主流程，只记录错误日志
+            logger.error(f"检测@提及时发生错误: {e}", exc_info=True)
+            return None
 
     async def _check_probability(
         self,

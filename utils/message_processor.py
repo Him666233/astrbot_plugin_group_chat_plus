@@ -3,7 +3,7 @@
 负责消息预处理，添加时间戳、发送者信息等元数据
 
 作者: Him666233
-版本: v1.0.2
+版本: v1.0.3
 """
 
 from datetime import datetime
@@ -26,6 +26,7 @@ class MessageProcessor:
         message_text: str,
         include_timestamp: bool,
         include_sender_info: bool,
+        mention_info: dict = None,
     ) -> str:
         """
         为消息添加元数据（时间戳和发送者）
@@ -38,6 +39,7 @@ class MessageProcessor:
             message_text: 原始消息
             include_timestamp: 是否包含时间戳
             include_sender_info: 是否包含发送者信息
+            mention_info: @别人的信息字典（如果存在）
 
         Returns:
             添加元数据后的文本
@@ -70,6 +72,39 @@ class MessageProcessor:
             else:
                 processed_message = message_text
 
+            # 如果存在@别人的信息，添加系统提示
+            if mention_info and isinstance(mention_info, dict):
+                mentioned_id = mention_info.get("mentioned_user_id", "")
+                mentioned_name = mention_info.get("mentioned_user_name", "")
+
+                if mentioned_id:
+                    # 构建系统提示（使用特殊标记【】，确保不会被MessageCleaner过滤）
+                    # 注意：措辞要对决策AI和回复AI都适用，不要加"请判断是否回复"这种话
+                    mention_notice = (
+                        f"\n【@指向说明】这条消息通过@符号指定发送给其他用户"
+                    )
+                    if mentioned_name:
+                        mention_notice += (
+                            f"（被@用户：{mentioned_name}，ID：{mentioned_id}）"
+                        )
+                    else:
+                        mention_notice += f"（被@用户ID：{mentioned_id}）"
+                    mention_notice += "，并非发给你本人。"
+                    mention_notice += f"\n【原始内容】{message_text}"
+
+                    # 将原消息内容替换为包含系统提示的版本
+                    # 保持元数据格式不变，只在消息内容部分添加提示
+                    if timestamp_str and sender_prefix:
+                        processed_message = (
+                            f"[{timestamp_str}] {sender_prefix}: {mention_notice}"
+                        )
+                    elif timestamp_str:
+                        processed_message = f"[{timestamp_str}] {mention_notice}"
+                    elif sender_prefix:
+                        processed_message = f"{sender_prefix}: {mention_notice}"
+                    else:
+                        processed_message = mention_notice
+
             if timestamp_str or sender_prefix:
                 logger.debug(
                     f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
@@ -90,6 +125,7 @@ class MessageProcessor:
         message_timestamp: float,
         include_timestamp: bool,
         include_sender_info: bool,
+        mention_info: dict = None,
     ) -> str:
         """
         使用缓存中的发送者信息为消息添加元数据
@@ -99,12 +135,13 @@ class MessageProcessor:
         用于缓存消息转正时，使用原始发送者的信息而不是当前event的发送者
 
         Args:
-            message_text: 原始消息
+            message_text: 消息文本
             sender_id: 发送者ID（从缓存中获取）
-            sender_name: 发送者昵称（从缓存中获取）
+            sender_name: 发送者名称（从缓存中获取）
             message_timestamp: 消息时间戳（从缓存中获取）
             include_timestamp: 是否包含时间戳
             include_sender_info: 是否包含发送者信息
+            mention_info: @别人的信息字典（如果存在）
 
         Returns:
             添加元数据后的文本
@@ -139,6 +176,39 @@ class MessageProcessor:
                 processed_message = f"{sender_prefix}: {message_text}"
             else:
                 processed_message = message_text
+
+            # 如果存在@别人的信息，添加系统提示
+            if mention_info and isinstance(mention_info, dict):
+                mentioned_id = mention_info.get("mentioned_user_id", "")
+                mentioned_name = mention_info.get("mentioned_user_name", "")
+
+                if mentioned_id:
+                    # 构建系统提示（使用特殊标记【】，确保不会被MessageCleaner过滤）
+                    # 注意：措辞要对决策AI和回复AI都适用，不要加"请判断是否回复"这种话
+                    mention_notice = (
+                        f"\n【@指向说明】这条消息通过@符号指定发送给其他用户"
+                    )
+                    if mentioned_name:
+                        mention_notice += (
+                            f"（被@用户：{mentioned_name}，ID：{mentioned_id}）"
+                        )
+                    else:
+                        mention_notice += f"（被@用户ID：{mentioned_id}）"
+                    mention_notice += "，并非发给你本人。"
+                    mention_notice += f"\n【原始内容】{message_text}"
+
+                    # 将原消息内容替换为包含系统提示的版本
+                    # 保持元数据格式不变，只在消息内容部分添加提示
+                    if timestamp_str and sender_prefix:
+                        processed_message = (
+                            f"[{timestamp_str}] {sender_prefix}: {mention_notice}"
+                        )
+                    elif timestamp_str:
+                        processed_message = f"[{timestamp_str}] {mention_notice}"
+                    elif sender_prefix:
+                        processed_message = f"{sender_prefix}: {mention_notice}"
+                    else:
+                        processed_message = mention_notice
 
             if timestamp_str or sender_prefix:
                 logger.debug(

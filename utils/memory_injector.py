@@ -15,7 +15,7 @@
 - 未来应考虑使用更稳定的插件间通信机制
 
 作者: Him666233
-版本: v1.0.2
+版本: v1.0.3
 """
 
 from typing import Optional
