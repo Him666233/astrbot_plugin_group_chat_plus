@@ -388,6 +388,15 @@ class ContextManager:
             是否成功
         """
         try:
+            # 导入 MessageCleaner
+            from .message_cleaner import MessageCleaner
+
+            # 清理消息，确保不包含系统提示词
+            cleaned_message = MessageCleaner.clean_message(message_text)
+            if not cleaned_message:
+                # 如果清理后为空，使用原消息
+                cleaned_message = message_text
+
             # 获取平台和聊天信息
             platform_name = event.get_platform_name()
             is_private = event.is_private_chat()
@@ -407,7 +416,7 @@ class ContextManager:
 
             # 创建用户消息对象
             user_msg = AstrBotMessage()
-            user_msg.message_str = message_text
+            user_msg.message_str = cleaned_message
             user_msg.platform_name = platform_name
             user_msg.timestamp = int(datetime.now().timestamp())
             user_msg.type = (
@@ -545,6 +554,15 @@ class ContextManager:
             是否成功
         """
         try:
+            # 导入 MessageCleaner
+            from .message_cleaner import MessageCleaner
+
+            # 清理消息，确保不包含系统提示词
+            cleaned_message = MessageCleaner.clean_message(bot_message_text)
+            if not cleaned_message:
+                # 如果清理后为空，使用原消息
+                cleaned_message = bot_message_text
+
             # 获取平台和聊天信息
             platform_name = event.get_platform_name()
             is_private = event.is_private_chat()
@@ -564,7 +582,7 @@ class ContextManager:
 
             # 创建AI消息对象
             bot_msg = AstrBotMessage()
-            bot_msg.message_str = bot_message_text
+            bot_msg.message_str = cleaned_message
             bot_msg.platform_name = platform_name
             bot_msg.timestamp = int(datetime.now().timestamp())
             bot_msg.type = (
@@ -928,6 +946,22 @@ class ContextManager:
             是否成功
         """
         try:
+            # 导入 MessageCleaner
+            from .message_cleaner import MessageCleaner
+
+            # 清理消息，确保不包含系统提示词
+            user_message = MessageCleaner.clean_message(user_message) or user_message
+            bot_message = MessageCleaner.clean_message(bot_message) or bot_message
+
+            # 清理缓存消息
+            if cached_messages:
+                for msg in cached_messages:
+                    if isinstance(msg, dict) and "content" in msg:
+                        original_content = msg["content"]
+                        cleaned_content = MessageCleaner.clean_message(original_content)
+                        if cleaned_content:
+                            msg["content"] = cleaned_content
+
             # 1. 获取unified_msg_origin（会话标识）
             unified_msg_origin = event.unified_msg_origin
             logger.debug(f"========== [官方保存+缓存转正] 开始保存 ==========")
