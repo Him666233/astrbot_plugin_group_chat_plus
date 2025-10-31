@@ -324,10 +324,10 @@ class ContextManager:
 
                     # 格式化消息
                     if is_bot:
-                        # AI自己的回复,特殊标注
+                        # AI自己的回复,特殊标注（强调提醒不要重复）
                         # 明确告诉AI这是它自己的历史回复，使用昵称来增强识别
                         formatted_parts.append(
-                            f"[{time_str}] {sender_name}(你自己，ID:{sender_id}): {message_content}"
+                            f"[{time_str}] 【你自己的历史回复】{sender_name}(ID:{sender_id}): {message_content}"
                         )
                     else:
                         # 其他用户的消息
@@ -337,9 +337,15 @@ class ContextManager:
 
                 formatted_parts.append("")  # 空行分隔
 
-            # 添加当前消息部分
-            formatted_parts.append("=== 当前新消息 ===")
+            # 添加当前消息部分（强调重要性）
+            formatted_parts.append("")  # 空行分隔
+            formatted_parts.append("=" * 50)
+            formatted_parts.append(
+                "=== 【重要】当前新消息（请优先关注这条消息的核心内容）==="
+            )
+            formatted_parts.append("=" * 50)
             formatted_parts.append(current_message)
+            formatted_parts.append("=" * 50)
 
             result = "\n".join(formatted_parts)
             logger.debug(f"上下文格式化完成,总长度: {len(result)} 字符")
