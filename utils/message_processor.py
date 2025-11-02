@@ -2,8 +2,12 @@
 消息处理器模块
 负责消息预处理，添加时间戳、发送者信息等元数据
 
+v1.0.4 更新：
+- 添加发送者识别系统提示（根据触发方式）
+- 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
+
 作者: Him666233
-版本: v1.0.3
+版本: v1.0.4
 """
 
 from datetime import datetime
@@ -27,6 +31,7 @@ class MessageProcessor:
         include_timestamp: bool,
         include_sender_info: bool,
         mention_info: dict = None,
+        trigger_type: str = None,
     ) -> str:
         """
         为消息添加元数据（时间戳和发送者）
@@ -40,6 +45,7 @@ class MessageProcessor:
             include_timestamp: 是否包含时间戳
             include_sender_info: 是否包含发送者信息
             mention_info: @别人的信息字典（如果存在）
+            trigger_type: 触发方式，可选值: "at", "keyword", "ai_decision"
 
         Returns:
             添加元数据后的文本
@@ -110,6 +116,34 @@ class MessageProcessor:
                     f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
                 )
 
+            # 🆕 v1.0.4: 添加发送者识别系统提示（根据触发方式）
+            # 只在开启了 include_sender_info 的情况下添加
+            if include_sender_info and trigger_type:
+                sender_id = event.get_sender_id()
+                sender_name = event.get_sender_name()
+                sender_info_text = (
+                    f"{sender_name}(ID:{sender_id})"
+                    if sender_name
+                    else f"用户(ID:{sender_id})"
+                )
+
+                # 根据触发方式添加不同的系统提示
+                if trigger_type == "at":
+                    # @消息触发
+                    system_notice = f"\n\n[系统提示]注意,现在有人在直接@你并且给你发送了这条消息，@你的那个人是{sender_info_text}"
+                elif trigger_type == "keyword":
+                    # 关键词触发
+                    system_notice = f"\n\n[系统提示]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是{sender_info_text}"
+                elif trigger_type == "ai_decision":
+                    # AI主动回复
+                    system_notice = f"\n\n[系统提示]注意，你刚刚看到了这条消息，你打算回复他，发送这条消息的人是{sender_info_text}"
+                else:
+                    system_notice = ""
+
+                if system_notice:
+                    processed_message += system_notice
+                    logger.debug(f"已添加发送者识别提示（触发方式: {trigger_type}）")
+
             return processed_message
 
         except Exception as e:
@@ -126,6 +160,7 @@ class MessageProcessor:
         include_timestamp: bool,
         include_sender_info: bool,
         mention_info: dict = None,
+        trigger_type: str = None,
     ) -> str:
         """
         使用缓存中的发送者信息为消息添加元数据
@@ -142,6 +177,7 @@ class MessageProcessor:
             include_timestamp: 是否包含时间戳
             include_sender_info: 是否包含发送者信息
             mention_info: @别人的信息字典（如果存在）
+            trigger_type: 触发方式，可选值: "at", "keyword", "ai_decision"
 
         Returns:
             添加元数据后的文本
@@ -214,6 +250,34 @@ class MessageProcessor:
                 logger.debug(
                     f"消息已添加元数据（从缓存，统一格式）: [{timestamp_str}] {sender_prefix}"
                 )
+
+            # 🆕 v1.0.4: 添加发送者识别系统提示（根据触发方式）
+            # 只在开启了 include_sender_info 的情况下添加
+            if include_sender_info and trigger_type:
+                sender_info_text = (
+                    f"{sender_name}(ID:{sender_id})"
+                    if sender_name
+                    else f"用户(ID:{sender_id})"
+                )
+
+                # 根据触发方式添加不同的系统提示
+                if trigger_type == "at":
+                    # @消息触发
+                    system_notice = f"\n\n【系统提示】注意,现在有人在直接@你并且给你发送了这条消息，@你的那个人是{sender_info_text}"
+                elif trigger_type == "keyword":
+                    # 关键词触发
+                    system_notice = f"\n\n【系统提示】注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是{sender_info_text}"
+                elif trigger_type == "ai_decision":
+                    # AI主动回复
+                    system_notice = f"\n\n【系统提示】注意，你刚刚看到了这条消息，你打算回复他，发送这条消息的人是{sender_info_text}"
+                else:
+                    system_notice = ""
+
+                if system_notice:
+                    processed_message += system_notice
+                    logger.debug(
+                        f"已添加发送者识别提示（从缓存，触发方式: {trigger_type}）"
+                    )
 
             return processed_message
 

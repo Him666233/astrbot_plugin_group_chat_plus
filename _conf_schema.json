@@ -32,12 +32,12 @@
     "include_sender_info": {
         "description": "包含发送者信息",
         "type": "bool",
-        "hint": "是否在消息前插入发送者ID和名字",
+        "hint": "是否在消息中插入发送者ID和名字",
         "default": true
     },
     "decision_ai_extra_prompt": {
         "description": "读空气AI额外提示词",
-        "type": "string",
+        "type": "text",
         "hint": "给判断是否回复的AI添加的自定义提示词，append模式下可以留空，留空使用默认积极模式(如果没有把握，建议留空)",
         "default": ""
     },
@@ -55,7 +55,7 @@
     },
     "reply_ai_extra_prompt": {
         "description": "回复AI额外提示词",
-        "type": "string",
+        "type": "text",
         "hint": "给最终回复消息的AI添加的自定义提示词，append模式下可以留空，",
         "default": ""
     },

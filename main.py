@@ -13,6 +13,7 @@
 8. 智能缓存 - 避免对话上下文丢失
 9. 官方历史同步 - 自动保存到系统对话记录
 10. @提及智能识别 - 正确理解@别人的消息（v1.0.3新增）
+11. 发送者识别增强 - 根据触发方式添加系统提示，帮助AI正确识别发送者（v1.0.4新增）
 
 缓存工作原理：
 - 通过初筛的消息先放入缓存
@@ -26,7 +27,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.3
+版本: v1.0.4
 """
 
 import random
@@ -55,7 +56,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.3",
+    "v1.0.4",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -162,7 +163,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.3")
+        logger.info("群聊增强插件已加载 - v1.0.4")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -439,6 +440,7 @@ class ChatPlus(Star):
         chat_id: str,
         is_at_message: bool,
         mention_info: dict = None,
+        has_trigger_keyword: bool = False,
     ) -> tuple:
         """
         处理消息内容（图片处理、上下文格式化）
@@ -448,6 +450,7 @@ class ChatPlus(Star):
             chat_id: 聊天ID
             is_at_message: 是否为@消息
             mention_info: @别人的信息字典（如果存在）
+            has_trigger_keyword: 是否包含触发关键词
 
         Returns:
             (should_continue, original_message_text, processed_message, formatted_context)
@@ -505,6 +508,11 @@ class ChatPlus(Star):
             logger.debug(f"  原始消息（提取自event）: {original_message_text[:200]}...")
             logger.debug(f"  处理后消息（图片处理后）: {processed_message[:200]}...")
 
+        # 🆕 v1.0.4: 确定触发方式（用于后续添加系统提示）
+        # 根据is_at_message和has_trigger_keyword判断触发方式
+        # 注意：在这个阶段还不知道是否会AI主动回复，所以先不设置trigger_type
+        # 会在后续添加元数据时根据实际情况设置
+
         # 缓存处理后的消息内容，不包含元数据
         # 保存发送者信息和时间戳，用于后续添加元数据
         cached_message = {
@@ -519,6 +527,9 @@ class ChatPlus(Star):
             else None,
             # 保存@别人的信息（如果存在）
             "mention_info": mention_info,
+            # 🆕 v1.0.4: 保存触发方式信息（用于后续添加系统提示）
+            "is_at_message": is_at_message,
+            "has_trigger_keyword": has_trigger_keyword,
         }
 
         # 缓存内容日志
@@ -577,12 +588,22 @@ class ChatPlus(Star):
 
         # 为当前消息添加元数据（用于发送给AI）
         # 使用处理后的消息（可能包含图片描述），添加统一格式的元数据
+        # 🆕 v1.0.4: 确定触发方式
+        trigger_type = None
+        if is_at_message:
+            trigger_type = "at"
+        elif has_trigger_keyword:
+            trigger_type = "keyword"
+        # 注意：此时还不知道是否AI主动回复，所以先不设置为"ai_decision"
+        # 会在确定要回复后再设置
+
         message_text_for_ai = MessageProcessor.add_metadata_to_message(
             event,
             processed_message,  # 使用处理后的消息（图片已处理）
             self.config.get("include_timestamp", True),
             self.config.get("include_sender_info", True),
             mention_info,  # 传递@信息
+            trigger_type,  # 🆕 v1.0.4: 传递触发方式
         )
 
         if self.debug_mode:
@@ -654,9 +675,21 @@ class ChatPlus(Star):
         platform_name: str,
         is_private: bool,
         chat_id: str,
+        is_at_message: bool = False,
+        has_trigger_keyword: bool = False,
     ):
         """
         生成并发送回复，保存历史
+
+        Args:
+            event: 消息事件
+            formatted_context: 格式化的上下文
+            message_text: 消息文本
+            platform_name: 平台名称
+            is_private: 是否私聊
+            chat_id: 聊天ID
+            is_at_message: 是否@消息
+            has_trigger_keyword: 是否包含触发关键词
 
         Returns:
             生成器，用于yield回复
@@ -765,6 +798,15 @@ class ChatPlus(Star):
                         logger.info("🟢 读取缓存中")
 
                     # 使用缓存中的发送者信息添加元数据
+                    # 🆕 v1.0.4: 根据缓存中的触发方式信息确定trigger_type
+                    trigger_type = None
+                    if last_cached.get("is_at_message"):
+                        trigger_type = "at"
+                    elif last_cached.get("has_trigger_keyword"):
+                        trigger_type = "keyword"
+                    else:
+                        trigger_type = "ai_decision"
+
                     message_to_save = MessageProcessor.add_metadata_from_cache(
                         raw_content,
                         last_cached.get("sender_id", event.get_sender_id()),
@@ -774,6 +816,7 @@ class ChatPlus(Star):
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
                         last_cached.get("mention_info"),  # 传递@信息
+                        trigger_type,  # 🆕 v1.0.4: 传递触发方式
                     )
 
                     if self.debug_mode:
@@ -786,12 +829,22 @@ class ChatPlus(Star):
                 logger.debug(
                     "【步骤14】⚠️ 缓存中无消息，使用当前处理后的消息（这不应该发生！）"
                 )
+                # 🆕 v1.0.4: 确定触发方式
+                trigger_type = None
+                if is_at_message:
+                    trigger_type = "at"
+                elif has_trigger_keyword:
+                    trigger_type = "keyword"
+                else:
+                    trigger_type = "ai_decision"
+
                 message_to_save = MessageProcessor.add_metadata_to_message(
                     event,
                     message_text,  # message_text 就是 processed_message
                     self.config.get("include_timestamp", True),
                     self.config.get("include_sender_info", True),
                     None,  # 这种情况下没有mention_info（从event提取的fallback）
+                    trigger_type,  # 🆕 v1.0.4: 传递触发方式
                 )
 
             if self.debug_mode:
@@ -1003,7 +1056,7 @@ class ChatPlus(Star):
         # 步骤4-6: 处理消息内容（图片处理等耗时操作）
         # 使用 should_treat_as_at 而不是 is_at_message，这样触发关键词也能触发图片处理
         result = await self._process_message_content(
-            event, chat_id, should_treat_as_at, mention_info
+            event, chat_id, should_treat_as_at, mention_info, has_trigger_keyword
         )
         if not result[0]:  # should_continue为False
             return
@@ -1031,6 +1084,15 @@ class ChatPlus(Star):
                     raw_content = last_cached_msg["content"]
 
                     # 使用缓存中的发送者信息添加元数据
+                    # 🆕 v1.0.4: 根据缓存中的触发方式信息确定trigger_type
+                    trigger_type = None
+                    if last_cached_msg.get("is_at_message"):
+                        trigger_type = "at"
+                    elif last_cached_msg.get("has_trigger_keyword"):
+                        trigger_type = "keyword"
+                    else:
+                        trigger_type = "ai_decision"
+
                     message_with_metadata = MessageProcessor.add_metadata_from_cache(
                         raw_content,
                         last_cached_msg.get("sender_id", event.get_sender_id()),
@@ -1040,6 +1102,7 @@ class ChatPlus(Star):
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
                         last_cached_msg.get("mention_info"),  # 传递@信息
+                        trigger_type,  # 🆕 v1.0.4: 传递触发方式
                     )
 
                     await ContextManager.save_user_message(
@@ -1062,7 +1125,14 @@ class ChatPlus(Star):
 
         # 步骤10-15: 生成并发送回复
         async for result in self._generate_and_send_reply(
-            event, formatted_context, message_text, platform_name, is_private, chat_id
+            event,
+            formatted_context,
+            message_text,
+            platform_name,
+            is_private,
+            chat_id,
+            is_at_message,
+            has_trigger_keyword,  # 🆕 v1.0.4: 传递触发方式信息
         ):
             yield result
 
@@ -1136,6 +1206,15 @@ class ChatPlus(Star):
                         )
 
                     # 使用缓存中的发送者信息添加元数据
+                    # 🆕 v1.0.4: 根据缓存中的触发方式信息确定trigger_type
+                    trigger_type = None
+                    if last_cached.get("is_at_message"):
+                        trigger_type = "at"
+                    elif last_cached.get("has_trigger_keyword"):
+                        trigger_type = "keyword"
+                    else:
+                        trigger_type = "ai_decision"
+
                     message_to_save = MessageProcessor.add_metadata_from_cache(
                         raw_content,
                         last_cached.get("sender_id", event.get_sender_id()),
@@ -1145,6 +1224,7 @@ class ChatPlus(Star):
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
                         last_cached.get("mention_info"),  # 传递@信息
+                        trigger_type,  # 🆕 v1.0.4: 传递触发方式
                     )
 
                     # 强制日志：添加元数据后的内容
@@ -1199,6 +1279,15 @@ class ChatPlus(Star):
 
                         # 使用缓存中保存的发送者信息添加元数据
                         # 这样每条消息都会有正确的发送者信息
+                        # 🆕 v1.0.4: 根据缓存中的触发方式信息确定trigger_type
+                        trigger_type = None
+                        if cached_msg.get("is_at_message"):
+                            trigger_type = "at"
+                        elif cached_msg.get("has_trigger_keyword"):
+                            trigger_type = "keyword"
+                        else:
+                            trigger_type = "ai_decision"
+
                         msg_content = MessageProcessor.add_metadata_from_cache(
                             raw_content,
                             cached_msg.get("sender_id", "unknown"),
@@ -1208,6 +1297,7 @@ class ChatPlus(Star):
                             self.config.get("include_timestamp", True),
                             self.config.get("include_sender_info", True),
                             cached_msg.get("mention_info"),  # 传递@信息
+                            trigger_type,  # 🆕 v1.0.4: 传递触发方式
                         )
 
                         # 添加到转正列表

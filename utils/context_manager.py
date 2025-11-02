@@ -10,7 +10,7 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: v1.0.3
+版本: v1.0.4
 """
 
 from typing import List, Dict, Any, Optional
@@ -152,8 +152,11 @@ class ContextManager:
             return msg
         except Exception as e:
             logger.error(f"从字典转换为消息对象失败: {e}")
-            # 返回空消息对象
-            return AstrBotMessage()
+            # 返回一个空的消息对象而不是 None，避免后续处理出错
+            empty_msg = AstrBotMessage()
+            empty_msg.message_str = str(msg_dict.get("message_str", ""))
+            empty_msg.timestamp = 0
+            return empty_msg
 
     @staticmethod
     def _get_storage_path(platform_name: str, is_private: bool, chat_id: str) -> str:
@@ -234,6 +237,9 @@ class ContextManager:
                 ContextManager._dict_to_message(msg_dict) for msg_dict in history_dicts
             ]
 
+            # 过滤掉可能的 None 值（额外保护）
+            history = [msg for msg in history if msg is not None]
+
             # 如果配置为-1,返回所有历史消息
             if max_messages == -1:
                 logger.debug(f"获取所有历史消息,共 {len(history)} 条")
@@ -275,6 +281,10 @@ class ContextManager:
                 formatted_parts.append("=== 历史消息上下文 ===")
 
                 for msg in history_messages:
+                    # 跳过无效的消息对象
+                    if msg is None or not isinstance(msg, AstrBotMessage):
+                        logger.warning(f"跳过无效的历史消息对象: {type(msg)}")
+                        continue
                     # 获取发送者信息
                     sender_name = "未知用户"
                     sender_id = "unknown"
