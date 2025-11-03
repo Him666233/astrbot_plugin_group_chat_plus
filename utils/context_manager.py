@@ -14,6 +14,7 @@
 """
 
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 from astrbot.api.all import *
 import os
 import json
@@ -50,11 +51,11 @@ class ContextManager:
             ContextManager.base_storage_path = None
             return
 
-        # 使用插件提供的数据目录
-        ContextManager.base_storage_path = os.path.join(data_dir, "chat_history")
+        # 🔧 修复：统一使用 pathlib.Path 进行路径操作
+        ContextManager.base_storage_path = Path(data_dir) / "chat_history"
 
-        if not os.path.exists(ContextManager.base_storage_path):
-            os.makedirs(ContextManager.base_storage_path, exist_ok=True)
+        if not ContextManager.base_storage_path.exists():
+            ContextManager.base_storage_path.mkdir(parents=True, exist_ok=True)
             logger.info(f"上下文存储路径初始化: {ContextManager.base_storage_path}")
 
     @staticmethod
@@ -162,7 +163,7 @@ class ContextManager:
             return empty_msg
 
     @staticmethod
-    def _get_storage_path(platform_name: str, is_private: bool, chat_id: str) -> str:
+    def _get_storage_path(platform_name: str, is_private: bool, chat_id: str) -> Path:
         """
         获取历史消息的本地存储路径
 
@@ -172,20 +173,19 @@ class ContextManager:
             chat_id: 聊天ID
 
         Returns:
-            JSON文件路径
+            JSON文件路径（Path对象）
         """
         if not ContextManager.base_storage_path:
             ContextManager.init()
 
+        # 🔧 修复：统一使用 pathlib.Path 进行路径操作
         chat_type = "private" if is_private else "group"
-        directory = os.path.join(
-            ContextManager.base_storage_path, platform_name, chat_type
-        )
+        directory = ContextManager.base_storage_path / platform_name / chat_type
 
-        if not os.path.exists(directory):
-            os.makedirs(directory, exist_ok=True)
+        if not directory.exists():
+            directory.mkdir(parents=True, exist_ok=True)
 
-        return os.path.join(directory, f"{chat_id}.json")
+        return directory / f"{chat_id}.json"
 
     @staticmethod
     def get_history_messages(
@@ -224,7 +224,8 @@ class ContextManager:
                 platform_name, is_private, chat_id
             )
 
-            if not os.path.exists(file_path):
+            # 🔧 修复：使用 Path 对象的 exists() 方法
+            if not file_path.exists():
                 logger.debug(f"历史消息文件不存在: {file_path}")
                 return []
 
@@ -459,8 +460,9 @@ class ContextManager:
             if len(history) > 200:
                 history = history[-200:]
 
+            # 🔧 修复：使用 Path 对象的 parent.mkdir() 方法
             # 保存到自定义文件（使用安全的JSON序列化）
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
             history_dicts = [ContextManager._message_to_dict(msg) for msg in history]
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(history_dicts, f, ensure_ascii=False, indent=2)
@@ -638,8 +640,9 @@ class ContextManager:
             if len(history) > 200:
                 history = history[-200:]
 
+            # 🔧 修复：使用 Path 对象的 parent.mkdir() 方法
             # 保存到自定义文件（使用安全的JSON序列化）
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
             history_dicts = [ContextManager._message_to_dict(msg) for msg in history]
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(history_dicts, f, ensure_ascii=False, indent=2)

@@ -33,6 +33,7 @@
 import random
 import time
 import sys
+import hashlib
 from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.core.star.star_tools import StarTools
@@ -257,21 +258,21 @@ class ChatPlus(Star):
         if not self._is_enabled(event):
             return
 
+        # 🔧 修复：定期清理过期的指令标记（无论是否检测到新指令，避免内存泄漏）
+        current_time = time.time()
+        expired_ids = [
+            mid
+            for mid, timestamp in self.command_messages.items()
+            if current_time - timestamp > 10
+        ]
+        for mid in expired_ids:
+            del self.command_messages[mid]
+
         # 检测是否为指令消息
         if self._is_command_message(event):
             # 生成消息唯一标识（用于跨处理器通信）
             msg_id = self._get_message_id(event)
-            self.command_messages[msg_id] = time.time()
-
-            # 清理超过10秒的旧标记（避免内存泄漏）
-            current_time = time.time()
-            expired_ids = [
-                mid
-                for mid, timestamp in self.command_messages.items()
-                if current_time - timestamp > 10
-            ]
-            for mid in expired_ids:
-                del self.command_messages[mid]
+            self.command_messages[msg_id] = current_time  # 使用已计算的 current_time
 
             # 检测到指令，标记后直接返回（不调用 stop_event，让其他插件处理）
             return
@@ -1481,8 +1482,10 @@ class ChatPlus(Star):
             )
             msg_content = event.get_message_str()[:100]  # 只取前100字符避免过长
 
-            # 生成简单的哈希标识
-            msg_id = f"{sender_id}_{group_id}_{hash(msg_content)}"
+            # 🔧 修复：使用 hashlib.md5 生成稳定的哈希标识（跨进程一致）
+            hash_input = f"{sender_id}_{group_id}_{msg_content}".encode("utf-8")
+            content_hash = hashlib.md5(hash_input).hexdigest()[:16]  # 取前16位即可
+            msg_id = f"{sender_id}_{group_id}_{content_hash}"
             return msg_id
         except Exception as e:
             # 如果生成失败，返回一个基于时间的唯一ID
