@@ -3,7 +3,7 @@
 负责处理消息中的图片，包括检测、过滤和转文字
 
 作者: Him666233
-版本: v1.0.5
+版本: v1.0.6
 """
 
 import asyncio
@@ -257,6 +257,15 @@ class ImageHandler:
                 logger.error(f"无法找到提供商: {provider_id}")
                 return None
 
+            # 建立message_chain中Image组件位置到image_components索引的映射
+            # 这样可以避免使用id()，更稳定可靠
+            image_chain_to_idx = {}
+            img_count = 0
+            for chain_idx, component in enumerate(message_chain):
+                if isinstance(component, Image):
+                    image_chain_to_idx[chain_idx] = img_count
+                    img_count += 1
+
             # 对每张图片进行转文字
             image_descriptions = {}
             for idx, img_component in enumerate(image_components):
@@ -286,7 +295,7 @@ class ImageHandler:
                     )
 
                     if description:
-                        image_descriptions[id(img_component)] = description
+                        image_descriptions[idx] = description
                         logger.debug(f"图片 {idx} 转换成功: {description[:50]}...")
 
                 except asyncio.TimeoutError:
@@ -305,14 +314,20 @@ class ImageHandler:
 
             # 构建新的消息文本,将图片替换为描述
             result_parts = []
-            for component in message_chain:
+            for chain_idx, component in enumerate(message_chain):
                 if isinstance(component, Plain):
                     result_parts.append(component.text)
                 elif isinstance(component, Image):
                     # 如果这张图片有描述,使用描述替换
-                    img_id = id(component)
-                    if img_id in image_descriptions:
-                        result_parts.append(f"[图片内容: {image_descriptions[img_id]}]")
+                    # 通过chain_idx找到对应的image_components索引
+                    if chain_idx in image_chain_to_idx:
+                        img_idx = image_chain_to_idx[chain_idx]
+                        if img_idx in image_descriptions:
+                            result_parts.append(
+                                f"[图片内容: {image_descriptions[img_idx]}]"
+                            )
+                        else:
+                            result_parts.append("[图片]")
                     else:
                         result_parts.append("[图片]")
                 else:

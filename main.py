@@ -27,7 +27,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.5
+版本: v1.0.6
 """
 
 import random
@@ -60,7 +60,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.5",
+    "v1.0.6",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -171,7 +171,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.5")
+        logger.info("群聊增强插件已加载 - v1.0.6")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")

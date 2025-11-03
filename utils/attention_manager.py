@@ -14,7 +14,7 @@
 - Enhanced: 多用户追踪 + 情绪系统 + 渐进式调整
 
 作者: Him666233
-版本: v1.0.5
+版本: v1.0.6
 """
 
 import time
@@ -85,7 +85,12 @@ class AttentionManager:
         if data_dir:
             AttentionManager._storage_path = Path(data_dir) / "attention_data.json"
         else:
-            # 使用默认路径（不推荐，应该由插件提供）
+            # 兼容性回退：如果未提供data_dir，使用相对路径
+            # 使用debug级别避免在正常防御性调用时产生噪音
+            logger.debug(
+                "[注意力机制] 未提供data_dir参数，使用相对路径作为回退方案。"
+                "建议通过 StarTools.get_data_dir() 获取规范路径。"
+            )
             AttentionManager._storage_path = Path("data") / "attention_data.json"
 
         # 加载已有数据

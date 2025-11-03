@@ -10,7 +10,7 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: v1.0.5
+版本: v1.0.6
 """
 
 from typing import List, Dict, Any, Optional
@@ -45,7 +45,12 @@ class ContextManager:
             # 使用插件提供的数据目录
             ContextManager.base_storage_path = os.path.join(data_dir, "chat_history")
         else:
-            # 向后兼容：使用旧的硬编码路径
+            # 兼容性回退：如果未提供data_dir，使用相对路径
+            # 使用debug级别避免在正常防御性调用时产生噪音
+            logger.debug(
+                "[上下文管理器] 未提供data_dir参数，使用相对路径作为回退方案。"
+                "建议通过 StarTools.get_data_dir() 获取规范路径。"
+            )
             ContextManager.base_storage_path = os.path.join(
                 os.getcwd(), "data", "chat_history"
             )

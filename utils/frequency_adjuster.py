@@ -8,7 +8,7 @@
 - 自动微调概率参数
 
 作者: Him666233
-版本: v1.0.5
+版本: v1.0.6
 参考: MaiBot frequency_control.py (简化实现)
 """
 
