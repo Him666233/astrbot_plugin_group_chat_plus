@@ -27,14 +27,18 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.4
+版本: v1.0.5
 """
 
 import random
 import time
+import sys
 from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.core.star.star_tools import StarTools
+
+# 导入消息组件类型
+from astrbot.core.message.components import Plain
 
 # 导入所有工具模块
 from .utils import (
@@ -56,7 +60,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.4",
+    "v1.0.5",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -93,6 +97,10 @@ class ChatPlus(Star):
         # 标记本插件正在处理的会话（用于after_message_sent筛选）
         # 格式: {chat_id: True}
         self.processing_sessions = {}
+
+        # 标记被识别为指令的消息（用于跨处理器通信）
+        # 格式: {message_id: timestamp}，定期清理超过10秒的旧记录
+        self.command_messages = {}
 
         # ========== v1.0.2 新增功能初始化 ==========
 
@@ -163,7 +171,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.4")
+        logger.info("群聊增强插件已加载 - v1.0.5")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -231,6 +239,43 @@ class ChatPlus(Star):
                 f"  - 启用工具提醒: {config.get('enable_tools_reminder', False)}"
             )
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize - 1)
+    async def command_filter_handler(self, event: AstrMessageEvent):
+        """
+        指令过滤处理器（高优先级）
+
+        在所有其他处理器之前执行，检测并过滤指令消息。
+        如果检测到指令，标记该消息，让本插件的其他处理器跳过。
+
+        优先级: sys.maxsize-1 (超高优先级，确保最先执行)
+        """
+        # 只处理群消息
+        if event.is_private_chat():
+            return
+
+        # 检查群组是否启用插件
+        if not self._is_enabled(event):
+            return
+
+        # 检测是否为指令消息
+        if self._is_command_message(event):
+            # 生成消息唯一标识（用于跨处理器通信）
+            msg_id = self._get_message_id(event)
+            self.command_messages[msg_id] = time.time()
+
+            # 清理超过10秒的旧标记（避免内存泄漏）
+            current_time = time.time()
+            expired_ids = [
+                mid
+                for mid, timestamp in self.command_messages.items()
+                if current_time - timestamp > 10
+            ]
+            for mid in expired_ids:
+                del self.command_messages[mid]
+
+            # 检测到指令，标记后直接返回（不调用 stop_event，让其他插件处理）
+            return
+
     @event_message_type(EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         """
@@ -242,6 +287,14 @@ class ChatPlus(Star):
             event: 消息事件对象
         """
         try:
+            # 检查是否被高优先级处理器标记为指令消息
+            msg_id = self._get_message_id(event)
+            if msg_id in self.command_messages:
+                # 这条消息已被识别为指令，跳过处理
+                if self.debug_mode:
+                    logger.debug("消息已被标记为指令，跳过处理")
+                return
+
             # 处理群消息
             async for result in self._process_message(event):
                 yield result
@@ -819,6 +872,9 @@ class ChatPlus(Star):
                         trigger_type,  # 🆕 v1.0.4: 传递触发方式
                     )
 
+                    # 清理系统提示（保存前过滤）
+                    message_to_save = MessageCleaner.clean_message(message_to_save)
+
                     if self.debug_mode:
                         logger.debug(
                             f"【步骤14-加元数据后】内容: {message_to_save[:150]}"
@@ -846,6 +902,9 @@ class ChatPlus(Star):
                     None,  # 这种情况下没有mention_info（从event提取的fallback）
                     trigger_type,  # 🆕 v1.0.4: 传递触发方式
                 )
+
+                # 清理系统提示（保存前过滤）
+                message_to_save = MessageCleaner.clean_message(message_to_save)
 
             if self.debug_mode:
                 logger.debug(f"  准备保存的完整消息: {message_to_save[:300]}...")
@@ -1105,6 +1164,11 @@ class ChatPlus(Star):
                         trigger_type,  # 🆕 v1.0.4: 传递触发方式
                     )
 
+                    # 清理系统提示（保存前过滤）
+                    message_with_metadata = MessageCleaner.clean_message(
+                        message_with_metadata
+                    )
+
                     await ContextManager.save_user_message(
                         event,
                         message_with_metadata,
@@ -1227,6 +1291,9 @@ class ChatPlus(Star):
                         trigger_type,  # 🆕 v1.0.4: 传递触发方式
                     )
 
+                    # 清理系统提示（保存前过滤）
+                    message_to_save = MessageCleaner.clean_message(message_to_save)
+
                     # 强制日志：添加元数据后的内容
                     logger.info(
                         f"🟡 [官方保存-加元数据后] 内容: {message_to_save[:150]}"
@@ -1247,6 +1314,8 @@ class ChatPlus(Star):
                         self.config.get("include_sender_info", True),
                         None,  # 这种情况下没有mention_info（从event提取的fallback）
                     )
+                    # 清理系统提示（保存前过滤）
+                    message_to_save = MessageCleaner.clean_message(message_to_save)
                     logger.debug(
                         f"[消息发送后] 从event提取的消息: {message_to_save[:200]}..."
                     )
@@ -1299,6 +1368,9 @@ class ChatPlus(Star):
                             cached_msg.get("mention_info"),  # 传递@信息
                             trigger_type,  # 🆕 v1.0.4: 传递触发方式
                         )
+
+                        # 清理系统提示（保存前过滤）
+                        msg_content = MessageCleaner.clean_message(msg_content)
 
                         # 添加到转正列表
                         cached_messages_to_convert.append(
@@ -1387,6 +1459,118 @@ class ChatPlus(Star):
             return True
         else:
             logger.debug(f"群组 {group_id} 未在启用列表中")
+            return False
+
+    def _get_message_id(self, event: AstrMessageEvent) -> str:
+        """
+        生成消息的唯一标识符
+
+        用于跨处理器标记消息（例如标记指令消息）
+
+        Args:
+            event: 消息事件对象
+
+        Returns:
+            消息的唯一标识字符串
+        """
+        try:
+            # 使用 发送者ID + 群组ID + 消息内容 的组合作为唯一标识
+            sender_id = event.get_sender_id()
+            group_id = (
+                event.get_group_id() if not event.is_private_chat() else "private"
+            )
+            msg_content = event.get_message_str()[:100]  # 只取前100字符避免过长
+
+            # 生成简单的哈希标识
+            msg_id = f"{sender_id}_{group_id}_{hash(msg_content)}"
+            return msg_id
+        except Exception as e:
+            # 如果生成失败，返回一个基于时间的唯一ID
+            return f"fallback_{time.time()}_{random.randint(1000, 9999)}"
+
+    def _is_command_message(self, event: AstrMessageEvent) -> bool:
+        """
+        检测消息是否为指令消息（根据配置的指令前缀）
+
+        支持以下格式的检测：
+        1. /command 或 !command 等（直接以前缀开头）
+        2. @机器人 /command（@ 机器人后跟指令）
+        3. @[AT:机器人ID] /command（消息链中 @ 后跟指令）
+
+        如果开启了指令过滤功能，并且消息以配置的前缀开头，
+        则认为是指令消息，本插件应跳过处理（但不影响其他插件）
+
+        Args:
+            event: 消息事件对象
+
+        Returns:
+            True=是指令消息（应跳过），False=不是指令消息
+        """
+        # 检查是否启用指令过滤功能
+        enable_filter = self.config.get("enable_command_filter", False)
+        if not enable_filter:
+            if self.debug_mode:
+                logger.debug("指令过滤功能未启用")
+            return False
+
+        # 获取配置的指令前缀列表
+        command_prefixes = self.config.get("command_prefixes", [])
+        if not command_prefixes:
+            logger.warning("指令过滤已启用，但未配置指令前缀列表！")
+            return False
+
+        # 输出检测开始日志（无论是否 debug 模式，便于排查问题）
+        if self.debug_mode:
+            logger.debug(f"开始指令检测，配置的前缀: {command_prefixes}")
+            logger.debug(f"消息内容: {event.get_message_str()}")
+
+        try:
+            # ✅ 关键：使用原始消息链（event.message_obj.message）
+            # AstrBot 的 WakingCheckStage 会修改 event.message_str，
+            # 但不会修改 event.message_obj.message！
+            # 例如：用户发送 "/help"，WakingCheckStage 将 event.message_str 改为 "help"
+            # 但 event.message_obj.message 中的 Plain 组件仍然是 "/help"
+            original_messages = event.message_obj.message
+            if not original_messages:
+                if self.debug_mode:
+                    logger.debug("[指令检测] 原始消息链为空")
+                return False
+
+            if self.debug_mode:
+                logger.debug(f"[指令检测] 配置的前缀: {command_prefixes}")
+                logger.debug(f"[指令检测] 原始消息链组件数: {len(original_messages)}")
+
+            # 检查原始消息链中的第一个 Plain 组件
+            # 这样可以准确检测 "/help" "@mo /help" 等格式
+            for component in original_messages:
+                if isinstance(component, Plain):
+                    # 获取第一个 Plain 组件的原始文本
+                    first_text = component.text.strip()
+
+                    if self.debug_mode:
+                        logger.debug(
+                            f"[指令检测] 第一个Plain文本（原始）: '{first_text}'"
+                        )
+
+                    # 检查是否以任一指令前缀开头
+                    for prefix in command_prefixes:
+                        if prefix and first_text.startswith(prefix):
+                            logger.info(
+                                f"🚫 [指令过滤] 检测到指令前缀 '{prefix}'，原始文本: {first_text[:50]}... - 插件跳过处理"
+                            )
+                            return True
+
+                    # 找到第一个 Plain 组件后就停止
+                    # （因为指令前缀通常在消息开头）
+                    break
+
+            if self.debug_mode:
+                logger.debug("[指令检测] 未检测到指令格式，继续正常处理")
+            return False
+
+        except Exception as e:
+            # 出错时不影响主流程，只记录错误日志
+            logger.error(f"[指令检测] 发生错误: {e}", exc_info=True)
             return False
 
     async def _check_mention_others(self, event: AstrMessageEvent) -> dict:

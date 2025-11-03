@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/version-v1.0.4-blue.svg)](https://github.com/Him666233/astrbot_plugin_group_chat_plus)
+[![Version](https://img.shields.io/badge/version-v1.0.5-blue.svg)](https://github.com/Him666233/astrbot_plugin_group_chat_plus)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%E2%89%A5v4.0.0-green.svg)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)](LICENSE)
 
@@ -382,6 +382,19 @@ pip install pypinyin
 |--------|------|--------|------|
 | `enabled_groups` | list | [] | **启用的群组列表**<br>• `[]`: 所有群聊启用（推荐测试）<br>• `["群号1", "群号2"]`: 仅指定群启用（推荐生产）<br>⚠️ 本插件仅支持群聊，不处理私聊 |
 
+#### 🚫 指令过滤配置（v1.0.5 新增）
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `enable_command_filter` | bool | false | **启用指令标识过滤**<br>开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），不进行任何处理，但不影响其他插件处理这些消息 |
+| `command_prefixes` | list | ["/", "!", "#"] | **指令前缀列表**<br>需要过滤的指令前缀，如 `/`、`!`、`#`、`:` 等<br>当消息以这些前缀开头时，插件会跳过处理<br>留空表示不过滤任何前缀<br>支持检测：①直接以前缀开头（如`/help`）<br>②@机器人后跟指令（如`@机器人 /help`）<br>③消息链中@后跟指令（如`@[AT:123] /help`） |
+
+> 💡 **指令过滤说明**:
+> - 此功能用于避免插件处理指令消息，减少不必要的AI调用
+> - 插件只会跳过处理，不会拦截消息，其他插件仍可正常处理
+> - 适用场景：有其他指令插件且不希望AI回复这些指令
+> - 如果不需要此功能，保持 `enable_command_filter: false` 即可
+
 #### 🎭 真实性增强配置（v1.0.2 新增）
 
 | 配置项 | 类型 | 默认值 | 说明 |
@@ -417,6 +430,20 @@ pip install pypinyin
 
 ```
 📨 收到群消息
+    ↓
+【高优先级】指令过滤处理器（v1.0.5新增，priority=sys.maxsize-1）
+    ├─ 只处理群消息
+    ├─ 检查群组是否启用
+    ├─ 启用指令过滤且匹配前缀？
+    │   └─ ✅ 是 → 生成消息ID并标记 → return（不阻止事件传播）
+    └─ ❌ 否 → 不标记，继续传递
+    ↓
+【普通处理器】群消息处理器
+    ↓
+【步骤0】检查消息标记（v1.0.5新增）
+    ├─ 消息ID在指令标记列表中？
+    │   └─ ✅ 是 → 跳过处理（已被识别为指令）
+    └─ ❌ 否 → 继续正常处理
     ↓
 【步骤1】基础检查
     ├─ 检查群组是否启用
@@ -1337,7 +1364,44 @@ e) 即使话题相关，也要用新的方式表达，展现对话的自然变�
 </details>
 
 <details>
-<summary><b>Q19: v1.0.4的AI防重复机制如何工作？</b></summary>
+<summary><b>Q19: 如何使用指令过滤功能（v1.0.5新增）？</b></summary>
+
+**A**: v1.0.5新增的指令标识过滤功能
+
+**功能说明**:
+- 使用高优先级处理器（priority=sys.maxsize-1）在最早阶段识别指令
+- **核心技术**：检查原始消息链 `event.message_obj.message`，而非被修改过的 `event.message_str`
+- 通过消息ID标记机制通知本插件的其他处理器跳过该消息
+- 避免AI回复这些指令，减少不必要的API调用
+- 完全不影响其他插件的正常工作（只标记不拦截，不调用 `event.stop_event()`）
+- 自动清理超过10秒的旧标记，避免内存泄漏
+
+**配置方法**:
+```json
+{
+  "enable_command_filter": true,
+  "command_prefixes": ["/", "!", "#", ":"]
+}
+```
+
+**支持的指令格式**:
+1. 直接以前缀开头：`/help`、`!status`
+2. @机器人后跟指令：`@机器人 /help`
+3. 消息链中@后跟指令：`@[AT:123456] /command`
+
+**适用场景**:
+- ✅ 你安装了其他指令插件（如管理插件、工具插件）
+- ✅ 不希望AI回复以特定前缀开头的消息
+- ✅ 想要更精确地控制插件的触发范围
+
+**注意事项**:
+- 默认关闭，需要手动开启 `enable_command_filter: true`
+- 可以自定义指令前缀列表，留空则不过滤
+- 只影响本插件，不影响其他插件的指令处理
+</details>
+
+<details>
+<summary><b>Q20: v1.0.4的AI防重复机制如何工作？</b></summary>
 
 **A**: v1.0.4对AI提示词进行了重大优化，增加防重复机制
 
@@ -1406,7 +1470,7 @@ astrbot_plugin_group_chat_plus/
 ### 数据流
 
 ```
-用户消息 → 黑名单检查 → @/关键词检测 → 注意力机制概率调整
+用户消息 → 【高优先级】指令过滤处理器(v1.0.5) → 生成消息ID并标记(如是指令) → 【普通处理器】检查消息标记 → 黑名单检查 → @/关键词检测 → 注意力机制概率调整
     ↓
 概率筛选 → 检测@提及(v1.0.3) → 记录触发方式(v1.0.4) → 添加元数据+临时系统提示(v1.0.4) → 图片处理
     ↓
@@ -1589,6 +1653,86 @@ pending_messages_cache = {
 ---
 
 ## 📝 更新日志
+
+### v1.0.5 (2025-11-03)
+
+**🎯 小更新：指令标识过滤**
+
+**核心更新**:
+- ✨ **指令标识过滤机制**: 避免插件处理指令消息
+  - 新增 `enable_command_filter` 配置项，控制是否启用指令过滤
+  - 新增 `command_prefixes` 配置项，自定义需要过滤的指令前缀（默认：`/`、`!`、`#`）
+  - 支持多种指令格式检测：
+    1. 直接以前缀开头（如 `/help`、`!status`）
+    2. @机器人后跟指令（如 `@机器人 /help`）
+    3. 消息链中@后跟指令（如 `@[AT:123456] /command`）
+  - 插件只会跳过处理，不拦截消息，其他插件仍可正常工作
+
+**技术实现**:
+- 📍 使用高优先级处理器（`@filter.event_message_type`，priority=sys.maxsize-1）
+- 📍 新增 `command_filter_handler()` 方法，最先执行指令检测
+- 📍 **核心突破**：使用 `event.message_obj.message` 获取原始消息链
+  - ⚠️ AstrBot 的 WakingCheckStage 会修改 `event.message_str`（移除指令前缀）
+  - ✅ 但原始消息链 `event.message_obj.message` 不会被修改
+  - ✅ 通过检查原始消息链，可准确识别指令前缀
+- 📍 新增 `_is_command_message()` 方法，检查原始消息链中的 Plain 组件
+- 📍 新增 `_get_message_id()` 方法，生成消息唯一标识
+- 📍 使用消息ID标记机制（`self.command_messages`）实现跨处理器通信
+- 📍 自动清理超过10秒的旧标记（每次检测时执行）
+- 🔒 简洁高效，直接检查第一个 Plain 组件的原始文本
+- 🔒 默认开启（`enable_command_filter: true`），无需手动配置
+- 🔒 完全不影响其他插件的正常工作（不调用 `event.stop_event()`）
+
+**工作流程更新**:
+- 📋 新增高优先级处理器 `command_filter_handler()`
+  - 在所有其他处理器之前执行（priority=sys.maxsize-1）
+  - 检查是否启用指令过滤
+  - 检查消息是否匹配配置的指令前缀
+  - 匹配成功则生成消息ID并标记到 `self.command_messages`
+  - 清理超过10秒的旧标记
+  - 直接返回，不阻止事件传播
+- 📋 步骤0: 普通处理器 `on_group_message()` 首先检查消息标记
+  - 如果消息ID在 `self.command_messages` 中，直接返回跳过处理
+  - 否则继续正常的步骤1-步骤N
+
+**数据流更新**:
+- 🔄 新增高优先级处理器（priority=sys.maxsize-1），在所有其他处理器之前执行
+- 🔄 使用消息ID标记机制实现跨处理器通信
+- 🔄 检测到指令后标记消息但不阻止事件传播，其他插件可正常处理
+- 🔄 普通处理器检查消息标记，如已标记则跳过处理
+- 🔄 自动清理超过10秒的旧标记，避免内存泄漏
+
+**使用效果**:
+- ✅ 避免AI回复指令消息，减少不必要的API调用
+- ✅ 提高插件与其他指令插件的兼容性
+- ✅ 用户体验更好，指令不会触发AI回复
+- ✅ 完全不影响其他插件的正常工作（只标记不拦截）
+- ✅ 高优先级确保指令最先被识别
+- ✅ 消息标记机制确保本插件的所有处理器都能识别指令
+- ✅ 自动清理机制避免内存泄漏
+
+**适用场景**:
+- 安装了其他指令插件（如管理插件、工具插件）
+- 不希望AI回复以特定前缀开头的消息
+- 想要更精确地控制插件的触发范围
+
+**配置示例**:
+```json
+{
+  "enable_command_filter": true,
+  "command_prefixes": ["/", "!", "#", ":"]
+}
+```
+
+**修改文件**:
+- `main.py` - 新增高优先级处理器 `command_filter_handler()`
+- `main.py` - 重写 `_is_command_message()` 方法，使用原始消息链检测
+- `main.py` - 新增 `_get_message_id()` 方法，生成消息唯一标识
+- `main.py` - 在 `__init__` 中新增 `self.command_messages` 字典用于消息标记
+- `main.py` - 在 `on_group_message()` 开头检查消息标记
+- `_conf_schema.json` - 新增 `enable_command_filter` 和 `command_prefixes` 配置项（默认开启）
+
+---
 
 ### v1.0.4 (2025-11-02)
 

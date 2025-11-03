@@ -137,6 +137,18 @@
         "hint": "当消息中包含这些关键词时，将直接忽略该消息，不进行任何处理。留空则不启用该功能",
         "default": []
     },
+    "enable_command_filter": {
+        "description": "启用指令标识过滤",
+        "type": "bool",
+        "hint": "开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），不进行任何处理，但不影响其他插件处理这些消息",
+        "default": true
+    },
+    "command_prefixes": {
+        "description": "指令前缀列表",
+        "type": "list",
+        "hint": "需要过滤的指令前缀，如 /、!、#、: 等。当消息以这些前缀开头时，插件会跳过处理。留空表示不过滤任何前缀",
+        "default": ["/", "!", "#"]
+    },
     "enable_attention_mechanism": {
         "description": "启用增强注意力机制",
         "type": "bool",
