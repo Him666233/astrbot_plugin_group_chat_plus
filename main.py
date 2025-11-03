@@ -27,7 +27,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.6
+版本: v1.0.7
 """
 
 import random
@@ -61,7 +61,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.6",
+    "v1.0.7",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -121,7 +121,8 @@ class ChatPlus(Star):
         if self.mood_enabled:
             from .utils import MoodTracker
 
-            self.mood_tracker = MoodTracker()
+            # v1.0.6: 传入配置，支持自定义否定词和情绪关键词
+            self.mood_tracker = MoodTracker(config)
         else:
             self.mood_tracker = None
 
@@ -172,7 +173,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.6")
+        logger.info("群聊增强插件已加载 - v1.0.7")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -214,6 +215,17 @@ class ChatPlus(Star):
         )
         logger.info(
             f"回复延迟模拟: {'✓ 已启用' if self.typing_simulator_enabled else '✗ 已禁用'}"
+        )
+
+        # v1.0.7 新功能状态
+        logger.info("\n【v1.0.7 新增功能】")
+        blacklist_enabled = config.get("enable_user_blacklist", False)
+        blacklist_count = len(config.get("blacklist_user_ids", []))
+        logger.info(f"用户黑名单: {'✓ 已启用' if blacklist_enabled else '✗ 已禁用'}")
+        if blacklist_enabled and blacklist_count > 0:
+            logger.info(f"  - 黑名单用户数: {blacklist_count} 人")
+        logger.info(
+            f"情绪否定词检测: {'✓ 已启用' if config.get('enable_negation_detection', True) else '✗ 已禁用'}"
         )
 
         logger.info("=" * 50)
@@ -294,6 +306,11 @@ class ChatPlus(Star):
                 # 这条消息已被识别为指令，跳过处理
                 if self.debug_mode:
                     logger.debug("消息已被标记为指令，跳过处理")
+                return
+
+            # 【v1.0.7】检测用户是否在黑名单中
+            if self._is_user_blacklisted(event):
+                # 用户在黑名单中，本插件直接跳过处理
                 return
 
             # 处理群消息
@@ -1574,6 +1591,59 @@ class ChatPlus(Star):
         except Exception as e:
             # 出错时不影响主流程，只记录错误日志
             logger.error(f"[指令检测] 发生错误: {e}", exc_info=True)
+            return False
+
+    def _is_user_blacklisted(self, event: AstrMessageEvent) -> bool:
+        """
+        检测发送者是否在用户黑名单中（v1.0.7新增）
+
+        如果用户在黑名单中，本插件将忽略该消息，但不影响其他插件和官方功能。
+
+        Args:
+            event: 消息事件对象
+
+        Returns:
+            bool: True=在黑名单中（应该忽略），False=不在黑名单中（正常处理）
+        """
+        try:
+            # 检查是否启用了黑名单功能
+            if not self.config.get("enable_user_blacklist", False):
+                return False
+
+            # 获取黑名单列表
+            blacklist = self.config.get("blacklist_user_ids", [])
+            if not blacklist:
+                # 黑名单为空，不过滤任何用户
+                return False
+
+            # 提取发送者的用户ID
+            sender_id = event.get_sender_id()
+
+            # 将 sender_id 转换为字符串进行比对（确保类型一致）
+            sender_id_str = str(sender_id)
+
+            # 检查是否在黑名单中（支持字符串和数字类型的ID）
+            is_blacklisted = (
+                sender_id in blacklist
+                or sender_id_str in blacklist
+                or (
+                    int(sender_id_str) in blacklist
+                    if sender_id_str.isdigit()
+                    else False
+                )
+            )
+
+            if is_blacklisted:
+                logger.info(
+                    f"🚫 [用户黑名单] 用户 {sender_id} 在黑名单中，本插件跳过处理该消息"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            # 发生错误时不影响主流程，只记录错误日志
+            logger.error(f"[用户黑名单检测] 发生错误: {e}", exc_info=True)
             return False
 
     async def _check_mention_others(self, event: AstrMessageEvent) -> dict:

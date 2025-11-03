@@ -6,14 +6,15 @@
 - 情绪随对话内容动态变化
 - 在prompt中注入当前情绪状态
 - 情绪会随时间自动衰减回归平静
+- v1.0.6更新：支持否定词检测，避免"不难过"被误判为"难过"
 
 作者: Him666233
-版本: v1.0.6
+版本: v1.0.7
 参考: MaiBot mood_manager.py (简化实现)
 """
 
 import time
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any
 from astrbot.api.all import logger
 
 
@@ -25,30 +26,8 @@ class MoodTracker:
     - 维护每个群聊的情绪状态
     - 根据关键词和上下文更新情绪
     - 情绪自动衰减回归平静
+    - 支持否定词检测，避免误判（v1.0.6新增）
     """
-
-    # 预定义的情绪状态和对应的关键词
-    MOOD_KEYWORDS = {
-        "开心": [
-            "哈哈",
-            "笑",
-            "😂",
-            "😄",
-            "👍",
-            "棒",
-            "赞",
-            "好评",
-            "厉害",
-            "nb",
-            "牛",
-        ],
-        "难过": ["难过", "伤心", "哭", "😢", "😭", "呜呜", "555", "心疼"],
-        "生气": ["生气", "气", "烦", "😡", "😠", "恼火", "讨厌"],
-        "惊讶": ["哇", "天哪", "😮", "😲", "震惊", "卧槽", "我去"],
-        "疑惑": ["？", "疑惑", "🤔", "为什么", "怎么", "什么"],
-        "无语": ["无语", "😑", "...", "省略号", "服了", "醉了"],
-        "兴奋": ["！！", "激动", "😆", "🎉", "太好了", "yes", "耶"],
-    }
 
     # 默认情绪
     DEFAULT_MOOD = "平静"
@@ -56,17 +35,197 @@ class MoodTracker:
     # 情绪衰减时间（秒）
     MOOD_DECAY_TIME = 300  # 5分钟后开始衰减
 
-    def __init__(self):
-        """初始化情绪追踪器"""
+    def _get_default_mood_keywords(self) -> Dict[str, List[str]]:
+        """
+        获取默认的情绪关键词配置
+
+        Returns:
+            默认的情绪关键词字典
+        """
+        return {
+            "开心": [
+                "哈哈",
+                "笑",
+                "😂",
+                "😄",
+                "👍",
+                "棒",
+                "赞",
+                "好评",
+                "厉害",
+                "nb",
+                "牛",
+                "开心",
+                "高兴",
+                "快乐",
+            ],
+            "难过": ["难过", "伤心", "哭", "😢", "😭", "呜呜", "555", "心疼", "悲伤"],
+            "生气": ["生气", "气", "烦", "😡", "😠", "恼火", "讨厌", "愤怒"],
+            "惊讶": ["哇", "天哪", "😮", "😲", "震惊", "卧槽", "我去", "惊讶"],
+            "疑惑": ["？", "疑惑", "🤔", "为什么", "怎么", "什么", "不懂"],
+            "无语": ["无语", "😑", "...", "省略号", "服了", "醉了", "无言"],
+            "兴奋": ["！！", "激动", "😆", "🎉", "太好了", "yes", "耶", "兴奋"],
+        }
+
+    def _load_schema_defaults(self) -> dict:
+        """
+        从 _conf_schema.json 文件中读取默认配置
+
+        Returns:
+            包含默认值的字典，如果读取失败则返回空字典
+        """
+        try:
+            import json
+            import os
+
+            # 获取当前文件所在目录的上一级目录（插件根目录）
+            current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            schema_path = os.path.join(current_dir, "_conf_schema.json")
+
+            if not os.path.exists(schema_path):
+                logger.warning(f"[情绪追踪] 未找到配置 schema 文件: {schema_path}")
+                return {}
+
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema = json.load(f)
+
+            # 提取所有配置项的默认值
+            defaults = {}
+            for key, value in schema.items():
+                if isinstance(value, dict) and "default" in value:
+                    defaults[key] = value["default"]
+
+            logger.debug(f"[情绪追踪] 已从 schema 加载 {len(defaults)} 个默认配置")
+            return defaults
+
+        except Exception as e:
+            logger.warning(f"[情绪追踪] 加载 schema 默认值失败: {e}")
+            return {}
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        初始化情绪追踪器
+
+        Args:
+            config: 插件配置字典，包含否定词列表、情绪关键词等配置
+        """
         # 存储每个群聊的情绪状态
         # 格式: {chat_id: {"mood": "情绪", "intensity": 强度, "last_update": 时间戳}}
         self.moods: Dict[str, Dict] = {}
 
-        logger.info("[情绪追踪系统] 已初始化")
+        # 从配置读取参数，如果没有配置则使用默认值
+        if config is None:
+            config = {}
+
+        # 从 schema 文件中读取默认配置
+        # 这样可以避免硬编码，保持单一数据源
+        schema_defaults = self._load_schema_defaults()
+
+        # 是否启用否定词检测
+        self.enable_negation: bool = config.get(
+            "enable_negation_detection",
+            schema_defaults.get("enable_negation_detection", True),
+        )
+
+        # 否定词列表
+        self.negation_words: List[str] = config.get(
+            "negation_words",
+            schema_defaults.get(
+                "negation_words",
+                [
+                    "不",
+                    "没",
+                    "别",
+                    "非",
+                    "无",
+                    "未",
+                    "勿",
+                    "莫",
+                    "不是",
+                    "没有",
+                    "别再",
+                    "一点也不",
+                    "根本不",
+                    "从不",
+                    "绝不",
+                    "毫不",
+                ],
+            ),
+        )
+
+        # 否定词检查范围（关键词前N个字符）
+        self.negation_check_range: int = config.get(
+            "negation_check_range", schema_defaults.get("negation_check_range", 5)
+        )
+
+        # 情绪关键词 - 支持字符串(JSON)或字典格式
+        mood_keywords_raw = config.get(
+            "mood_keywords", schema_defaults.get("mood_keywords", "")
+        )
+
+        # 如果是字符串格式，尝试解析为JSON
+        if isinstance(mood_keywords_raw, str):
+            if mood_keywords_raw.strip():  # 非空字符串，尝试解析
+                try:
+                    import json
+
+                    self.mood_keywords: Dict[str, List[str]] = json.loads(
+                        mood_keywords_raw
+                    )
+                    logger.info(
+                        f"[情绪追踪] 已加载情绪关键词配置，共 {len(self.mood_keywords)} 种情绪类型"
+                    )
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        f"[情绪追踪] mood_keywords JSON解析失败: {e}，使用硬编码默认配置"
+                    )
+                    self.mood_keywords = self._get_default_mood_keywords()
+            else:  # 空字符串，使用硬编码默认配置
+                logger.info(f"[情绪追踪] mood_keywords 为空，使用硬编码默认配置")
+                self.mood_keywords = self._get_default_mood_keywords()
+        elif isinstance(mood_keywords_raw, dict):  # 字典格式（向后兼容旧版本配置）
+            self.mood_keywords = mood_keywords_raw
+            logger.info(
+                f"[情绪追踪] 已从字典格式加载情绪关键词，共 {len(self.mood_keywords)} 种情绪类型"
+            )
+        else:
+            logger.warning(
+                f"[情绪追踪] mood_keywords 配置格式错误(类型: {type(mood_keywords_raw).__name__})，使用硬编码默认配置"
+            )
+            self.mood_keywords = self._get_default_mood_keywords()
+
+        logger.info(
+            f"[情绪追踪系统] 已初始化 | "
+            f"否定词检测: {'启用' if self.enable_negation else '禁用'} | "
+            f"否定词数量: {len(self.negation_words)} | "
+            f"情绪类型: {len(self.mood_keywords)}"
+        )
+
+    def _has_negation_before(self, text: str, keyword_pos: int) -> bool:
+        """
+        检查关键词前是否有否定词
+
+        Args:
+            text: 完整文本
+            keyword_pos: 关键词在文本中的位置
+
+        Returns:
+            如果检测到否定词返回True
+        """
+        # 提取关键词前的上下文
+        start_pos = max(0, keyword_pos - self.negation_check_range)
+        context_before = text[start_pos:keyword_pos]
+
+        # 检查是否包含否定词
+        for neg_word in self.negation_words:
+            if neg_word in context_before:
+                return True
+
+        return False
 
     def _detect_mood_from_text(self, text: str) -> Optional[str]:
         """
-        从文本中检测情绪
+        从文本中检测情绪（v1.0.6增强：支持否定词检测）
 
         Args:
             text: 要分析的文本
@@ -79,8 +238,31 @@ class MoodTracker:
 
         # 统计各种情绪的关键词出现次数
         mood_scores = {}
-        for mood, keywords in self.MOOD_KEYWORDS.items():
-            score = sum(1 for keyword in keywords if keyword in text)
+
+        for mood, keywords in self.mood_keywords.items():
+            score = 0
+
+            for keyword in keywords:
+                # 查找所有该关键词的出现位置
+                start = 0
+                while True:
+                    pos = text.find(keyword, start)
+                    if pos == -1:
+                        break
+
+                    # 如果启用了否定词检测，检查前面是否有否定词
+                    if self.enable_negation and self._has_negation_before(text, pos):
+                        # 检测到否定词，跳过这个关键词
+                        logger.debug(
+                            f"[情绪检测] 检测到否定词，忽略关键词 '{keyword}' "
+                            f"(位置: {pos}, 前文: '{text[max(0, pos - self.negation_check_range) : pos]}')"
+                        )
+                    else:
+                        # 没有否定词，正常计分
+                        score += 1
+
+                    start = pos + 1
+
             if score > 0:
                 mood_scores[mood] = score
 
@@ -88,7 +270,12 @@ class MoodTracker:
             return None
 
         # 返回得分最高的情绪
-        return max(mood_scores, key=mood_scores.get)
+        detected_mood = max(mood_scores, key=mood_scores.get)
+        logger.debug(
+            f"[情绪检测] 文本: '{text[:50]}...' | 检测结果: {detected_mood} | 得分: {mood_scores}"
+        )
+
+        return detected_mood
 
     def update_mood_from_context(self, chat_id: str, recent_messages: str) -> str:
         """
