@@ -39,21 +39,19 @@ class ContextManager:
         初始化上下文管理器，创建存储目录
 
         Args:
-            data_dir: 数据目录路径，如果为None则使用默认路径
+            data_dir: 数据目录路径，如果为None则功能将受限
         """
-        if data_dir:
-            # 使用插件提供的数据目录
-            ContextManager.base_storage_path = os.path.join(data_dir, "chat_history")
-        else:
-            # 兼容性回退：如果未提供data_dir，使用相对路径
-            # 使用debug级别避免在正常防御性调用时产生噪音
-            logger.debug(
-                "[上下文管理器] 未提供data_dir参数，使用相对路径作为回退方案。"
-                "建议通过 StarTools.get_data_dir() 获取规范路径。"
+        if not data_dir:
+            # 如果未提供data_dir，记录错误并禁用功能
+            logger.error(
+                "[上下文管理器] 未提供data_dir参数，历史消息存储功能将被禁用。"
+                "请确保通过 StarTools.get_data_dir() 获取数据目录。"
             )
-            ContextManager.base_storage_path = os.path.join(
-                os.getcwd(), "data", "chat_history"
-            )
+            ContextManager.base_storage_path = None
+            return
+
+        # 使用插件提供的数据目录
+        ContextManager.base_storage_path = os.path.join(data_dir, "chat_history")
 
         if not os.path.exists(ContextManager.base_storage_path):
             os.makedirs(ContextManager.base_storage_path, exist_ok=True)

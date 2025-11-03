@@ -82,16 +82,18 @@ class AttentionManager:
         if AttentionManager._initialized:
             return
 
-        if data_dir:
-            AttentionManager._storage_path = Path(data_dir) / "attention_data.json"
-        else:
-            # 兼容性回退：如果未提供data_dir，使用相对路径
-            # 使用debug级别避免在正常防御性调用时产生噪音
-            logger.debug(
-                "[注意力机制] 未提供data_dir参数，使用相对路径作为回退方案。"
-                "建议通过 StarTools.get_data_dir() 获取规范路径。"
+        if not data_dir:
+            # 如果未提供data_dir，禁用持久化功能
+            logger.error(
+                "[注意力机制] 未提供data_dir参数，持久化功能将被禁用。"
+                "请确保通过 StarTools.get_data_dir() 获取数据目录。"
             )
-            AttentionManager._storage_path = Path("data") / "attention_data.json"
+            AttentionManager._storage_path = None
+            AttentionManager._initialized = True
+            return
+
+        # 设置存储路径
+        AttentionManager._storage_path = Path(data_dir) / "attention_data.json"
 
         # 加载已有数据
         AttentionManager._load_from_disk()
