@@ -479,7 +479,6 @@ pip install pypinyin
 >   - 大型机器人(>100群): `mood_cleanup_threshold: 1800` (30分钟)
 > - **禁用清理**: 设置 `mood_cleanup_threshold: 0` 可完全禁用（不推荐）
 > - **性能影响**: 清理操作每10分钟执行一次，对性能影响极小
-> - 详细说明请参考: [CONFIG_EXAMPLE_MEMORY_CLEANUP.md](CONFIG_EXAMPLE_MEMORY_CLEANUP.md)
 
 ---
 
