@@ -3,7 +3,7 @@
 负责管理和动态调整读空气概率
 
 作者: Him666233
-版本: v1.0.7
+版本: v1.0.8
 """
 
 import time
@@ -141,3 +141,39 @@ class ProbabilityManager:
             if chat_key in ProbabilityManager._probability_status:
                 del ProbabilityManager._probability_status[chat_key]
                 logger.debug(f"会话 {chat_key} 概率状态已重置")
+
+    @staticmethod
+    async def set_base_probability(
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+        new_probability: float,
+        duration: int = 600,
+    ) -> None:
+        """
+        设置基础概率（用于频率动态调整）
+
+        与 boost_probability 类似，但用于频率调整器修改基础概率
+        这个概率会持续较长时间（默认10分钟），直到下次频率检查
+
+        Args:
+            platform_name: 平台名称
+            is_private: 是否私聊
+            chat_id: 聊天ID
+            new_probability: 新的基础概率
+            duration: 持续时间（秒），默认600秒（10分钟）
+        """
+        chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
+        current_time = time.time()
+        boosted_until = current_time + duration
+
+        async with ProbabilityManager._lock:
+            ProbabilityManager._probability_status[chat_key] = {
+                "probability": new_probability,
+                "boosted_until": boosted_until,
+            }
+
+        logger.info(
+            f"[频率调整] 会话 {chat_key} 基础概率已调整为 {new_probability:.2f}, "
+            f"持续 {duration} 秒"
+        )

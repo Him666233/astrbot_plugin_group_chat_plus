@@ -27,7 +27,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.7
+版本: v1.0.8
 """
 
 import random
@@ -61,7 +61,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.7",
+    "v1.0.8",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -173,7 +173,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.7")
+        logger.info("群聊增强插件已加载 - v1.0.8")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -213,6 +213,19 @@ class ChatPlus(Star):
         logger.info(
             f"频率动态调整: {'✓ 已启用' if self.frequency_adjuster_enabled else '✗ 已禁用'}"
         )
+        if self.frequency_adjuster_enabled:
+            logger.info(
+                f"  - 检查间隔: {config.get('frequency_check_interval', 180)} 秒"
+            )
+            logger.info(
+                f"  - 分析消息数: {config.get('frequency_analysis_message_count', 15)} 条"
+            )
+            logger.info(
+                f"  - 分析超时: {config.get('frequency_analysis_timeout', 20)} 秒"
+            )
+            logger.info(
+                f"  - 调整持续: {config.get('frequency_adjust_duration', 360)} 秒"
+            )
         logger.info(
             f"回复延迟模拟: {'✓ 已启用' if self.typing_simulator_enabled else '✗ 已禁用'}"
         )
@@ -998,14 +1011,25 @@ class ChatPlus(Star):
                     if self.debug_mode:
                         logger.debug("【步骤17】开始频率动态调整检查")
 
-                    # 获取最近的消息用于分析
-                    recent_messages = ContextManager.get_history_messages(event, 10)
+                    # 获取最近的消息用于分析（使用配置的数量）
+                    analysis_msg_count = self.config.get(
+                        "frequency_analysis_message_count", 15
+                    )
+                    recent_messages = ContextManager.get_history_messages(
+                        event, analysis_msg_count
+                    )
+
+                    if self.debug_mode:
+                        logger.debug(
+                            f"[频率调整] 获取最近消息: 期望{analysis_msg_count}条, 实际{len(recent_messages) if recent_messages else 0}条"
+                        )
+
                     if recent_messages:
                         # 构建可读的消息文本
                         # AstrBotMessage 对象的属性访问方式
                         bot_id = event.get_self_id()
                         recent_text_parts = []
-                        for msg in recent_messages[-10:]:  # 最近10条
+                        for msg in recent_messages[-analysis_msg_count:]:  # 最近N条
                             # 判断消息角色（用户还是bot）
                             role = "user"
                             if hasattr(msg, "sender") and msg.sender:
@@ -1026,13 +1050,16 @@ class ChatPlus(Star):
 
                         recent_text = "\n".join(recent_text_parts)
 
-                        # 使用AI分析频率
+                        # 使用AI分析频率（使用配置的超时时间）
+                        analysis_timeout = self.config.get(
+                            "frequency_analysis_timeout", 20
+                        )
                         decision = await self.frequency_adjuster.analyze_frequency(
                             self.context,
                             event,
                             recent_text,
                             self.config.get("decision_ai_provider_id", ""),
-                            300,  # 300秒超时
+                            analysis_timeout,
                         )
 
                         if decision:
@@ -1051,12 +1078,22 @@ class ChatPlus(Star):
                                 current_prob, decision
                             )
 
-                            # 如果概率有变化，更新初始概率配置（临时）
+                            # 如果概率有变化，应用新概率
                             if abs(new_prob - current_prob) > 0.01:
-                                # 注意：这里不修改config，而是通过调整概率管理器
-                                # 可以考虑添加一个方法来临时覆盖概率
+                                # 通过概率管理器设置新的基础概率
+                                # 使用配置的持续时间
+                                duration = self.config.get(
+                                    "frequency_adjust_duration", 360
+                                )
+                                await ProbabilityManager.set_base_probability(
+                                    platform_name,
+                                    is_private,
+                                    chat_id,
+                                    new_prob,
+                                    duration,
+                                )
                                 logger.info(
-                                    f"[频率调整] 建议将初始概率从 {current_prob:.2f} 调整为 {new_prob:.2f}"
+                                    f"[频率调整] ✅ 已应用概率调整: {current_prob:.2f} → {new_prob:.2f} (持续{duration}秒)"
                                 )
 
                         # 更新检查状态

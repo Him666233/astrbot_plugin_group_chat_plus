@@ -9,7 +9,7 @@
 - v1.0.6更新：支持否定词检测，避免"不难过"被误判为"难过"
 
 作者: Him666233
-版本: v1.0.7
+版本: v1.0.8
 参考: MaiBot mood_manager.py (简化实现)
 """
 
@@ -31,9 +31,6 @@ class MoodTracker:
 
     # 默认情绪
     DEFAULT_MOOD = "平静"
-
-    # 情绪衰减时间（秒）
-    MOOD_DECAY_TIME = 300  # 5分钟后开始衰减
 
     def _get_default_mood_keywords(self) -> Dict[str, List[str]]:
         """
@@ -121,6 +118,23 @@ class MoodTracker:
         # 这样可以避免硬编码，保持单一数据源
         schema_defaults = self._load_schema_defaults()
 
+        # 情绪衰减时间（秒）- 从配置读取
+        self.mood_decay_time: int = config.get(
+            "mood_decay_time",
+            schema_defaults.get("mood_decay_time", 300),
+        )
+
+        # 清理相关配置（防止内存泄漏）- 从配置读取
+        self._cleanup_threshold: int = config.get(
+            "mood_cleanup_threshold",
+            schema_defaults.get("mood_cleanup_threshold", 3600),
+        )
+        self._cleanup_interval: int = config.get(
+            "mood_cleanup_interval",
+            schema_defaults.get("mood_cleanup_interval", 600),
+        )
+        self._last_cleanup_time: float = time.time()
+
         # 是否启用否定词检测
         self.enable_negation: bool = config.get(
             "enable_negation_detection",
@@ -196,9 +210,12 @@ class MoodTracker:
 
         logger.info(
             f"[情绪追踪系统] 已初始化 | "
+            f"衰减时间: {self.mood_decay_time}秒 | "
             f"否定词检测: {'启用' if self.enable_negation else '禁用'} | "
             f"否定词数量: {len(self.negation_words)} | "
-            f"情绪类型: {len(self.mood_keywords)}"
+            f"情绪类型: {len(self.mood_keywords)} | "
+            f"清理阈值: {self._cleanup_threshold}秒 | "
+            f"清理间隔: {self._cleanup_interval}秒"
         )
 
     def _has_negation_before(self, text: str, keyword_pos: int) -> bool:
@@ -288,6 +305,9 @@ class MoodTracker:
         Returns:
             更新后的情绪状态
         """
+        # 定期清理长期不活跃的群组（防止内存泄漏）
+        self._cleanup_inactive_chats()
+
         # 检测情绪
         detected_mood = self._detect_mood_from_text(recent_messages)
 
@@ -304,7 +324,7 @@ class MoodTracker:
             # 检查是否需要衰减
             time_since_update = current_time - self.moods[chat_id]["last_update"]
 
-            if time_since_update > self.MOOD_DECAY_TIME:
+            if time_since_update > self.mood_decay_time:
                 # 情绪衰减，逐渐回归平静
                 self.moods[chat_id]["mood"] = self.DEFAULT_MOOD
                 self.moods[chat_id]["intensity"] = max(
@@ -338,6 +358,9 @@ class MoodTracker:
         Returns:
             当前情绪
         """
+        # 定期清理长期不活跃的群组（防止内存泄漏）
+        self._cleanup_inactive_chats()
+
         if chat_id not in self.moods:
             return self.DEFAULT_MOOD
 
@@ -345,7 +368,7 @@ class MoodTracker:
         current_time = time.time()
         time_since_update = current_time - self.moods[chat_id]["last_update"]
 
-        if time_since_update > self.MOOD_DECAY_TIME:
+        if time_since_update > self.mood_decay_time:
             self.moods[chat_id]["mood"] = self.DEFAULT_MOOD
             self.moods[chat_id]["intensity"] = 0.0
 
@@ -424,3 +447,42 @@ class MoodTracker:
         )
 
         return f"情绪: {mood_data['mood']} ({intensity_desc})"
+
+    def _cleanup_inactive_chats(self) -> None:
+        """
+        清理长期不活跃的群组情绪记录（防止内存泄漏）
+
+        当群组超过 _cleanup_threshold 时间未更新时，移除其记录。
+        为了避免频繁检查，只在距离上次清理超过 _cleanup_interval 时才执行。
+
+        如果 _cleanup_threshold 设置为0，则禁用自动清理。
+        """
+        # 如果清理阈值设置为0，则禁用自动清理
+        if self._cleanup_threshold <= 0:
+            return
+
+        current_time = time.time()
+
+        # 检查是否需要执行清理
+        if current_time - self._last_cleanup_time < self._cleanup_interval:
+            return
+
+        # 找出需要清理的群组
+        inactive_chats = []
+        for chat_id, mood_data in self.moods.items():
+            last_update = mood_data.get("last_update", 0)
+            if current_time - last_update > self._cleanup_threshold:
+                inactive_chats.append(chat_id)
+
+        # 执行清理
+        if inactive_chats:
+            for chat_id in inactive_chats:
+                del self.moods[chat_id]
+
+            logger.info(
+                f"[情绪追踪-内存清理] 已清理 {len(inactive_chats)} 个不活跃群组的情绪记录 "
+                f"(超过 {self._cleanup_threshold / 3600:.1f} 小时未活跃)"
+            )
+
+        # 更新上次清理时间
+        self._last_cleanup_time = current_time

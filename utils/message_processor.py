@@ -7,7 +7,7 @@ v1.0.4 更新：
 - 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
 
 作者: Him666233
-版本: v1.0.7
+版本: v1.0.8
 """
 
 from datetime import datetime
