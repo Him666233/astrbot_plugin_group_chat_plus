@@ -1032,7 +1032,7 @@ class ChatPlus(Star):
                             event,
                             recent_text,
                             self.config.get("decision_ai_provider_id", ""),
-                            20,  # 20秒超时
+                            300,  # 300秒超时
                         )
 
                         if decision:
