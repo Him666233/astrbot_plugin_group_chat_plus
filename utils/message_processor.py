@@ -7,7 +7,7 @@ v1.0.4 更新：
 - 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
 
 作者: Him666233
-版本: v1.0.8
+版本: v1.0.9
 """
 
 from datetime import datetime
@@ -32,6 +32,7 @@ class MessageProcessor:
         include_sender_info: bool,
         mention_info: dict = None,
         trigger_type: str = None,
+        poke_info: dict = None,
     ) -> str:
         """
         为消息添加元数据（时间戳和发送者）
@@ -46,6 +47,7 @@ class MessageProcessor:
             include_sender_info: 是否包含发送者信息
             mention_info: @别人的信息字典（如果存在）
             trigger_type: 触发方式，可选值: "at", "keyword", "ai_decision"
+            poke_info: 戳一戳信息字典（v1.0.9新增，如果存在）
 
         Returns:
             添加元数据后的文本
@@ -116,6 +118,30 @@ class MessageProcessor:
                     f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
                 )
 
+            # 🆕 v1.0.9: 添加戳一戳系统提示（如果存在）
+            # 注意：使用[]括号而非【】括号，确保能被MessageCleaner正确过滤
+            if poke_info and isinstance(poke_info, dict):
+                is_poke_bot = poke_info.get("is_poke_bot", False)
+                poke_sender_id = poke_info.get("sender_id", "")
+                poke_sender_name = poke_info.get("sender_name", "未知用户")
+                poke_target_id = poke_info.get("target_id", "")
+                poke_target_name = poke_info.get("target_name", "未知用户")
+
+                if is_poke_bot:
+                    # 戳的是机器人自己
+                    poke_notice = f"\n[戳一戳提示]有人在戳你，戳你的人是{poke_sender_name}(ID:{poke_sender_id})"
+                    logger.debug(
+                        f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
+                    )
+                else:
+                    # 戳的是别人
+                    poke_notice = f"\n[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{poke_sender_name}(ID:{poke_sender_id})在戳{poke_target_name}(ID:{poke_target_id})"
+                    logger.debug(
+                        f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
+                    )
+
+                processed_message += poke_notice
+
             # 🆕 v1.0.4: 添加发送者识别系统提示（根据触发方式）
             # 只在开启了 include_sender_info 的情况下添加
             if include_sender_info and trigger_type:
@@ -161,6 +187,7 @@ class MessageProcessor:
         include_sender_info: bool,
         mention_info: dict = None,
         trigger_type: str = None,
+        poke_info: dict = None,
     ) -> str:
         """
         使用缓存中的发送者信息为消息添加元数据
@@ -178,6 +205,7 @@ class MessageProcessor:
             include_sender_info: 是否包含发送者信息
             mention_info: @别人的信息字典（如果存在）
             trigger_type: 触发方式，可选值: "at", "keyword", "ai_decision"
+            poke_info: 戳一戳信息字典（v1.0.9新增，如果存在）
 
         Returns:
             添加元数据后的文本
@@ -250,6 +278,30 @@ class MessageProcessor:
                 logger.debug(
                     f"消息已添加元数据（从缓存，统一格式）: [{timestamp_str}] {sender_prefix}"
                 )
+
+            # 🆕 v1.0.9: 添加戳一戳系统提示（如果存在）
+            # 注意：使用[]括号而非【】括号，确保能被MessageCleaner正确过滤
+            if poke_info and isinstance(poke_info, dict):
+                is_poke_bot = poke_info.get("is_poke_bot", False)
+                poke_sender_id = poke_info.get("sender_id", "")
+                poke_sender_name = poke_info.get("sender_name", "未知用户")
+                poke_target_id = poke_info.get("target_id", "")
+                poke_target_name = poke_info.get("target_name", "未知用户")
+
+                if is_poke_bot:
+                    # 戳的是机器人自己
+                    poke_notice = f"\n[戳一戳提示]有人在戳你，戳你的人是{poke_sender_name}(ID:{poke_sender_id})"
+                    logger.debug(
+                        f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
+                    )
+                else:
+                    # 戳的是别人
+                    poke_notice = f"\n[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{poke_sender_name}(ID:{poke_sender_id})在戳{poke_target_name}(ID:{poke_target_id})"
+                    logger.debug(
+                        f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
+                    )
+
+                processed_message += poke_notice
 
             # 🆕 v1.0.4: 添加发送者识别系统提示（根据触发方式）
             # 只在开启了 include_sender_info 的情况下添加

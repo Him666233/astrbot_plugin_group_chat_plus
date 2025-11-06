@@ -7,7 +7,7 @@ v1.0.4 更新：
 - 在保存到官方历史时过滤掉系统提示
 
 作者: Him666233
-版本: v1.0.8
+版本: v1.0.9
 """
 
 import re
@@ -42,6 +42,9 @@ class MessageCleaner:
         r"\s*\[系统提示\]注意,现在有人在直接@你并且给你发送了这条消息，@你的那个人是.*",
         r"\s*\[系统提示\]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是.*",
         r"\s*\[系统提示\]注意，你刚刚看到了这条消息，你打算回复他，发送这条消息的人是.*",
+        # 🆕 v1.0.9: 戳一戳提示词过滤规则（用于保存到官方历史时过滤）
+        r"\s*\[戳一戳提示\]有人在戳你，戳你的人是.*",
+        r"\s*\[戳一戳提示\]这是一个戳一戳消息，但不是戳你的，是.*在戳.*",
     ]
 
     # 决策AI提示词的特征模式
@@ -88,6 +91,50 @@ class MessageCleaner:
         return cleaned
 
     @staticmethod
+    def filter_poke_text_marker(text: str) -> str:
+        """
+        过滤消息中的"[Poke:poke]"文本标识符
+
+        防止用户手动输入戳一戳标识符来伪造戳一戳消息
+
+        Args:
+            text: 原始消息文本
+
+        Returns:
+            str: 过滤后的消息文本（已移除[Poke:poke]标识符）
+        """
+        if not text:
+            return text
+
+        # 使用正则表达式过滤，考虑可能的空格
+        # 匹配 [Poke:poke]、[ Poke : poke ]、[Poke: poke] 等变体
+        filtered_text = re.sub(
+            r"\[\s*Poke\s*:\s*poke\s*\]", "", text, flags=re.IGNORECASE
+        )
+
+        return filtered_text.strip()
+
+    @staticmethod
+    def is_only_poke_marker(text: str) -> bool:
+        """
+        检查消息是否只包含"[Poke:poke]"标识符（忽略空格）
+
+        Args:
+            text: 原始消息文本
+
+        Returns:
+            bool: True=只有标识符, False=包含其他内容
+        """
+        if not text:
+            return False
+
+        # 移除所有空白字符后检查
+        cleaned = text.strip()
+        # 使用正则匹配，忽略大小写和空格
+        pattern = r"^\[\s*Poke\s*:\s*poke\s*\]$"
+        return bool(re.match(pattern, cleaned, flags=re.IGNORECASE))
+
+    @staticmethod
     def extract_raw_message_from_event(event: AstrMessageEvent) -> str:
         """
         从事件中提取纯净的原始消息（不含任何系统添加的内容）
@@ -130,6 +177,10 @@ class MessageCleaner:
                         logger.debug(
                             f"[消息清理] 从消息链提取原始消息: {raw_message[:100]}..."
                         )
+                        # 🆕 过滤戳一戳文本标识符
+                        raw_message = MessageCleaner.filter_poke_text_marker(
+                            raw_message
+                        )
                         return raw_message
                     else:
                         # 提取到空消息，记录警告并继续尝试其他方法
@@ -148,6 +199,8 @@ class MessageCleaner:
                     f"[消息清理] 从plain提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
                 )
                 if cleaned:
+                    # 🆕 过滤戳一戳文本标识符
+                    cleaned = MessageCleaner.filter_poke_text_marker(cleaned)
                     return cleaned
                 else:
                     logger.warning("[消息清理] 方法2清理后为空，尝试方法3")
@@ -165,6 +218,10 @@ class MessageCleaner:
                 logger.warning(
                     f"[消息清理] 所有方法都返回空消息！event.message_str={event.message_str[:100] if event.message_str else '(空)'}"
                 )
+            # 🆕 过滤戳一戳文本标识符
+            cleaned = (
+                MessageCleaner.filter_poke_text_marker(cleaned) if cleaned else cleaned
+            )
             return cleaned
 
         except Exception as e:

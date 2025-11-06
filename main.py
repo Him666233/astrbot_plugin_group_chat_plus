@@ -27,7 +27,13 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.0.8
+版本: v1.0.9
+
+v1.0.9 更新内容：
+- 新增戳一戳消息处理功能（仅支持QQ平台+aiocqhttp）
+- 支持三种模式：ignore(忽略)、bot_only(仅戳机器人)、all(所有戳一戳)
+- 添加戳一戳系统提示词，帮助AI正确理解戳一戳场景
+- 在保存历史时自动过滤戳一戳提示词
 """
 
 import random
@@ -39,7 +45,7 @@ from astrbot.api.event import filter
 from astrbot.core.star.star_tools import StarTools
 
 # 导入消息组件类型
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import Plain, Poke
 
 # 导入所有工具模块
 from .utils import (
@@ -61,7 +67,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.0.8",
+    "v1.0.9",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -173,7 +179,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.0.8")
+        logger.info("群聊增强插件已加载 - v1.0.9")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -274,32 +280,43 @@ class ChatPlus(Star):
         如果检测到指令，标记该消息，让本插件的其他处理器跳过。
 
         优先级: sys.maxsize-1 (超高优先级，确保最先执行)
+
+        注意：使用 NotPokeMessageFilter 在 filter 阶段就过滤掉戳一戳消息，
+        确保戳一戳消息不会激活此 handler，从而能正常传播到其他插件。
         """
-        # 只处理群消息
-        if event.is_private_chat():
-            return
+        try:
+            # 只处理群消息
+            if event.is_private_chat():
+                return
 
-        # 检查群组是否启用插件
-        if not self._is_enabled(event):
-            return
+            # 检查群组是否启用插件
+            if not self._is_enabled(event):
+                return
 
-        # 🔧 修复：定期清理过期的指令标记（无论是否检测到新指令，避免内存泄漏）
-        current_time = time.time()
-        expired_ids = [
-            mid
-            for mid, timestamp in self.command_messages.items()
-            if current_time - timestamp > 10
-        ]
-        for mid in expired_ids:
-            del self.command_messages[mid]
+            # 🔧 修复：定期清理过期的指令标记（无论是否检测到新指令，避免内存泄漏）
+            current_time = time.time()
+            expired_ids = [
+                mid
+                for mid, timestamp in self.command_messages.items()
+                if current_time - timestamp > 10
+            ]
+            for mid in expired_ids:
+                del self.command_messages[mid]
 
-        # 检测是否为指令消息
-        if self._is_command_message(event):
-            # 生成消息唯一标识（用于跨处理器通信）
-            msg_id = self._get_message_id(event)
-            self.command_messages[msg_id] = current_time  # 使用已计算的 current_time
+            # 检测是否为指令消息
+            if self._is_command_message(event):
+                # 生成消息唯一标识（用于跨处理器通信）
+                msg_id = self._get_message_id(event)
+                self.command_messages[msg_id] = (
+                    current_time  # 使用已计算的 current_time
+                )
 
-            # 检测到指令，标记后直接返回（不调用 stop_event，让其他插件处理）
+                # 检测到指令，标记后直接返回（不调用 stop_event，让其他插件处理）
+                return
+        except Exception as e:
+            # 捕获所有异常，避免影响其他插件的事件处理
+            logger.error(f"[指令过滤] 处理消息时发生错误: {e}", exc_info=True)
+            # 出错时直接返回，不影响其他handler的执行
             return
 
     @event_message_type(EventMessageType.GROUP_MESSAGE)
@@ -319,11 +336,41 @@ class ChatPlus(Star):
                 # 这条消息已被识别为指令，跳过处理
                 if self.debug_mode:
                     logger.debug("消息已被标记为指令，跳过处理")
+                    logger.info("消息已被标记为指令，跳过处理")
                 return
 
             # 【v1.0.7】检测用户是否在黑名单中
             if self._is_user_blacklisted(event):
                 # 用户在黑名单中，本插件直接跳过处理
+                return
+
+            # 【v1.0.9新增】过滤伪造的戳一戳文本标识符
+            # 防止用户手动输入"[Poke:poke]"来伪造戳一戳消息
+            message_str = event.get_message_str()
+            if MessageCleaner.is_only_poke_marker(message_str):
+                # 消息只包含"[Poke:poke]"标识符，直接丢弃
+                logger.info("🚫 [戳一戳标识符过滤] 检测到纯戳一戳标识符消息，丢弃处理")
+                if self.debug_mode:
+                    logger.debug(
+                        "【戳一戳标识符过滤】消息只包含[Poke:poke]标识符，跳过处理"
+                    )
+                return
+
+            # 【v1.0.9新增】检测是否应该忽略@他人的消息
+            if self._should_ignore_at_others(event):
+                # 消息中@了其他人（根据配置的模式），本插件跳过处理
+                # 不阻止消息传播，其他插件仍可处理此消息
+                if self.debug_mode:
+                    logger.debug("[@他人检测] 消息符合忽略条件，本插件跳过处理")
+                return
+
+            # 【v1.0.9新增】检测是否为戳一戳消息
+            poke_result = self._check_poke_message(event)
+            if poke_result.get("is_poke") and poke_result.get("should_ignore"):
+                # 戳一戳消息但根据配置应该忽略，本插件跳过处理
+                # 不阻止消息传播，其他插件（如astrbot_plugin_llm_poke）仍可处理此消息
+                if self.debug_mode:
+                    logger.debug("【戳一戳检测】消息符合忽略条件，本插件跳过处理")
                 return
 
             # 处理群消息
@@ -427,15 +474,41 @@ class ChatPlus(Star):
         chat_id: str,
         is_at_message: bool,
         has_trigger_keyword: bool,
+        poke_info: dict = None,
     ) -> bool:
         """
         执行概率判断（在图片处理之前）
 
+        Args:
+            event: 消息事件对象
+            platform_name: 平台名称
+            is_private: 是否私聊
+            chat_id: 聊天ID
+            is_at_message: 是否@消息
+            has_trigger_keyword: 是否包含触发关键词
+            poke_info: 戳一戳信息（v1.0.9新增）
+
         Returns:
             True=继续处理, False=丢弃消息
         """
-        # @消息或触发关键词消息跳过概率判断
-        if not is_at_message and not has_trigger_keyword:
+        # 检查是否应该跳过概率判断（戳机器人的特殊处理）
+        skip_probability_for_poke = False
+        if poke_info and self.config.get("poke_bot_skip_probability", True):
+            # 如果是戳机器人，且开关打开
+            if poke_info.get("is_poke_bot"):
+                skip_probability_for_poke = True
+                logger.info(
+                    "⭐ [戳一戳-跳过概率] 戳的是机器人，跳过概率筛选，保留读空气判断"
+                )
+                if self.debug_mode:
+                    logger.debug("【步骤5】戳机器人消息，配置允许跳过概率判断")
+
+        # @消息、触发关键词消息、或符合条件的戳一戳消息跳过概率判断
+        if (
+            not is_at_message
+            and not has_trigger_keyword
+            and not skip_probability_for_poke
+        ):
             # 概率判断
             if self.debug_mode:
                 logger.debug("【步骤5】开始读空气概率判断")
@@ -464,6 +537,11 @@ class ChatPlus(Star):
                 logger.info("检测到触发关键词,跳过概率判断")
                 if self.debug_mode:
                     logger.debug("【步骤5】触发关键词消息,跳过概率判断,必定处理")
+
+            if skip_probability_for_poke:
+                logger.info("检测到戳机器人消息,跳过概率判断")
+                if self.debug_mode:
+                    logger.debug("【步骤5】戳机器人消息,跳过概率判断,必定处理")
 
         return True
 
@@ -525,6 +603,7 @@ class ChatPlus(Star):
         is_at_message: bool,
         mention_info: dict = None,
         has_trigger_keyword: bool = False,
+        poke_info: dict = None,
     ) -> tuple:
         """
         处理消息内容（图片处理、上下文格式化）
@@ -599,6 +678,7 @@ class ChatPlus(Star):
 
         # 缓存处理后的消息内容，不包含元数据
         # 保存发送者信息和时间戳，用于后续添加元数据
+
         cached_message = {
             "role": "user",
             "content": processed_message,  # 处理后的消息（可能已过滤图片、转文字、或保留原样）
@@ -614,6 +694,8 @@ class ChatPlus(Star):
             # 🆕 v1.0.4: 保存触发方式信息（用于后续添加系统提示）
             "is_at_message": is_at_message,
             "has_trigger_keyword": has_trigger_keyword,
+            # 🆕 v1.0.9: 保存戳一戳信息（如果存在）
+            "poke_info": poke_info,
         }
 
         # 缓存内容日志
@@ -678,8 +760,13 @@ class ChatPlus(Star):
             trigger_type = "at"
         elif has_trigger_keyword:
             trigger_type = "keyword"
-        # 注意：此时还不知道是否AI主动回复，所以先不设置为"ai_decision"
-        # 会在确定要回复后再设置
+        else:
+            # 概率触发（AI主动回复）
+            # 注意：虽然此时决策AI还没判断，但如果能走到这里说明概率判断已通过
+            # 无论决策AI判断yes/no，这个trigger_type都是正确的：
+            # - 判断yes：确实是AI主动回复，提示词"你打算回复他"正确
+            # - 判断no：消息只会保存不会发给回复AI，提示词在保存时也正确
+            trigger_type = "ai_decision"
 
         message_text_for_ai = MessageProcessor.add_metadata_to_message(
             event,
@@ -688,6 +775,7 @@ class ChatPlus(Star):
             self.config.get("include_sender_info", True),
             mention_info,  # 传递@信息
             trigger_type,  # 🆕 v1.0.4: 传递触发方式
+            poke_info,  # 🆕 v1.0.9: 传递戳一戳信息
         )
 
         if self.debug_mode:
@@ -901,6 +989,7 @@ class ChatPlus(Star):
                         self.config.get("include_sender_info", True),
                         last_cached.get("mention_info"),  # 传递@信息
                         trigger_type,  # 🆕 v1.0.4: 传递触发方式
+                        last_cached.get("poke_info"),  # 🆕 v1.0.9: 传递戳一戳信息
                     )
 
                     # 清理系统提示（保存前过滤）
@@ -932,6 +1021,7 @@ class ChatPlus(Star):
                     self.config.get("include_sender_info", True),
                     None,  # 这种情况下没有mention_info（从event提取的fallback）
                     trigger_type,  # 🆕 v1.0.4: 传递触发方式
+                    None,  # 🆕 v1.0.9: 无法获取poke_info（fallback情况）
                 )
 
                 # 清理系统提示（保存前过滤）
@@ -1140,6 +1230,14 @@ class ChatPlus(Star):
         # 步骤2: 检查消息触发器（决定是否跳过概率判断）
         is_at_message, has_trigger_keyword = await self._check_message_triggers(event)
 
+        # 步骤2.5: 检测戳一戳信息（v1.0.9新增，在概率判断前提取）
+        poke_result = self._check_poke_message(event)
+        poke_info_for_probability = (
+            poke_result.get("poke_info")
+            if poke_result.get("is_poke") and not poke_result.get("should_ignore")
+            else None
+        )
+
         # 关键逻辑：触发关键词等同于@消息
         # 这样在 mention_only 模式下，包含关键词的消息也能正常处理图片
         should_treat_as_at = is_at_message or has_trigger_keyword
@@ -1160,6 +1258,7 @@ class ChatPlus(Star):
             chat_id,
             is_at_message,
             has_trigger_keyword,
+            poke_info_for_probability,  # 传递戳一戳信息
         )
         if not should_process:
             return
@@ -1167,10 +1266,18 @@ class ChatPlus(Star):
         # 步骤3.5: 检测@提及信息（在图片处理之前，避免不必要的开销）
         mention_info = await self._check_mention_others(event)
 
+        # 步骤3.6: 使用之前检测的戳一戳信息（避免重复检测）
+        poke_info = poke_info_for_probability
+
         # 步骤4-6: 处理消息内容（图片处理等耗时操作）
         # 使用 should_treat_as_at 而不是 is_at_message，这样触发关键词也能触发图片处理
         result = await self._process_message_content(
-            event, chat_id, should_treat_as_at, mention_info, has_trigger_keyword
+            event,
+            chat_id,
+            should_treat_as_at,
+            mention_info,
+            has_trigger_keyword,
+            poke_info,
         )
         if not result[0]:  # should_continue为False
             return
@@ -1217,6 +1324,7 @@ class ChatPlus(Star):
                         self.config.get("include_sender_info", True),
                         last_cached_msg.get("mention_info"),  # 传递@信息
                         trigger_type,  # 🆕 v1.0.4: 传递触发方式
+                        last_cached_msg.get("poke_info"),  # 🆕 v1.0.9: 传递戳一戳信息
                     )
 
                     # 清理系统提示（保存前过滤）
@@ -1344,6 +1452,7 @@ class ChatPlus(Star):
                         self.config.get("include_sender_info", True),
                         last_cached.get("mention_info"),  # 传递@信息
                         trigger_type,  # 🆕 v1.0.4: 传递触发方式
+                        last_cached.get("poke_info"),  # 🆕 v1.0.9: 传递戳一戳信息
                     )
 
                     # 清理系统提示（保存前过滤）
@@ -1368,6 +1477,8 @@ class ChatPlus(Star):
                         self.config.get("include_timestamp", True),
                         self.config.get("include_sender_info", True),
                         None,  # 这种情况下没有mention_info（从event提取的fallback）
+                        None,  # trigger_type未知
+                        None,  # 🆕 v1.0.9: 无法获取poke_info（fallback情况）
                     )
                     # 清理系统提示（保存前过滤）
                     message_to_save = MessageCleaner.clean_message(message_to_save)
@@ -1422,6 +1533,7 @@ class ChatPlus(Star):
                             self.config.get("include_sender_info", True),
                             cached_msg.get("mention_info"),  # 传递@信息
                             trigger_type,  # 🆕 v1.0.4: 传递触发方式
+                            cached_msg.get("poke_info"),  # 🆕 v1.0.9: 传递戳一戳信息
                         )
 
                         # 清理系统提示（保存前过滤）
@@ -1683,6 +1795,97 @@ class ChatPlus(Star):
             logger.error(f"[用户黑名单检测] 发生错误: {e}", exc_info=True)
             return False
 
+    def _should_ignore_at_others(self, event: AstrMessageEvent) -> bool:
+        """
+        检测是否应该忽略@他人的消息
+
+        根据配置决定：
+        1. 如果未启用此功能，返回False（不忽略）
+        2. 如果启用了，检测消息是否@了其他人：
+           - strict模式：只要@了其他人就忽略
+           - allow_with_bot模式：@了其他人但也@了机器人，则不忽略
+
+        Args:
+            event: 消息事件对象
+
+        Returns:
+            bool: True=应该忽略这条消息，False=继续处理
+        """
+        try:
+            # 检查是否启用了忽略@他人功能
+            if not self.config.get("enable_ignore_at_others", False):
+                return False
+
+            # 获取忽略模式
+            ignore_mode = self.config.get("ignore_at_others_mode", "strict")
+
+            # 获取机器人自己的ID
+            bot_id = event.get_self_id()
+
+            # 获取消息组件列表
+            messages = event.get_messages()
+            if not messages:
+                return False
+
+            # 导入At组件类
+            from astrbot.core.message.components import At
+
+            # 检查消息中的At组件
+            has_at_others = False  # 是否@了其他人
+            has_at_bot = False  # 是否@了机器人
+
+            for component in messages:
+                if isinstance(component, At):
+                    mentioned_id = str(component.qq)
+
+                    # 检查是否@了机器人
+                    if mentioned_id == bot_id:
+                        has_at_bot = True
+                        if self.debug_mode:
+                            logger.debug(
+                                f"[@他人检测] 检测到@机器人: ID={mentioned_id}"
+                            )
+                    # 检查是否@了其他人（排除@全体成员）
+                    elif mentioned_id.lower() != "all":
+                        has_at_others = True
+                        mentioned_name = (
+                            component.name
+                            if hasattr(component, "name") and component.name
+                            else ""
+                        )
+                        if self.debug_mode:
+                            logger.debug(
+                                f"[@他人检测] 检测到@其他人: ID={mentioned_id}, 名称={mentioned_name or '未知'}"
+                            )
+
+            # 根据模式决定是否忽略
+            if ignore_mode == "strict":
+                # strict模式：只要@了其他人就忽略
+                if has_at_others:
+                    logger.info(
+                        f"[@他人检测-strict模式] 消息中@了其他人，本插件跳过处理"
+                    )
+                    return True
+            elif ignore_mode == "allow_with_bot":
+                # allow_with_bot模式：@了其他人但也@了机器人，则继续处理
+                if has_at_others and not has_at_bot:
+                    logger.info(
+                        f"[@他人检测-allow_with_bot模式] 消息中@了其他人但未@机器人，本插件跳过处理"
+                    )
+                    return True
+                elif has_at_others and has_at_bot:
+                    if self.debug_mode:
+                        logger.debug(
+                            f"[@他人检测-allow_with_bot模式] 消息中@了其他人但也@了机器人，继续处理"
+                        )
+
+            return False
+
+        except Exception as e:
+            # 出错时不影响主流程，只记录错误日志
+            logger.error(f"[@他人检测] 发生错误: {e}", exc_info=True)
+            return False
+
     async def _check_mention_others(self, event: AstrMessageEvent) -> dict:
         """
         检测消息中是否@了别人（不是机器人自己）
@@ -1742,6 +1945,150 @@ class ChatPlus(Star):
             # 出错时不影响主流程，只记录错误日志
             logger.error(f"检测@提及时发生错误: {e}", exc_info=True)
             return None
+
+    def _check_poke_message(self, event: AstrMessageEvent) -> dict:
+        """
+        检测是否为戳一戳消息（v1.0.9新增）
+
+        ⚠️ 仅支持QQ平台的aiocqhttp消息事件
+
+        根据配置决定如何处理：
+        1. ignore模式：忽略所有戳一戳消息
+        2. bot_only模式：只处理戳机器人的消息
+        3. all模式：接受所有戳一戳消息
+
+        Args:
+            event: 消息事件对象
+
+        Returns:
+            dict: 戳一戳信息，格式:
+                  {
+                      "is_poke": True/False,  # 是否为戳一戳消息
+                      "should_ignore": True/False,  # 是否应该忽略（本插件不处理）
+                      "poke_info": {  # 戳一戳详细信息（仅当应该处理时存在）
+                          "is_poke_bot": True/False,  # 是否戳的是机器人
+                          "sender_id": "xxx",  # 戳人者ID
+                          "sender_name": "xxx",  # 戳人者昵称
+                          "target_id": "xxx",  # 被戳者ID
+                          "target_name": "xxx"  # 被戳者昵称（可能为空）
+                      }
+                  }
+        """
+        try:
+            # 获取配置的戳一戳处理模式
+            poke_mode = self.config.get("poke_message_mode", "ignore")
+
+            # 检查平台是否为aiocqhttp
+            if event.get_platform_name() != "aiocqhttp":
+                return {"is_poke": False, "should_ignore": False}
+
+            # 获取原始消息对象
+            raw_message = getattr(event.message_obj, "raw_message", None)
+            if not raw_message:
+                return {"is_poke": False, "should_ignore": False}
+
+            # 检查是否为戳一戳事件
+            # 参考astrbot_plugin_llm_poke的实现
+            is_poke = (
+                raw_message.get("post_type") == "notice"
+                and raw_message.get("notice_type") == "notify"
+                and raw_message.get("sub_type") == "poke"
+            )
+
+            if not is_poke:
+                return {"is_poke": False, "should_ignore": False}
+
+            # 确实是戳一戳消息
+            if self.debug_mode:
+                logger.debug("【戳一戳检测】检测到戳一戳消息")
+
+            # 模式1: ignore - 忽略所有戳一戳消息
+            if poke_mode == "ignore":
+                if self.debug_mode:
+                    logger.debug("【戳一戳检测】当前模式为ignore，忽略此消息")
+                logger.info("🔕 检测到戳一戳消息，当前模式为ignore，本插件跳过处理")
+                return {"is_poke": True, "should_ignore": True}
+
+            # 获取戳一戳相关信息
+            bot_id = raw_message.get("self_id")
+            sender_id = raw_message.get("user_id")
+            target_id = raw_message.get("target_id")
+            group_id = raw_message.get("group_id")
+
+            # 获取发送者昵称（戳人者）
+            sender_name = event.get_sender_name()
+
+            # 获取被戳者昵称（如果可能）
+            target_name = ""
+            try:
+                # 尝试从群信息中获取被戳者昵称
+                if group_id and target_id and str(target_id) != str(bot_id):
+                    # 这里可以调用API获取成员信息，但为了简化，暂时留空
+                    # 后续可以通过 event.get_group() 获取群成员列表来查找
+                    pass
+            except Exception as e:
+                if self.debug_mode:
+                    logger.debug(f"【戳一戳检测】获取被戳者昵称失败: {e}")
+
+            # 判断是否戳的是机器人
+            is_poke_bot = str(target_id) == str(bot_id)
+
+            if self.debug_mode:
+                logger.debug(
+                    f"【戳一戳检测】戳人者ID={sender_id}, 被戳者ID={target_id}, 机器人ID={bot_id}"
+                )
+                logger.debug(f"【戳一戳检测】是否戳机器人: {is_poke_bot}")
+
+            # 模式2: bot_only - 只处理戳机器人的消息
+            if poke_mode == "bot_only":
+                if not is_poke_bot:
+                    if self.debug_mode:
+                        logger.debug(
+                            "【戳一戳检测】当前模式为bot_only，但戳的不是机器人，忽略此消息"
+                        )
+                    logger.info(
+                        "🔕 检测到戳一戳消息（戳的是其他人），当前模式为bot_only，本插件跳过处理"
+                    )
+                    return {"is_poke": True, "should_ignore": True}
+                else:
+                    logger.info(
+                        f"✅ 检测到戳一戳消息（有人戳机器人），当前模式为bot_only，本插件将处理"
+                    )
+                    return {
+                        "is_poke": True,
+                        "should_ignore": False,
+                        "poke_info": {
+                            "is_poke_bot": True,
+                            "sender_id": str(sender_id),
+                            "sender_name": sender_name or "未知用户",
+                            "target_id": str(target_id),
+                            "target_name": "",  # 机器人自己，不需要名称
+                        },
+                    }
+
+            # 模式3: all - 接受所有戳一戳消息
+            if poke_mode == "all":
+                logger.info(f"✅ 检测到戳一戳消息，当前模式为all，本插件将处理")
+                return {
+                    "is_poke": True,
+                    "should_ignore": False,
+                    "poke_info": {
+                        "is_poke_bot": is_poke_bot,
+                        "sender_id": str(sender_id),
+                        "sender_name": sender_name or "未知用户",
+                        "target_id": str(target_id),
+                        "target_name": target_name or "未知用户",
+                    },
+                }
+
+            # 未知模式，默认忽略
+            logger.warning(f"⚠️ 未知的戳一戳处理模式: {poke_mode}，默认忽略")
+            return {"is_poke": True, "should_ignore": True}
+
+        except Exception as e:
+            # 出错时不影响主流程，只记录错误日志
+            logger.error(f"【戳一戳检测】发生错误: {e}", exc_info=True)
+            return {"is_poke": False, "should_ignore": False}
 
     async def _check_probability(
         self,

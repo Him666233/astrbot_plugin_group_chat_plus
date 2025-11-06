@@ -161,6 +161,30 @@
         "hint": "需要过滤的指令前缀，如 /、!、#、: 等。当消息以这些前缀开头时，插件会跳过处理。留空表示不过滤任何前缀",
         "default": ["/", "!", "#"]
     },
+    "poke_message_mode": {
+        "description": "戳一戳消息处理模式",
+        "type": "string",
+        "hint": "【v1.0.9新增】⚠️仅支持QQ平台+aiocqhttp消息平台⚠️ 选择如何处理戳一戳消息：ignore=忽略所有戳一戳消息（本插件不处理）；bot_only=只处理戳机器人的消息（会添加系统提示词告诉AI有人戳他）；all=接受所有戳一戳消息（会添加系统提示词说明谁戳了谁，让AI知道不是戳他自己）",
+        "default": "bot_only"
+    },
+    "poke_bot_skip_probability": {
+        "description": "戳机器人时跳过概率筛选",
+        "type": "bool",
+        "hint": "【v1.0.9增强】开启后，当戳一戳模式为bot_only或all，且戳的是机器人本身时，将跳过概率筛选（必定进入读空气判断），但仍保留读空气AI判断。关闭则戳一戳消息与普通消息一样需要通过概率筛选",
+        "default": true
+    },
+    "enable_ignore_at_others": {
+        "description": "启用忽略@他人消息功能",
+        "type": "bool",
+        "hint": "开启后，可根据设定的模式自动忽略@了其他人（非机器人）的消息。即使消息包含触发关键词，也不会进行任何处理。关闭则不进行此项检测",
+        "default": false
+    },
+    "ignore_at_others_mode": {
+        "description": "@他人消息忽略模式",
+        "type": "string",
+        "hint": "选择如何处理@他人的消息：strict=只要检测到消息中@了其他人就直接忽略；allow_with_bot=如果消息中虽然@了他人但也@了机器人，则继续处理。需要先启用'启用忽略@他人消息功能'才生效",
+        "default": "strict"
+    },
     "enable_attention_mechanism": {
         "description": "启用增强注意力机制",
         "type": "bool",
