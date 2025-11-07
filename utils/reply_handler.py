@@ -7,6 +7,7 @@
 """
 
 import asyncio
+from typing import List, Optional
 from astrbot.api.all import *
 from astrbot.core.provider.entities import ProviderRequest
 
@@ -93,6 +94,7 @@ e) 即使话题相关，也要用新的方式表达，展现对话的自然变�
         formatted_message: str,
         extra_prompt: str,
         prompt_mode: str = "append",
+        image_urls: Optional[List[str]] = None,
     ) -> ProviderRequest:
         """
         生成AI回复
@@ -187,7 +189,7 @@ e) 即使话题相关，也要用新的方式表达，展现对话的自然变�
                 func_tool_manager=func_tools_mgr,
                 contexts=contexts,  # 包含begin_dialogs
                 system_prompt=system_prompt,  # 直接使用人格的prompt
-                image_urls=[],
+                image_urls=image_urls if image_urls else [],
             )
 
         except Exception as e:

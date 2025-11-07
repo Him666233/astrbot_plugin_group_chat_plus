@@ -7,7 +7,7 @@
 """
 
 import asyncio
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from astrbot.api.all import *
 
 
@@ -32,7 +32,7 @@ class ImageHandler:
         image_to_text_prompt: str,
         is_at_message: bool,
         timeout: int = 60,
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, Union[str, List[BaseMessageComponent]]]:
         """
         处理消息中的图片
 
@@ -56,7 +56,7 @@ class ImageHandler:
                 event.message_obj, "message"
             ):
                 # 没有消息链,使用原始文本
-                return True, event.get_message_outline()
+                return True, event.get_messages()
 
             message_chain = event.message_obj.message
 
@@ -67,7 +67,7 @@ class ImageHandler:
 
             # 如果没有图片,直接返回原消息
             if not has_image:
-                return True, event.get_message_outline()
+                return True, event.get_messages()
 
             logger.debug(
                 f"检测到消息包含 {len(image_components)} 张图片, 是否有文字: {has_text}"
@@ -108,7 +108,7 @@ class ImageHandler:
                 logger.debug(
                     "未配置图片转文字提供商ID,保留原始图片信息传递给下游多模态AI"
                 )
-                return True, event.get_message_outline()
+                return True, event.get_messages()
 
             # === 第四步：配置了图片转文字提供商ID，尝试转换图片 ===
             logger.debug(
@@ -145,7 +145,7 @@ class ImageHandler:
         except Exception as e:
             logger.error(f"处理消息图片时发生错误: {e}")
             # 发生错误时,返回原消息文本
-            return True, event.get_message_outline()
+            return True, event.get_messages()
 
     @staticmethod
     def _analyze_message(
