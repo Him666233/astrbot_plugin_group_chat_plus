@@ -40,12 +40,13 @@ import random
 import time
 import sys
 import hashlib
+from typing import List, Optional, Union
 from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.core.star.star_tools import StarTools
 
 # 导入消息组件类型
-from astrbot.core.message.components import Plain, Poke
+from astrbot.core.message.components import Plain, Poke, BaseMessageComponent, Image
 
 # 导入所有工具模块
 from .utils import (
@@ -616,11 +617,12 @@ class ChatPlus(Star):
             has_trigger_keyword: 是否包含触发关键词
 
         Returns:
-            (should_continue, original_message_text, processed_message, formatted_context)
+            (should_continue, original_message_text, processed_message, formatted_context, image_urls)
             - should_continue: 是否继续处理
             - original_message_text: 纯净的原始消息（不含元数据）
             - processed_message: 处理后的消息（图片已处理，不含元数据，用于保存）
             - formatted_context: 格式化后的完整上下文（历史消息+当前消息，当前消息已添加元数据）
+            - image_urls: 从消息链中提取的图片URL列表（v1.0.10新增）
         """
         # 提取纯净原始消息
         if self.debug_mode:
@@ -645,7 +647,7 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug("【步骤6.5】处理图片内容")
 
-        should_continue, processed_message = await ImageHandler.process_message_images(
+        should_continue, processed_message_or_chain = await ImageHandler.process_message_images(
             event,
             self.context,
             self.config.get("enable_image_processing", False),
@@ -661,7 +663,36 @@ class ChatPlus(Star):
             if self.debug_mode:
                 logger.debug("【步骤6.5】图片处理判定丢弃消息，不缓存")
                 logger.debug("=" * 60)
-            return False, None, None, None
+            return False, None, None, None, None
+
+        # 🆕 v1.0.10: 处理返回的消息链，分离文本和图片
+        text_for_ai = ""
+        image_urls = []
+        if isinstance(processed_message_or_chain, list):
+            # 返回的是消息链，需要解析
+            text_parts = []
+            for component in processed_message_or_chain:
+                if isinstance(component, Plain):
+                    text_parts.append(component.text)
+                elif isinstance(component, Image):
+                    # 尝试异步获取图片URL
+                    try:
+                        path = await component.convert_to_file_path()
+                        if path:
+                            image_urls.append(path)
+                    except Exception as e:
+                        logger.warning(f"在处理消息内容时无法转换图片路径: {e}")
+                # 其他组件可以根据需要添加处理逻辑，这里暂时只处理文本和图片
+            text_for_ai = "".join(text_parts).strip()
+            if self.debug_mode:
+                logger.debug(f"  消息链解析结果: 文本='{text_for_ai[:100]}...', 图片URL数={len(image_urls)}")
+        elif isinstance(processed_message_or_chain, str):
+            # 返回的是字符串，直接使用
+            text_for_ai = processed_message_or_chain
+
+        # 🆕 v1.0.11: 为缓存和历史记录获取带占位符的字符串
+        # 这一步至关重要，确保了历史记录的完整性
+        processed_message = event.get_message_outline()
 
         # 缓存当前用户消息（图片处理通过后再缓存）
         # 注意：缓存处理后的消息（不含元数据），在保存时再添加元数据
@@ -669,7 +700,7 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.debug("【步骤7】缓存处理后的用户消息（不含元数据，保存时再添加）")
             logger.debug(f"  原始消息（提取自event）: {original_message_text[:200]}...")
-            logger.debug(f"  处理后消息（图片处理后）: {processed_message[:200]}...")
+            logger.debug(f"  处理后消息（用于缓存）: {processed_message[:200]}...")
 
         # 🆕 v1.0.4: 确定触发方式（用于后续添加系统提示）
         # 根据is_at_message和has_trigger_keyword判断触发方式
@@ -770,7 +801,7 @@ class ChatPlus(Star):
 
         message_text_for_ai = MessageProcessor.add_metadata_to_message(
             event,
-            processed_message,  # 使用处理后的消息（图片已处理）
+            text_for_ai,  # 使用纯文本消息
             self.config.get("include_timestamp", True),
             self.config.get("include_sender_info", True),
             mention_info,  # 传递@信息
@@ -780,7 +811,7 @@ class ChatPlus(Star):
 
         if self.debug_mode:
             logger.debug("【步骤7.5】为当前消息添加元数据（用于AI识别）")
-            logger.debug(f"  处理后消息: {processed_message[:100]}...")
+            logger.debug(f"  处理后消息(纯文本): {text_for_ai[:100]}...")
             logger.debug(f"  添加元数据后: {message_text_for_ai[:150]}...")
 
         # 提取历史上下文
@@ -837,7 +868,7 @@ class ChatPlus(Star):
             logger.debug(f"  格式化后长度: {len(formatted_context)} 字符")
 
         # 返回：原始消息文本、处理后的消息（不含元数据，用于保存）、格式化的上下文
-        return True, original_message_text, processed_message, formatted_context
+        return True, original_message_text, processed_message, formatted_context, image_urls
 
     async def _generate_and_send_reply(
         self,
@@ -849,6 +880,7 @@ class ChatPlus(Star):
         chat_id: str,
         is_at_message: bool = False,
         has_trigger_keyword: bool = False,
+        image_urls: Optional[List[str]] = None,
     ):
         """
         生成并发送回复，保存历史
@@ -921,6 +953,7 @@ class ChatPlus(Star):
             final_message,
             self.config.get("reply_ai_extra_prompt", ""),
             self.config.get("reply_ai_prompt_mode", "append"),
+            image_urls=image_urls,
         )
 
         if self.debug_mode:
@@ -1282,7 +1315,7 @@ class ChatPlus(Star):
         if not result[0]:  # should_continue为False
             return
 
-        _, original_message_text, message_text, formatted_context = result
+        _, original_message_text, message_text, formatted_context, image_urls = result
 
         # 步骤7: AI决策判断（第二道核心过滤）
         should_reply = await self._check_ai_decision(
@@ -1360,6 +1393,7 @@ class ChatPlus(Star):
             chat_id,
             is_at_message,
             has_trigger_keyword,  # 🆕 v1.0.4: 传递触发方式信息
+            image_urls=image_urls,
         ):
             yield result
 
