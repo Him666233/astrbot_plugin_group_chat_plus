@@ -6,12 +6,21 @@ v1.0.4 更新：
 - 添加对发送者识别系统提示的清理规则
 - 在保存到官方历史时过滤掉系统提示
 
+v1.1.0 更新：
+- 🆕 增加主动对话提示词的特殊处理
+- 主动对话的系统提示词会保留到官方历史（让AI理解上下文）
+- 使用特殊标记 [PROACTIVE_CHAT] 标识主动对话消息
+
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 import re
 from astrbot.api.all import *
+from astrbot.api.message_components import Plain, At, Image, Reply
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class MessageCleaner:
@@ -22,7 +31,20 @@ class MessageCleaner:
     1. 移除系统自动添加的@消息提示词
     2. 移除决策AI相关的提示词
     3. 只保留原始用户消息内容
+    4. 🆕 v1.1.0: 特殊处理主动对话提示词（保留到历史）
     """
+
+    # 🆕 v1.1.0: 主动对话标记
+    # 用于标识AI主动发起的对话，这个标记和相关提示词会保留到官方历史
+    PROACTIVE_CHAT_MARKER = "[PROACTIVE_CHAT]"
+
+    # 🆕 v1.1.0: 主动对话系统提示词的特征模式
+    # 这些提示词会被保留到官方历史，让AI理解自己是主动发起的
+    PROACTIVE_CHAT_PROMPT_PATTERNS = [
+        r"\[系统提示 - 主动发起新话题场景\]",
+        r"你刚刚主动发起了一个新话题",
+        r"这是你主动发起的对话",
+    ]
 
     # @消息提示词的特征模式（用于识别和移除）
     AT_MESSAGE_PROMPT_PATTERNS = [
@@ -63,6 +85,9 @@ class MessageCleaner:
         """
         清理消息，移除系统添加的提示词
 
+        ⚠️ 注意：此方法会移除所有系统提示词，包括主动对话的提示词
+        如果需要保留主动对话提示词，请使用 clean_message_preserve_proactive
+
         Args:
             message_text: 原始消息（可能包含提示词）
 
@@ -89,6 +114,94 @@ class MessageCleaner:
         cleaned = cleaned.strip()
 
         return cleaned
+
+    @staticmethod
+    def is_proactive_chat_message(message_text: str) -> bool:
+        """
+        🆕 v1.1.0: 检测消息是否为主动对话消息
+
+        Args:
+            message_text: 消息文本
+
+        Returns:
+            True=主动对话消息, False=普通消息
+        """
+        if not message_text:
+            return False
+
+        # 检查是否包含主动对话标记
+        if MessageCleaner.PROACTIVE_CHAT_MARKER in message_text:
+            return True
+
+        # 检查是否包含主动对话提示词特征
+        for pattern in MessageCleaner.PROACTIVE_CHAT_PROMPT_PATTERNS:
+            if re.search(pattern, message_text):
+                return True
+
+        return False
+
+    @staticmethod
+    def clean_message_preserve_proactive(message_text: str) -> str:
+        """
+        🆕 v1.1.0: 清理消息，但保留主动对话的系统提示词
+
+        用于保存到官方历史时的清理，让AI能理解自己之前主动发起的对话
+
+        Args:
+            message_text: 原始消息（可能包含提示词）
+
+        Returns:
+            清理后的消息（保留主动对话提示词，移除其他系统提示词）
+        """
+        if not message_text:
+            return message_text
+
+        # 如果不是主动对话消息，使用普通清理
+        if not MessageCleaner.is_proactive_chat_message(message_text):
+            return MessageCleaner.clean_message(message_text)
+
+        # 是主动对话消息，需要保留主动对话提示词
+        cleaned = message_text
+
+        # 移除@消息提示词
+        for pattern in MessageCleaner.AT_MESSAGE_PROMPT_PATTERNS:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
+
+        # 移除决策AI提示词
+        for pattern in MessageCleaner.DECISION_AI_PROMPT_PATTERNS:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
+
+        # ⚠️ 不移除主动对话提示词 - 这是关键区别！
+
+        # 清理多余的空白行
+        cleaned = re.sub(r"\n\s*\n\s*\n", "\n\n", cleaned)
+
+        # 去除首尾空白
+        cleaned = cleaned.strip()
+
+        return cleaned
+
+    @staticmethod
+    def mark_proactive_chat_message(message_text: str) -> str:
+        """
+        🆕 v1.1.0: 标记消息为主动对话消息
+
+        在消息开头添加主动对话标记
+
+        Args:
+            message_text: 原始消息
+
+        Returns:
+            带标记的消息
+        """
+        if not message_text:
+            return message_text
+
+        # 如果已经有标记，不重复添加
+        if MessageCleaner.PROACTIVE_CHAT_MARKER in message_text:
+            return message_text
+
+        return f"{MessageCleaner.PROACTIVE_CHAT_MARKER}\n{message_text}"
 
     @staticmethod
     def filter_poke_text_marker(text: str) -> str:
@@ -150,8 +263,6 @@ class MessageCleaner:
         try:
             # 方法1: 从消息链中提取（最可靠）
             if hasattr(event, "message_obj") and hasattr(event.message_obj, "message"):
-                from astrbot.api.message_components import Plain, At, Image, Reply
-
                 raw_parts = []
                 for component in event.message_obj.message:
                     if isinstance(component, Plain):
@@ -174,9 +285,10 @@ class MessageCleaner:
                     raw_message = "".join(raw_parts).strip()
                     # 只有当提取到非空消息时才返回
                     if raw_message:
-                        logger.debug(
-                            f"[消息清理] 从消息链提取原始消息: {raw_message[:100]}..."
-                        )
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"[消息清理] 从消息链提取原始消息: {raw_message[:100]}..."
+                            )
                         # 🆕 过滤戳一戳文本标识符
                         raw_message = MessageCleaner.filter_poke_text_marker(
                             raw_message
@@ -190,14 +302,16 @@ class MessageCleaner:
 
             # 方法2: 使用get_message_str（可能包含提示词，需要清理）
             plain_message = event.get_message_str()
-            logger.debug(
-                f"[消息清理] 方法2: get_message_str()={plain_message[:100] if plain_message else '(空)'}"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"[消息清理] 方法2: get_message_str()={plain_message[:100] if plain_message else '(空)'}"
+                )
             if plain_message:
                 cleaned = MessageCleaner.clean_message(plain_message)
-                logger.debug(
-                    f"[消息清理] 从plain提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[消息清理] 从plain提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
+                    )
                 if cleaned:
                     # 🆕 过滤戳一戳文本标识符
                     cleaned = MessageCleaner.filter_poke_text_marker(cleaned)
@@ -207,17 +321,21 @@ class MessageCleaner:
 
             # 方法3: 使用get_message_outline（最后的备选）
             outline_message = event.get_message_outline()
-            logger.debug(
-                f"[消息清理] 方法3: get_message_outline()={outline_message[:100] if outline_message else '(空)'}"
-            )
-            cleaned = MessageCleaner.clean_message(outline_message)
-            logger.debug(
-                f"[消息清理] 从outline提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
-            )
-            if not cleaned:
-                logger.warning(
-                    f"[消息清理] 所有方法都返回空消息！event.message_str={event.message_str[:100] if event.message_str else '(空)'}"
+            if DEBUG_MODE:
+                logger.info(
+                    f"[消息清理] 方法3: get_message_outline()={outline_message[:100] if outline_message else '(空)'}"
                 )
+            cleaned = MessageCleaner.clean_message(outline_message)
+            if DEBUG_MODE:
+                logger.info(
+                    f"[消息清理] 从outline提取并清理: {cleaned[:100] if cleaned else '(空消息)'}..."
+                )
+            if not cleaned:
+                # 优化：空消息可能是正常的（如纯图片、纯表情、戳一戳等），降低日志级别
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[消息清理] 所有方法都返回空消息（可能是纯图片/表情/戳一戳等）: event.message_str={event.message_str[:100] if event.message_str else '(空)'}"
+                    )
             # 🆕 过滤戳一戳文本标识符
             cleaned = (
                 MessageCleaner.filter_poke_text_marker(cleaned) if cleaned else cleaned
@@ -269,7 +387,8 @@ class MessageCleaner:
                 return "[引用消息]"
 
         except Exception as e:
-            logger.debug(f"[消息清理] 格式化引用消息失败: {e}")
+            if DEBUG_MODE:
+                logger.info(f"[消息清理] 格式化引用消息失败: {e}")
             return "[引用消息]"
 
     @staticmethod
@@ -296,6 +415,7 @@ class MessageCleaner:
         is_empty = len(without_at) == 0
 
         if is_empty:
-            logger.debug("[消息清理] 检测到纯@消息（无其他内容）")
+            if DEBUG_MODE:
+                logger.info("[消息清理] 检测到纯@消息（无其他内容）")
 
         return is_empty

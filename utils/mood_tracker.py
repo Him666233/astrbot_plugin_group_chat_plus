@@ -9,11 +9,13 @@
 - v1.0.6更新：支持否定词检测，避免"不难过"被误判为"难过"
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 参考: MaiBot mood_manager.py (简化实现)
 """
 
 import time
+import json
+import os
 from typing import Optional, Dict, List, Any
 from astrbot.api.all import logger
 
@@ -72,9 +74,6 @@ class MoodTracker:
             包含默认值的字典，如果读取失败则返回空字典
         """
         try:
-            import json
-            import os
-
             # 获取当前文件所在目录的上一级目录（插件根目录）
             current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             schema_path = os.path.join(current_dir, "_conf_schema.json")
@@ -92,7 +91,8 @@ class MoodTracker:
                 if isinstance(value, dict) and "default" in value:
                     defaults[key] = value["default"]
 
-            logger.debug(f"[情绪追踪] 已从 schema 加载 {len(defaults)} 个默认配置")
+            if getattr(self, "debug_mode", False):
+                logger.info(f"[情绪追踪] 已从 schema 加载 {len(defaults)} 个默认配置")
             return defaults
 
         except Exception as e:
@@ -113,6 +113,9 @@ class MoodTracker:
         # 从配置读取参数，如果没有配置则使用默认值
         if config is None:
             config = {}
+
+        # 详细日志开关（与 main.py 同款）
+        self.debug_mode = config.get("enable_debug_log", False)
 
         # 从 schema 文件中读取默认配置
         # 这样可以避免硬编码，保持单一数据源
@@ -181,42 +184,44 @@ class MoodTracker:
         if isinstance(mood_keywords_raw, str):
             if mood_keywords_raw.strip():  # 非空字符串，尝试解析
                 try:
-                    import json
-
                     self.mood_keywords: Dict[str, List[str]] = json.loads(
                         mood_keywords_raw
                     )
-                    logger.info(
-                        f"[情绪追踪] 已加载情绪关键词配置，共 {len(self.mood_keywords)} 种情绪类型"
-                    )
+                    if self.debug_mode:
+                        logger.info(
+                            f"[情绪追踪] 已加载情绪关键词配置，共 {len(self.mood_keywords)} 种情绪类型"
+                        )
                 except json.JSONDecodeError as e:
                     logger.warning(
                         f"[情绪追踪] mood_keywords JSON解析失败: {e}，使用硬编码默认配置"
                     )
                     self.mood_keywords = self._get_default_mood_keywords()
             else:  # 空字符串，使用硬编码默认配置
-                logger.info(f"[情绪追踪] mood_keywords 为空，使用硬编码默认配置")
+                if self.debug_mode:
+                    logger.info(f"[情绪追踪] mood_keywords 为空，使用硬编码默认配置")
                 self.mood_keywords = self._get_default_mood_keywords()
         elif isinstance(mood_keywords_raw, dict):  # 字典格式（向后兼容旧版本配置）
             self.mood_keywords = mood_keywords_raw
-            logger.info(
-                f"[情绪追踪] 已从字典格式加载情绪关键词，共 {len(self.mood_keywords)} 种情绪类型"
-            )
+            if self.debug_mode:
+                logger.info(
+                    f"[情绪追踪] 已从字典格式加载情绪关键词，共 {len(self.mood_keywords)} 种情绪类型"
+                )
         else:
             logger.warning(
                 f"[情绪追踪] mood_keywords 配置格式错误(类型: {type(mood_keywords_raw).__name__})，使用硬编码默认配置"
             )
             self.mood_keywords = self._get_default_mood_keywords()
 
-        logger.info(
-            f"[情绪追踪系统] 已初始化 | "
-            f"衰减时间: {self.mood_decay_time}秒 | "
-            f"否定词检测: {'启用' if self.enable_negation else '禁用'} | "
-            f"否定词数量: {len(self.negation_words)} | "
-            f"情绪类型: {len(self.mood_keywords)} | "
-            f"清理阈值: {self._cleanup_threshold}秒 | "
-            f"清理间隔: {self._cleanup_interval}秒"
-        )
+        if self.debug_mode:
+            logger.info(
+                f"[情绪追踪系统] 已初始化 | "
+                f"衰减时间: {self.mood_decay_time}秒 | "
+                f"否定词检测: {'启用' if self.enable_negation else '禁用'} | "
+                f"否定词数量: {len(self.negation_words)} | "
+                f"情绪类型: {len(self.mood_keywords)} | "
+                f"清理阈值: {self._cleanup_threshold}秒 | "
+                f"清理间隔: {self._cleanup_interval}秒"
+            )
 
     def _has_negation_before(self, text: str, keyword_pos: int) -> bool:
         """
@@ -270,10 +275,11 @@ class MoodTracker:
                     # 如果启用了否定词检测，检查前面是否有否定词
                     if self.enable_negation and self._has_negation_before(text, pos):
                         # 检测到否定词，跳过这个关键词
-                        logger.debug(
-                            f"[情绪检测] 检测到否定词，忽略关键词 '{keyword}' "
-                            f"(位置: {pos}, 前文: '{text[max(0, pos - self.negation_check_range) : pos]}')"
-                        )
+                        if self.debug_mode:
+                            logger.info(
+                                f"[情绪检测] 检测到否定词，忽略关键词 '{keyword}' "
+                                f"(位置: {pos}, 前文: '{text[max(0, pos - self.negation_check_range) : pos]}')"
+                            )
                     else:
                         # 没有否定词，正常计分
                         score += 1
@@ -288,7 +294,7 @@ class MoodTracker:
 
         # 返回得分最高的情绪
         detected_mood = max(mood_scores, key=mood_scores.get)
-        logger.debug(
+        logger.info(
             f"[情绪检测] 文本: '{text[:50]}...' | 检测结果: {detected_mood} | 得分: {mood_scores}"
         )
 
@@ -330,7 +336,7 @@ class MoodTracker:
                 self.moods[chat_id]["intensity"] = max(
                     0.0, self.moods[chat_id]["intensity"] - 0.2
                 )
-                logger.debug(f"[情绪追踪] {chat_id} 情绪衰减到: {self.DEFAULT_MOOD}")
+                logger.info(f"[情绪追踪] {chat_id} 情绪衰减到: {self.DEFAULT_MOOD}")
 
             # 如果检测到新情绪，更新
             if detected_mood:
@@ -405,7 +411,7 @@ class MoodTracker:
         if "情绪" in original_prompt or "心情" in original_prompt:
             return original_prompt
 
-        logger.debug(f"[情绪追踪] {chat_id} 注入情绪: {current_mood}")
+        logger.info(f"[情绪追踪] {chat_id} 注入情绪: {current_mood}")
 
         return mood_hint + original_prompt
 
@@ -422,6 +428,7 @@ class MoodTracker:
                 "intensity": 0.0,
                 "last_update": time.time(),
             }
+
             logger.info(f"[情绪追踪] {chat_id} 情绪已重置")
 
     def get_mood_description(self, chat_id: str) -> str:
@@ -479,10 +486,11 @@ class MoodTracker:
             for chat_id in inactive_chats:
                 del self.moods[chat_id]
 
-            logger.info(
-                f"[情绪追踪-内存清理] 已清理 {len(inactive_chats)} 个不活跃群组的情绪记录 "
-                f"(超过 {self._cleanup_threshold / 3600:.1f} 小时未活跃)"
-            )
+            if self.debug_mode:
+                logger.info(
+                    f"[情绪追踪-内存清理] 已清理 {len(inactive_chats)} 个不活跃群组的情绪记录 "
+                    f"(超过 {self._cleanup_threshold / 3600:.1f} 小时未活跃)"
+                )
 
         # 更新上次清理时间
         self._last_cleanup_time = current_time

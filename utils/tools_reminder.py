@@ -3,11 +3,14 @@
 负责提取和提醒AI当前可用的工具
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 from typing import List, Dict
 from astrbot.api.all import *
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class ToolsReminder:
@@ -65,13 +68,14 @@ class ToolsReminder:
                                 }
                                 tool_info["parameters"].append(param_desc)
                     except Exception as e:
-                        logger.debug(
+                        logger.warning(
                             f"获取工具 {tool_info['name']} 的参数信息失败: {e}"
                         )
 
                 tool_list.append(tool_info)
 
-            logger.debug(f"获取到 {len(tool_list)} 个可用工具")
+            if DEBUG_MODE:
+                logger.info(f"获取到 {len(tool_list)} 个可用工具")
             return tool_list
 
         except Exception as e:
@@ -130,7 +134,8 @@ class ToolsReminder:
             tools = ToolsReminder.get_available_tools(context)
 
             if not tools:
-                logger.debug("没有可用工具,跳过工具提醒")
+                if DEBUG_MODE:
+                    logger.info("没有可用工具,跳过工具提醒")
                 return original_message
 
             # 格式化工具信息
@@ -144,7 +149,8 @@ class ToolsReminder:
                 "\n(以上是你可以调用的所有工具,根据需要选择合适的工具使用)"
             )
 
-            logger.debug(f"工具信息已注入,共 {len(tools)} 个工具")
+            if DEBUG_MODE:
+                logger.info(f"工具信息已注入,共 {len(tools)} 个工具")
             return injected_message
 
         except Exception as e:

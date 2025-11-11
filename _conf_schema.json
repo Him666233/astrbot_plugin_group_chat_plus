@@ -173,6 +173,30 @@
         "hint": "【v1.0.9增强】开启后，当戳一戳模式为bot_only或all，且戳的是机器人本身时，将跳过概率筛选（必定进入读空气判断），但仍保留读空气AI判断。关闭则戳一戳消息与普通消息一样需要通过概率筛选",
         "default": true
     },
+    "poke_reverse_on_poke_probability": {
+        "description": "收到戳一戳时反戳概率",
+        "type": "float",
+        "hint": "【新功能】当检测到戳一戳消息且本插件未忽略时，按此概率直接反戳发起者，并丢弃本插件后续处理（不拦截消息）。范围0-1；0=禁用，1=100%触发",
+        "default": 0.0
+    },
+    "enable_poke_after_reply": {
+        "description": "🆕 启用回复后戳一戳功能",
+        "type": "bool",
+        "hint": "⚠️仅支持QQ平台+aiocqhttp协议⚠️ 开启后，AI在主动回复消息时，会根据概率戳一戳发送问题的人。注意：只在主动回复时触发，不在主动对话时触发（因为主动对话没有被回复的对象）",
+        "default": false
+    },
+    "poke_after_reply_probability": {
+        "description": "回复后戳一戳概率",
+        "type": "float",
+        "hint": "AI主动回复后戳一戳发送者的概率（范围0-1）。默认0.15即15%。建议0.1-0.3，太高会打扰用户",
+        "default": 0.15
+    },
+    "poke_after_reply_delay": {
+        "description": "回复后戳一戳延迟(秒)",
+        "type": "float",
+        "hint": "发送回复后多久执行戳一戳操作，模拟真人的思考时间。默认0.5秒。建议0.3-2.0秒",
+        "default": 0.5
+    },
     "enable_ignore_at_others": {
         "description": "启用忽略@他人消息功能",
         "type": "bool",
@@ -358,6 +382,210 @@
         "type": "float",
         "hint": "【v1.0.2开始的新增】无论消息多长，延迟不会超过此值。默认3秒。避免用户等待过久",
         "default": 3.0
+    },
+    "enable_proactive_chat": {
+        "description": "🆕 启用主动对话功能",
+        "type": "bool",
+        "hint": "【v1.1.0新增】开启后，AI会在长时间沉默后主动发起新话题，模拟真人聊天行为。建议开启，让AI更拟人化",
+        "default": false
+    },
+    "proactive_silence_threshold": {
+        "description": "沉默时长阈值(秒)",
+        "type": "int",
+        "hint": "AI沉默多久后可能触发主动对话。默认600秒(10分钟)。建议300-1800秒，根据群活跃度调整",
+        "default": 600
+    },
+    "proactive_probability": {
+        "description": "主动对话触发概率",
+        "type": "float",
+        "hint": "超过沉默阈值后，每次检查触发主动对话的概率(0-1)。默认0.3。建议0.2-0.5，太高会让AI显得过于主动",
+        "default": 0.3
+    },
+    "proactive_check_interval": {
+        "description": "检查间隔(秒)",
+        "type": "int",
+        "hint": "多久检查一次是否应该触发主动对话。默认60秒。建议30-120秒，间隔太短会增加CPU占用",
+        "default": 60
+    },
+    "proactive_require_user_activity": {
+        "description": "需要用户活跃度",
+        "type": "bool",
+        "hint": "开启后，只有在最近有用户发言时才会主动对话，避免在死群突然说话。强烈建议开启",
+        "default": true
+    },
+    "proactive_min_user_messages": {
+        "description": "最少用户消息数",
+        "type": "int",
+        "hint": "距离上次AI发言后，至少需要多少条用户消息才能主动对话。默认3条。建议2-5条，避免AI过于频繁主动",
+        "default": 3
+    },
+    "proactive_user_activity_window": {
+        "description": "用户活跃时间窗口(秒)",
+        "type": "int",
+        "hint": "检查多少秒内是否有用户发言。默认300秒(5分钟)。用于判断群是否还活跃",
+        "default": 300
+    },
+    "proactive_max_consecutive_failures": {
+        "description": "最大连续失败次数",
+        "type": "int",
+        "hint": "AI主动发言后无人回复，最多连续尝试几次。超过后进入长时间冷却。默认2次。建议1-3次",
+        "default": 2
+    },
+    "proactive_cooldown_duration": {
+        "description": "失败后冷却时间(秒)",
+        "type": "int",
+        "hint": "达到最大连续失败次数后的冷却时间。默认1800秒(30分钟)。冷却期内不会再主动发言",
+        "default": 1800
+    },
+    "proactive_enable_quiet_time": {
+        "description": "启用禁用时段",
+        "type": "bool",
+        "hint": "开启后可设置某个时间段禁用主动对话(如深夜)，避免打扰用户休息",
+        "default": false
+    },
+    "proactive_quiet_start": {
+        "description": "禁用时段开始时间",
+        "type": "string",
+        "hint": "禁用时段开始时间，格式为HH:MM(24小时制)。例如: 23:00 表示晚上11点开始禁用",
+        "default": "23:00"
+    },
+    "proactive_quiet_end": {
+        "description": "禁用时段结束时间",
+        "type": "string",
+        "hint": "禁用时段结束时间，格式为HH:MM(24小时制)。例如: 07:00 表示早上7点结束禁用。支持跨天(如23:00-07:00)",
+        "default": "07:00"
+    },
+    "proactive_transition_minutes": {
+        "description": "过渡时长(分钟)",
+        "type": "int",
+        "hint": "进入/离开禁用时段前的过渡时间。概率会在此期间线性变化，避免突然禁用。默认30分钟。建议15-60分钟",
+        "default": 30
+    },
+    "proactive_prompt": {
+        "description": "主动对话提示词",
+        "type": "text",
+        "hint": "主动发起对话时给AI的专用提示词。留空则使用默认提示。可以定制AI主动发言的风格和话题方向",
+        "default": "你已经有一段时间没有说话了。现在你可以主动发起一个新话题，或者针对之前的对话内容做一些自然的延伸。\n要求：\n1. 话题要自然，不要生硬\n2. 可以是问题、分享、或感想\n3. 避免\"在吗\"、\"干嘛呢\"等低质量开场\n4. 最好与之前的聊天内容或群氛围相关\n5. 保持你的人设和语气\n6. ⚠️重要：不要提及\"我主动发起\"、\"我刚才\"等元数据信息，要表现得像自然想起什么而说话"
+    },
+    "proactive_use_attention": {
+        "description": "使用注意力机制",
+        "type": "bool",
+        "hint": "开启后，主动对话时会倾向于@注意力高的用户。需要先启用注意力机制。让主动对话更有针对性",
+        "default": true
+    },
+    "proactive_at_probability": {
+        "description": "@用户的概率",
+        "type": "float",
+        "hint": "主动对话时@某个用户的概率(0-1)。默认0.3。建议0.2-0.5，太高会打扰用户，太低显得不够主动",
+        "default": 0.3
+    },
+    "proactive_temp_boost_probability": {
+        "description": "临时概率提升值",
+        "type": "float",
+        "hint": "【拟人化核心功能】AI主动发言后，短暂提升回复概率的数值(0-1)。模拟真人发完消息后会留意回复的行为。默认0.5",
+        "default": 0.5
+    },
+    "proactive_temp_boost_duration": {
+        "description": "临时概率提升持续时间(秒)",
+        "type": "int",
+        "hint": "【拟人化核心功能】临时概率提升持续多久。默认120秒(2分钟)。期间内如有人回复会立即取消提升，超时也会自动取消",
+        "default": 120
+    },
+    "proactive_enabled_groups": {
+        "description": "主动对话功能启用的群组列表",
+        "type": "list",
+        "hint": "【群聊白名单】在哪些群组中启用主动对话功能。留空则在所有群聊中启用；填写群号则只在指定群组中启用。与全局的enabled_groups独立，可以单独控制主动对话功能的生效范围",
+        "default": []
+    },
+    "enable_dynamic_reply_probability": {
+        "description": "【v1.1.0-模式1】启用动态时间段概率调整（普通回复）",
+        "type": "bool",
+        "hint": "开启后，读空气回复概率会根据时间段动态调整，模拟人类作息规律。影响initial_probability和after_reply_probability。与注意力机制、频率调整器等功能自动配合，不会产生冲突。建议开启以获得更拟人化的效果",
+        "default": false
+    },
+    "reply_time_periods": {
+        "description": "【模式1】普通回复时间段配置(JSON格式)",
+        "type": "text",
+        "hint": "配置多个时间段及其概率系数。示例:\n[{\"name\":\"深夜睡眠\",\"start\":\"23:00\",\"end\":\"07:00\",\"factor\":0.2},{\"name\":\"午休时段\",\"start\":\"12:00\",\"end\":\"14:00\",\"factor\":0.5},{\"name\":\"晚间活跃\",\"start\":\"19:00\",\"end\":\"22:00\",\"factor\":1.3}]\n\nfactor说明: 0.2=很困倦(概率降低80%), 1.0=正常, 1.5=很活跃(概率提升50%)\n支持跨天配置(如23:00-07:00)",
+        "default": "[{\"name\":\"深夜睡眠\",\"start\":\"23:00\",\"end\":\"07:00\",\"factor\":0.2},{\"name\":\"午休时段\",\"start\":\"12:00\",\"end\":\"14:00\",\"factor\":0.5},{\"name\":\"晚间活跃\",\"start\":\"19:00\",\"end\":\"22:00\",\"factor\":1.3}]"
+    },
+    "reply_time_transition_minutes": {
+        "description": "【模式1】普通回复过渡时长(分钟)",
+        "type": "int",
+        "hint": "进入/离开特殊时间段时的平滑过渡时长。建议20-60分钟，模拟人类逐渐清醒/困倦的过程。值越大变化越平缓，越符合人类生理规律",
+        "default": 30
+    },
+    "reply_time_min_factor": {
+        "description": "【模式1】最低概率系数限制",
+        "type": "float",
+        "hint": "防止概率过低导致AI完全不回复。建议0.05-0.3（0.1=最低保留10%活跃度，即使在最困倦的时段也会偶尔回复）",
+        "default": 0.1
+    },
+    "reply_time_max_factor": {
+        "description": "【模式1】最高概率系数限制",
+        "type": "float",
+        "hint": "防止概率过高导致AI过于活跃。建议1.5-3.0（2.0=最高提升到200%，即使在最活跃时段也不会过于频繁）",
+        "default": 2.0
+    },
+    "reply_time_use_smooth_curve": {
+        "description": "【模式1】使用自然曲线过渡",
+        "type": "bool",
+        "hint": "开启后使用ease-in-out曲线模拟人类注意力的自然变化（非匀速，开始和结束变化慢，中间变化快）。关闭则使用线性过渡（匀速）。强烈建议开启以获得更真实、更拟人化的效果",
+        "default": true
+    },
+    "enable_probability_hard_limit": {
+        "description": "🔒 启用概率硬性限制（一键简化功能）",
+        "type": "bool",
+        "hint": "⚠️简化配置功能⚠️ 开启后，将强制限制所有主动回复功能的最终概率在设定范围内，无论其他功能（注意力机制、时间段调整、频率调整等）如何调整概率，最终都会被限制在[最小值,最大值]区间内。⚠️重要提醒：此功能会覆盖所有概率调整的结果，可能影响AI的拟人化表现。除非你觉得AI回复过于频繁或过于冷淡需要强制限制，否则不建议开启。注意：不影响主动对话功能和其他模式",
+        "default": false
+    },
+    "probability_min_limit": {
+        "description": "🔒 概率最小值限制",
+        "type": "float",
+        "hint": "当启用概率硬性限制时，所有主动回复功能的最终概率不会低于此值（范围0-1）。建议0.05-0.2。例如0.1表示即使AI再困倦/不活跃，回复概率也不会低于10%",
+        "default": 0.05
+    },
+    "probability_max_limit": {
+        "description": "🔒 概率最大值限制",
+        "type": "float",
+        "hint": "当启用概率硬性限制时，所有主动回复功能的最终概率不会高于此值（范围0-1）。建议0.6-0.9。例如0.8表示即使AI再活跃/兴奋，回复概率也不会超过80%",
+        "default": 0.8
+    },
+    "enable_dynamic_proactive_probability": {
+        "description": "【v1.1.0-模式2】启用动态时间段概率调整（主动对话）",
+        "type": "bool",
+        "hint": "开启后，AI主动发言概率会根据时间段动态调整。⚠️重要：如果同时启用了'禁用时段'功能（proactive_enable_quiet_time），禁用时段的优先级更高，会完全覆盖此功能在禁用时段内的效果",
+        "default": false
+    },
+    "proactive_time_periods": {
+        "description": "【模式2】主动对话时间段配置(JSON格式)",
+        "type": "text",
+        "hint": "配置多个时间段及其概率系数。主动对话建议使用更极端的系数:\n示例: [{\"name\":\"深夜睡眠\",\"start\":\"23:00\",\"end\":\"07:00\",\"factor\":0.0},{\"name\":\"午休时段\",\"start\":\"12:00\",\"end\":\"14:00\",\"factor\":0.3},{\"name\":\"晚间超活跃\",\"start\":\"19:00\",\"end\":\"22:00\",\"factor\":1.8}]\n\nfactor说明: 0.0=完全不主动, 0.3=偶尔主动, 1.5-2.0=非常主动\n⚠️注意：如果启用了'禁用时段'，禁用时段内会直接返回0，忽略此处配置",
+        "default": "[{\"name\":\"深夜睡眠\",\"start\":\"23:00\",\"end\":\"07:00\",\"factor\":0.0},{\"name\":\"午休时段\",\"start\":\"12:00\",\"end\":\"14:00\",\"factor\":0.3},{\"name\":\"晚间超活跃\",\"start\":\"19:00\",\"end\":\"22:00\",\"factor\":1.8}]"
+    },
+    "proactive_time_transition_minutes": {
+        "description": "【模式2】主动对话过渡时长(分钟)",
+        "type": "int",
+        "hint": "主动对话的过渡时间建议设置更长，避免AI突然变得主动或突然沉默。建议30-90分钟，模拟人类社交意愿的缓慢变化。过渡期间概率会平滑过渡，更加自然",
+        "default": 45
+    },
+    "proactive_time_min_factor": {
+        "description": "【模式2】最低概率系数限制",
+        "type": "float",
+        "hint": "主动对话允许完全禁用(0.0)。建议0.0-0.2（0.0=完全不主动，0.2=保留20%主动性，即使在不活跃时段也可能偶尔主动说话）",
+        "default": 0.0
+    },
+    "proactive_time_max_factor": {
+        "description": "【模式2】最高概率系数限制",
+        "type": "float",
+        "hint": "防止主动过于频繁。建议1.5-2.5（2.0=最高提升到200%主动性，在活跃时段会比较频繁地主动发言，但不至于刷屏）",
+        "default": 2.0
+    },
+    "proactive_time_use_smooth_curve": {
+        "description": "【模式2】使用自然曲线过渡",
+        "type": "bool",
+        "hint": "开启后使用ease-in-out曲线模拟社交意愿的自然变化（非匀速，更符合人类行为）。强烈建议开启以获得更拟人化的主动对话效果",
+        "default": true
     }
 }
 

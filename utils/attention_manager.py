@@ -14,7 +14,7 @@
 - Enhanced: 多用户追踪 + 情绪系统 + 渐进式调整
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 import time
@@ -25,6 +25,9 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from astrbot.api.all import *
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class AttentionManager:
@@ -99,9 +102,10 @@ class AttentionManager:
         AttentionManager._load_from_disk()
         AttentionManager._initialized = True
 
-        logger.info(
-            f"[注意力机制] 持久化存储已初始化: {AttentionManager._storage_path}"
-        )
+        if DEBUG_MODE:
+            logger.info(
+                f"[注意力机制] 持久化存储已初始化: {AttentionManager._storage_path}"
+            )
 
     @staticmethod
     def _load_from_disk() -> None:
@@ -110,14 +114,16 @@ class AttentionManager:
             not AttentionManager._storage_path
             or not AttentionManager._storage_path.exists()
         ):
-            logger.debug("[注意力机制] 无历史数据文件，从空白开始")
+            if DEBUG_MODE:
+                logger.info("[注意力机制] 无历史数据文件，从空白开始")
             return
 
         try:
             with open(AttentionManager._storage_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 AttentionManager._attention_map = data
-                logger.info(f"[注意力机制] 已加载 {len(data)} 个会话的注意力数据")
+                if DEBUG_MODE:
+                    logger.info(f"[注意力机制] 已加载 {len(data)} 个会话的注意力数据")
         except Exception as e:
             logger.error(f"[注意力机制] 加载数据失败: {e}，将从空白开始")
             AttentionManager._attention_map = {}
@@ -153,9 +159,10 @@ class AttentionManager:
                 )
 
             AttentionManager._last_save_time = current_time
-            logger.debug(
-                f"[注意力机制] 数据已保存到磁盘 ({len(AttentionManager._attention_map)} 个会话)"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"[注意力机制] 数据已保存到磁盘 ({len(AttentionManager._attention_map)} 个会话)"
+                )
         except Exception as e:
             logger.error(f"[注意力机制] 保存数据失败: {e}")
 
@@ -284,7 +291,8 @@ class AttentionManager:
         for user_id, user_name, attention, elapsed in to_remove:
             del chat_users[user_id]
             removed_count += 1
-            logger.debug(
+
+            logger.info(
                 f"[注意力机制-清理] 移除不活跃用户: {user_name}(ID:{user_id}), "
                 f"注意力={attention:.3f}, 未互动{elapsed / 60:.1f}分钟"
             )
@@ -390,10 +398,11 @@ class AttentionManager:
                         "user_name", "unknown"
                     )
                     del chat_users[removed_user_id]
-                    logger.debug(
-                        f"[注意力机制] 移除低优先级用户: {removed_name}(ID:{removed_user_id}), "
-                        f"注意力={sorted_users[i][1]['attention_score']:.3f}"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"[注意力机制] 移除低优先级用户: {removed_name}(ID:{removed_user_id}), "
+                            f"注意力={sorted_users[i][1]['attention_score']:.3f}"
+                        )
 
             logger.info(
                 f"[注意力机制-增强] 会话 {chat_key} - 回复 {user_name}(ID:{user_id}), "
@@ -477,18 +486,20 @@ class AttentionManager:
         async with AttentionManager._lock:
             # 如果该聊天没有记录，返回原概率
             if chat_key not in AttentionManager._attention_map:
-                logger.debug(
-                    f"[注意力机制-增强] 会话 {chat_key} - 无历史记录，使用原概率"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[注意力机制-增强] 会话 {chat_key} - 无历史记录，使用原概率"
+                    )
                 return current_probability
 
             chat_users = AttentionManager._attention_map[chat_key]
 
             # 如果当前用户没有档案，返回原概率
             if current_user_id not in chat_users:
-                logger.debug(
-                    f"[注意力机制-增强] 用户 {current_user_name} 无档案，使用原概率"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[注意力机制-增强] 用户 {current_user_name} 无档案，使用原概率"
+                    )
                 return current_probability
 
             profile = chat_users[current_user_id]
@@ -506,7 +517,8 @@ class AttentionManager:
             if users_to_remove:
                 for uid in users_to_remove:
                     del chat_users[uid]
-                    logger.debug(f"[注意力机制-增强] 清理长时间未互动用户: {uid}")
+                    if DEBUG_MODE:
+                        logger.info(f"[注意力机制-增强] 清理长时间未互动用户: {uid}")
                 # 清理后保存
                 await AttentionManager._auto_save_if_needed()
 
@@ -565,7 +577,7 @@ class AttentionManager:
                 # === 最终边界检测（确保在 [0, 1] 范围内）===
                 adjusted_probability = max(0.0, min(1.0, adjusted_probability))
 
-                logger.debug(
+                logger.info(
                     f"[注意力机制-增强] 👤 {current_user_name}(ID:{current_user_id}), "
                     f"注意力低({attention_score:.2f}), "
                     f"概率 {current_probability:.2f} → {adjusted_probability:.2f}"
@@ -597,13 +609,13 @@ class AttentionManager:
                     # 清除特定用户
                     if user_id in AttentionManager._attention_map[chat_key]:
                         del AttentionManager._attention_map[chat_key][user_id]
-                        logger.debug(
+                        logger.info(
                             f"[注意力机制-增强] 会话 {chat_key} 用户 {user_id} 注意力已清除"
                         )
                 else:
                     # 清除整个会话
                     del AttentionManager._attention_map[chat_key]
-                    logger.debug(
+                    logger.info(
                         f"[注意力机制-增强] 会话 {chat_key} 所有注意力状态已清除"
                     )
 
@@ -688,7 +700,7 @@ class AttentionManager:
             old_emotion = profile["emotion"]
             profile["emotion"] = max(-1.0, min(1.0, profile["emotion"] + emotion_delta))
 
-            logger.debug(
+            logger.info(
                 f"[注意力机制-扩展] 更新用户 {user_id} 情绪: "
                 f"{old_emotion:.2f} → {profile['emotion']:.2f} (Δ{emotion_delta:+.2f})"
             )
@@ -779,7 +791,7 @@ class AttentionManager:
             if message_preview:
                 profile["last_message_preview"] = message_preview[:50]
 
-            logger.debug(
+            logger.info(
                 f"[注意力机制-扩展] 记录交互: {user_name}(ID:{user_id}), "
                 f"注意力Δ{attention_delta:+.2f}, 情绪Δ{emotion_delta:+.2f}"
             )

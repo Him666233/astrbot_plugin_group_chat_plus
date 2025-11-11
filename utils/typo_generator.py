@@ -8,7 +8,7 @@
 - 低概率、高自然度
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 参考: MaiBot typo_generator.py (简化实现)
 """
 
@@ -17,6 +17,9 @@ from typing import Optional, Tuple
 from pypinyin import Style, pinyin
 
 from astrbot.api.all import logger
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class TypoGenerator:
@@ -42,7 +45,8 @@ class TypoGenerator:
         # 格式：{字: [同音字列表]}
         self.common_homophones = self._init_common_homophones()
 
-        logger.info(f"[打字错误生成器] 已初始化，错字率: {error_rate:.1%}")
+        if DEBUG_MODE:
+            logger.info(f"[打字错误生成器] 已初始化，错字率: {error_rate:.1%}")
 
     def _init_common_homophones(self) -> dict:
         """
@@ -172,8 +176,8 @@ class TypoGenerator:
                     text_list[pos] = typo_char
                     typo_count += 1
 
-                    if logger:
-                        logger.debug(f"[打字错误] {original_char} → {typo_char}")
+                    if logger and DEBUG_MODE:
+                        logger.info(f"[打字错误] {original_char} → {typo_char}")
 
         result = "".join(text_list)
 

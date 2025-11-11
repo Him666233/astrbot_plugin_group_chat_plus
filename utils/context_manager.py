@@ -10,15 +10,24 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from astrbot.api.all import *
+from astrbot.api.message_components import Plain
 import os
 import json
 from datetime import datetime
+
+# 导入 MessageCleaner（延迟导入以避免循环依赖）
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .message_cleaner import MessageCleaner
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class ContextManager:
@@ -56,7 +65,8 @@ class ContextManager:
 
         if not ContextManager.base_storage_path.exists():
             ContextManager.base_storage_path.mkdir(parents=True, exist_ok=True)
-            logger.info(f"上下文存储路径初始化: {ContextManager.base_storage_path}")
+            if DEBUG_MODE:
+                logger.info(f"上下文存储路径初始化: {ContextManager.base_storage_path}")
 
     @staticmethod
     def _message_to_dict(msg: AstrBotMessage) -> Dict[str, Any]:
@@ -207,7 +217,8 @@ class ContextManager:
         try:
             # 如果配置为0,不获取历史消息
             if max_messages == 0:
-                logger.debug("配置为不获取历史消息")
+                if DEBUG_MODE:
+                    logger.info("配置为不获取历史消息")
                 return []
 
             # 获取平台和聊天信息
@@ -226,7 +237,8 @@ class ContextManager:
 
             # 🔧 修复：使用 Path 对象的 exists() 方法
             if not file_path.exists():
-                logger.debug(f"历史消息文件不存在: {file_path}")
+                if DEBUG_MODE:
+                    logger.info(f"历史消息文件不存在: {file_path}")
                 return []
 
             # 使用安全的JSON反序列化
@@ -246,15 +258,92 @@ class ContextManager:
 
             # 如果配置为-1,返回所有历史消息
             if max_messages == -1:
-                logger.debug(f"获取所有历史消息,共 {len(history)} 条")
+                logger.info(f"获取所有历史消息,共 {len(history)} 条")
                 return history
 
             # 限制消息数量,只保留最新的
             if len(history) > max_messages:
                 history = history[-max_messages:]
-                logger.debug(f"历史消息超过限制,只保留最新的 {max_messages} 条")
+                logger.info(f"历史消息超过限制,只保留最新的 {max_messages} 条")
             else:
-                logger.debug(f"获取历史消息 {len(history)} 条")
+                logger.info(f"获取历史消息 {len(history)} 条")
+
+            return history
+
+        except Exception as e:
+            logger.error(f"读取历史消息失败: {e}")
+            return []
+
+    @staticmethod
+    def get_history_messages_by_params(
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+        max_messages: int,
+    ) -> List[AstrBotMessage]:
+        """
+        根据参数获取历史消息记录（用于主动对话等场景，无需event对象）
+
+        Args:
+            platform_name: 平台名称
+            is_private: 是否私聊
+            chat_id: 聊天ID
+            max_messages: 最大消息数量
+                - 正数: 限制条数
+                - 0: 不获取
+                - -1: 不限制
+
+        Returns:
+            历史消息列表
+        """
+        try:
+            # 如果配置为0,不获取历史消息
+            if max_messages == 0:
+                if DEBUG_MODE:
+                    logger.info("配置为不获取历史消息")
+                return []
+
+            if not chat_id:
+                logger.warning("无法获取聊天ID,跳过历史消息提取")
+                return []
+
+            # 读取历史消息文件
+            file_path = ContextManager._get_storage_path(
+                platform_name, is_private, chat_id
+            )
+
+            # 🔧 修复：使用 Path 对象的 exists() 方法
+            if not file_path.exists():
+                if DEBUG_MODE:
+                    logger.info(f"历史消息文件不存在: {file_path}")
+                return []
+
+            # 使用安全的JSON反序列化
+            with open(file_path, "r", encoding="utf-8") as f:
+                history_dicts = json.load(f)
+
+            if not history_dicts:
+                return []
+
+            # 将字典列表转换为 AstrBotMessage 对象列表
+            history = [
+                ContextManager._dict_to_message(msg_dict) for msg_dict in history_dicts
+            ]
+
+            # 过滤掉可能的 None 值（额外保护）
+            history = [msg for msg in history if msg is not None]
+
+            # 如果配置为-1,返回所有历史消息
+            if max_messages == -1:
+                logger.info(f"获取所有历史消息,共 {len(history)} 条")
+                return history
+
+            # 限制消息数量,只保留最新的
+            if len(history) > max_messages:
+                history = history[-max_messages:]
+                logger.info(f"历史消息超过限制,只保留最新的 {max_messages} 条")
+            else:
+                logger.info(f"获取历史消息 {len(history)} 条")
 
             return history
 
@@ -303,9 +392,10 @@ class ContextManager:
 
                         # 调试日志（仅在第一条消息时输出，避免刷屏）
                         if formatted_parts and len(formatted_parts) == 1:
-                            logger.debug(
-                                f"[上下文格式化] 机器人ID: {bot_id}, 当前消息发送者ID: {sender_id}, 是否为机器人: {is_bot}"
-                            )
+                            if DEBUG_MODE:
+                                logger.info(
+                                    f"[上下文格式化] 机器人ID: {bot_id}, 当前消息发送者ID: {sender_id}, 是否为机器人: {is_bot}"
+                                )
 
                     # 如果还没有判定为bot，尝试通过 self_id 判断
                     # 有时候消息没有正确的sender，但有self_id
@@ -330,8 +420,6 @@ class ContextManager:
                         message_content = msg.message_str
                     elif hasattr(msg, "message"):
                         # 简单提取文本
-                        from astrbot.api.message_components import Plain
-
                         for comp in msg.message:
                             if isinstance(comp, Plain):
                                 message_content += comp.text
@@ -362,7 +450,8 @@ class ContextManager:
             formatted_parts.append("=" * 50)
 
             result = "\n".join(formatted_parts)
-            logger.debug(f"上下文格式化完成,总长度: {len(result)} 字符")
+            if DEBUG_MODE:
+                logger.info(f"上下文格式化完成,总长度: {len(result)} 字符")
             return result
 
         except Exception as e:
@@ -467,7 +556,8 @@ class ContextManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(history_dicts, f, ensure_ascii=False, indent=2)
 
-            logger.debug(f"用户消息已保存到自定义历史记录")
+            if DEBUG_MODE:
+                logger.info(f"用户消息已保存到自定义历史记录")
 
             # 保存到官方历史管理器（platform_message_history表）
             # 注意：这个表和conversation不同，是用于平台消息记录的
@@ -518,7 +608,8 @@ class ContextManager:
                                 else:
                                     message_chain_dict.append(comp_dict)
                             except Exception as comp_err:
-                                logger.debug(f"组件转换失败，跳过: {comp_err}")
+                                if DEBUG_MODE:
+                                    logger.info(f"组件转换失败，跳过: {comp_err}")
                                 continue
 
                     if not message_chain_dict:
@@ -536,9 +627,10 @@ class ContextManager:
                         sender_name=event.get_sender_name() or "未知用户",
                     )
 
-                    logger.debug(
-                        "用户消息已保存到官方历史管理器(platform_message_history)"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            "用户消息已保存到官方历史管理器(platform_message_history)"
+                        )
 
                 except Exception as e:
                     logger.warning(
@@ -622,7 +714,7 @@ class ContextManager:
                     # 有些平台可能在 message_obj 中保存了机器人名称
                     pass
             except Exception as e:
-                logger.debug(f"无法获取机器人昵称: {e}")
+                logger.info(f"无法获取机器人昵称: {e}")
 
             bot_msg.sender = MessageMember(
                 user_id=event.get_self_id(), nickname=bot_nickname
@@ -647,7 +739,8 @@ class ContextManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(history_dicts, f, ensure_ascii=False, indent=2)
 
-            logger.debug(f"AI回复消息已保存到自定义历史记录")
+            if DEBUG_MODE:
+                logger.info(f"AI回复消息已保存到自定义历史记录")
 
             # 保存到官方历史管理器（platform_message_history表）
             # 注意：这个表和conversation不同，是用于平台消息记录的
@@ -698,8 +791,9 @@ class ContextManager:
                                 else:
                                     message_chain_dict.append(comp_dict)
                             except Exception as comp_err:
-                                logger.debug(f"组件转换失败，跳过: {comp_err}")
-                                continue
+                                if DEBUG_MODE:
+                                    logger.info(f"组件转换失败，跳过: {comp_err}")
+                                    continue
 
                     if not message_chain_dict:
                         # 如果没有消息链，创建纯文本消息
@@ -716,7 +810,128 @@ class ContextManager:
                         sender_name="AstrBot",
                     )
 
-                    logger.debug(
+                    if DEBUG_MODE:
+                        logger.info(
+                            "AI回复消息已保存到官方历史管理器(platform_message_history)"
+                        )
+
+                except Exception as e:
+                    logger.warning(
+                        f"保存到官方历史管理器(platform_message_history)失败: {e}"
+                    )
+                    # 即使官方保存失败，自定义存储仍然成功
+                    # 这不影响conversation_manager的保存
+
+            return True
+
+        except Exception as e:
+            logger.error(f"保存AI消息失败: {e}")
+            return False
+
+    @staticmethod
+    async def save_bot_message_by_params(
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+        bot_message_text: str,
+        self_id: str,
+        context: "Context" = None,
+        platform_id: str = None,
+    ) -> bool:
+        """
+        保存AI回复（用于主动对话等场景，无需event对象）
+        复用 save_bot_message 的核心逻辑，保持一致性
+
+        Args:
+            platform_name: 平台名称
+            is_private: 是否私聊
+            chat_id: 聊天ID
+            bot_message_text: AI回复文本
+            self_id: 机器人ID
+            context: Context对象（可选，用于保存到官方存储）
+            platform_id: 平台ID（可选，用于保存到官方存储）
+
+        Returns:
+            是否成功
+        """
+        try:
+            # 导入 MessageCleaner
+            from .message_cleaner import MessageCleaner
+
+            # 清理消息，确保不包含系统提示词（与 save_bot_message 保持一致）
+            cleaned_message = MessageCleaner.clean_message(bot_message_text)
+            if not cleaned_message:
+                # 如果清理后为空，使用原消息
+                cleaned_message = bot_message_text
+
+            if not chat_id:
+                logger.warning("无法获取聊天ID,跳过消息保存")
+                return False
+
+            # 读取现有历史记录（使用 get_history_messages_by_params，与主动对话场景一致）
+            file_path = ContextManager._get_storage_path(
+                platform_name, is_private, chat_id
+            )
+            history = ContextManager.get_history_messages_by_params(
+                platform_name, is_private, chat_id, -1
+            )  # 获取所有历史
+            if history is None:
+                history = []
+
+            # 创建AI消息对象（与 save_bot_message 保持一致）
+            bot_msg = AstrBotMessage()
+            bot_msg.message_str = cleaned_message
+            bot_msg.platform_name = platform_name
+            bot_msg.timestamp = int(datetime.now().timestamp())
+            bot_msg.type = (
+                MessageType.GROUP_MESSAGE
+                if not is_private
+                else MessageType.FRIEND_MESSAGE
+            )
+
+            if not is_private:
+                bot_msg.group_id = chat_id
+
+            # 设置发送者信息（AI自己）
+            bot_msg.sender = MessageMember(user_id=self_id, nickname="AI")
+            bot_msg.self_id = self_id
+            bot_msg.session_id = chat_id
+            bot_msg.message_id = f"bot_{int(datetime.now().timestamp())}"
+
+            # 添加到历史记录
+            history.append(bot_msg)
+
+            # 限制历史记录数量（保留最新200条）
+            if len(history) > 200:
+                history = history[-200:]
+
+            # 保存到自定义文件（使用安全的JSON序列化）
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            history_dicts = [ContextManager._message_to_dict(msg) for msg in history]
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(history_dicts, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"AI回复消息已保存到自定义历史记录")
+
+            # 保存到官方历史管理器（platform_message_history表）
+            # 与 save_bot_message 保持一致
+            if context and platform_id:
+                try:
+                    # 构造消息链字典（与 save_bot_message 保持一致）
+                    message_chain_dict = [
+                        {"type": "text", "data": {"text": bot_message_text}}
+                    ]
+
+                    # 调用官方历史管理器保存
+                    await context.message_history_manager.insert(
+                        platform_id=platform_id,
+                        user_id=chat_id,
+                        content=message_chain_dict,
+                        sender_id=self_id,
+                        sender_name="AstrBot",
+                    )
+
+                    logger.info(
                         "AI回复消息已保存到官方历史管理器(platform_message_history)"
                     )
 
@@ -725,7 +940,6 @@ class ContextManager:
                         f"保存到官方历史管理器(platform_message_history)失败: {e}"
                     )
                     # 即使官方保存失败，自定义存储仍然成功
-                    # 这不影响conversation_manager的保存
 
             return True
 
@@ -752,9 +966,10 @@ class ContextManager:
         try:
             # 1. 获取unified_msg_origin（会话标识）
             unified_msg_origin = event.unified_msg_origin
-            logger.debug(
-                f"[官方保存] 准备保存到官方对话系统，会话: {unified_msg_origin}"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"[官方保存] 准备保存到官方对话系统，会话: {unified_msg_origin}"
+                )
 
             # 2. 获取conversation_manager
             cm = context.conversation_manager
@@ -762,9 +977,10 @@ class ContextManager:
             # 3. 获取当前对话ID，如果没有则创建
             curr_cid = await cm.get_curr_conversation_id(unified_msg_origin)
             if not curr_cid:
-                logger.info(
-                    f"[官方保存] 会话 {unified_msg_origin} 没有对话，创建新对话"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存] 会话 {unified_msg_origin} 没有对话，创建新对话"
+                    )
                 # 获取群名作为标题
                 chat_id = (
                     event.get_group_id()
@@ -784,7 +1000,8 @@ class ContextManager:
                     title=title,
                     content=[],
                 )
-                logger.info(f"[官方保存] 创建新对话ID: {curr_cid}")
+                if DEBUG_MODE:
+                    logger.info(f"[官方保存] 创建新对话ID: {curr_cid}")
 
             if not curr_cid:
                 logger.warning(f"[官方保存] 无法创建或获取对话ID")
@@ -801,15 +1018,17 @@ class ContextManager:
             else:
                 history_list = []
 
-            logger.debug(f"[官方保存] 当前对话有 {len(history_list)} 条历史消息")
+            if DEBUG_MODE:
+                logger.info(f"[官方保存] 当前对话有 {len(history_list)} 条历史消息")
 
             # 6. 添加用户消息和AI回复
             history_list.append({"role": "user", "content": user_message})
             history_list.append({"role": "assistant", "content": bot_message})
 
-            logger.debug(
-                f"[官方保存] 准备保存，新增2条消息，总计 {len(history_list)} 条"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"[官方保存] 准备保存，新增2条消息，总计 {len(history_list)} 条"
+                )
 
             # 7. 使用官方API保存（参考旧插件的成功方法）
             success = await ContextManager._try_official_save(
@@ -871,11 +1090,12 @@ class ContextManager:
             try:
                 cm_type = type(cm).__name__
                 available = [m for m in methods if hasattr(cm, m)]
-                logger.info(
-                    f"[官方保存] CM类型={cm_type}, 对话ID={conversation_id}, 消息数={len(history_list)}"
-                )
-                logger.info(f"[官方保存] 可用方法: {available}")
-                logger.info(f"[官方保存] unified_msg_origin: {unified_msg_origin}")
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存] CM类型={cm_type}, 对话ID={conversation_id}, 消息数={len(history_list)}"
+                    )
+                    logger.info(f"[官方保存] 可用方法: {available}")
+                    logger.info(f"[官方保存] unified_msg_origin: {unified_msg_origin}")
             except Exception as e:
                 logger.warning(f"[官方保存] 记录CM信息失败: {e}")
 
@@ -884,12 +1104,14 @@ class ContextManager:
                 if hasattr(cm, m):
                     # 尝试位置参数+列表
                     try:
-                        logger.info(
-                            f"[官方保存] >>> 尝试 {m} 使用列表参数，历史长度={len(history_list)}"
-                        )
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"[官方保存] >>> 尝试 {m} 使用列表参数，历史长度={len(history_list)}"
+                            )
                         await getattr(cm, m)(
                             unified_msg_origin, conversation_id, history_list
                         )
+
                         logger.info(f"✅ [官方保存] {m} 成功（列表）")
 
                         # 验证是否真的保存成功
@@ -898,9 +1120,10 @@ class ContextManager:
                                 unified_msg_origin, conversation_id
                             )
                             if verification:
-                                logger.info(
-                                    f"✅ [官方保存] 验证成功：对话存在，ID={conversation_id}"
-                                )
+                                if DEBUG_MODE:
+                                    logger.info(
+                                        f"✅ [官方保存] 验证成功：对话存在，ID={conversation_id}"
+                                    )
                             else:
                                 logger.warning(
                                     f"[官方保存] 验证失败：无法获取刚保存的对话"
@@ -911,19 +1134,22 @@ class ContextManager:
                         return True
                     except TypeError as te:
                         # 参数类型不匹配，尝试字符串格式
-                        logger.debug(f"[官方保存] {m} 列表参数类型不匹配: {te}")
+                        if DEBUG_MODE:
+                            logger.info(f"[官方保存] {m} 列表参数类型不匹配: {te}")
                     except Exception as e:
                         logger.warning(f"[官方保存] {m}（列表）失败: {e}")
 
                     # 尝试字符串格式
                     try:
                         history_str = json.dumps(history_list, ensure_ascii=False)
-                        logger.info(
-                            f"[官方保存] >>> 尝试 {m} 使用字符串参数，长度={len(history_str)}"
-                        )
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"[官方保存] >>> 尝试 {m} 使用字符串参数，长度={len(history_str)}"
+                            )
                         await getattr(cm, m)(
                             unified_msg_origin, conversation_id, history_str
                         )
+
                         logger.info(f"✅ [官方保存] {m} 成功（字符串）")
                         return True
                     except Exception as e2:
@@ -980,28 +1206,34 @@ class ContextManager:
 
             # 1. 获取unified_msg_origin（会话标识）
             unified_msg_origin = event.unified_msg_origin
-            logger.debug(f"========== [官方保存+缓存转正] 开始保存 ==========")
-            logger.debug(
-                f"[官方保存+缓存转正] unified_msg_origin: {unified_msg_origin}"
-            )
-            logger.debug(f"[官方保存+缓存转正] 缓存消息: {len(cached_messages)} 条")
-            logger.debug(f"[官方保存+缓存转正] 用户消息长度: {len(user_message)} 字符")
-            logger.debug(f"[官方保存+缓存转正] AI回复长度: {len(bot_message)} 字符")
+            if DEBUG_MODE:
+                logger.info(f"========== [官方保存+缓存转正] 开始保存 ==========")
+                logger.info(
+                    f"[官方保存+缓存转正] unified_msg_origin: {unified_msg_origin}"
+                )
+                logger.info(f"[官方保存+缓存转正] 缓存消息: {len(cached_messages)} 条")
+                logger.info(
+                    f"[官方保存+缓存转正] 用户消息长度: {len(user_message)} 字符"
+                )
+                logger.info(f"[官方保存+缓存转正] AI回复长度: {len(bot_message)} 字符")
 
             # 2. 获取conversation_manager
             cm = context.conversation_manager
-            logger.debug(
-                f"[官方保存+缓存转正] ConversationManager类型: {type(cm).__name__}"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"[官方保存+缓存转正] ConversationManager类型: {type(cm).__name__}"
+                )
 
             # 3. 获取当前对话ID，如果没有则创建
             curr_cid = await cm.get_curr_conversation_id(unified_msg_origin)
-            logger.debug(f"[官方保存+缓存转正] 当前对话ID: {curr_cid}")
+            if DEBUG_MODE:
+                logger.info(f"[官方保存+缓存转正] 当前对话ID: {curr_cid}")
 
             if not curr_cid:
-                logger.debug(
-                    f"[官方保存+缓存转正] ❗ 会话 {unified_msg_origin} 没有对话，准备创建新对话"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存+缓存转正] ❗ 会话 {unified_msg_origin} 没有对话，准备创建新对话"
+                    )
                 # 获取群名作为标题
                 chat_id = (
                     event.get_group_id()
@@ -1013,8 +1245,11 @@ class ContextManager:
                     if not event.is_private_chat()
                     else f"私聊 {event.get_sender_name()}"
                 )
-                logger.debug(f"[官方保存+缓存转正] 新对话标题: {title}")
-                logger.debug(f"[官方保存+缓存转正] 平台ID: {event.get_platform_id()}")
+                if DEBUG_MODE:
+                    logger.info(f"[官方保存+缓存转正] 新对话标题: {title}")
+                    logger.info(
+                        f"[官方保存+缓存转正] 平台ID: {event.get_platform_id()}"
+                    )
 
                 # 使用new_conversation创建
                 try:
@@ -1024,9 +1259,10 @@ class ContextManager:
                         title=title,
                         content=[],
                     )
-                    logger.info(
-                        f"✅ [官方保存+缓存转正] 成功创建新对话，ID: {curr_cid}"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"✅ [官方保存+缓存转正] 成功创建新对话，ID: {curr_cid}"
+                        )
                 except Exception as create_err:
                     logger.error(
                         f"❌ [官方保存+缓存转正] 创建对话失败: {create_err}",
@@ -1039,21 +1275,24 @@ class ContextManager:
                 return False
 
             # 4. 获取当前对话的历史记录
-            logger.debug(f"[官方保存+缓存转正] 正在获取对话历史...")
+            if DEBUG_MODE:
+                logger.info(f"[官方保存+缓存转正] 正在获取对话历史...")
             try:
                 conversation = await cm.get_conversation(
                     unified_msg_origin=unified_msg_origin, conversation_id=curr_cid
                 )
-                logger.debug(
-                    f"[官方保存+缓存转正] 获取对话对象: {conversation is not None}"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存+缓存转正] 获取对话对象: {conversation is not None}"
+                    )
                 if conversation:
-                    logger.debug(
-                        f"[官方保存+缓存转正] 对话对象类型: {type(conversation).__name__}"
-                    )
-                    logger.debug(
-                        f"[官方保存+缓存转正] 对话标题: {getattr(conversation, 'title', 'N/A')}"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"[官方保存+缓存转正] 对话对象类型: {type(conversation).__name__}"
+                        )
+                        logger.info(
+                            f"[官方保存+缓存转正] 对话标题: {getattr(conversation, 'title', 'N/A')}"
+                        )
             except Exception as get_err:
                 logger.error(
                     f"❌ [官方保存+缓存转正] 获取对话失败: {get_err}", exc_info=True
@@ -1065,29 +1304,33 @@ class ContextManager:
                 # history是JSON字符串，需要解析
                 try:
                     history_list = json.loads(conversation.history)
-                    logger.debug(
-                        f"[官方保存+缓存转正] 解析历史记录成功: {len(history_list)} 条"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"[官方保存+缓存转正] 解析历史记录成功: {len(history_list)} 条"
+                        )
                 except (json.JSONDecodeError, TypeError) as parse_err:
                     logger.warning(f"[官方保存+缓存转正] 解析历史记录失败: {parse_err}")
                     history_list = []
             else:
-                logger.debug(f"[官方保存+缓存转正] 对话历史为空，从头开始")
+                if DEBUG_MODE:
+                    logger.info(f"[官方保存+缓存转正] 对话历史为空，从头开始")
                 history_list = []
 
             # 6. 添加需要转正的缓存消息（去重）
             cache_converted = 0
             if cached_messages:
-                logger.debug(f"[官方保存+缓存转正] 开始处理缓存消息转正...")
+                if DEBUG_MODE:
+                    logger.info(f"[官方保存+缓存转正] 开始处理缓存消息转正...")
                 # 提取现有历史中的消息内容（用于去重）
                 existing_contents = set()
                 for msg in history_list:
                     if isinstance(msg, dict) and "content" in msg:
                         existing_contents.add(msg["content"])
 
-                logger.debug(
-                    f"[官方保存+缓存转正] 现有历史内容数: {len(existing_contents)} 条"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存+缓存转正] 现有历史内容数: {len(existing_contents)} 条"
+                    )
 
                 # 过滤并添加不重复的缓存消息
                 added_count = 0
@@ -1106,24 +1349,31 @@ class ContextManager:
                             skipped_count += 1
 
                 cache_converted = added_count
-                logger.debug(
-                    f"[官方保存+缓存转正] 缓存消息处理完成: 总数={len(cached_messages)}, 添加={added_count}, 跳过(重复)={skipped_count}"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存+缓存转正] 缓存消息处理完成: 总数={len(cached_messages)}, 添加={added_count}, 跳过(重复)={skipped_count}"
+                    )
             else:
-                logger.debug(f"[官方保存+缓存转正] 无缓存消息需要转正")
+                if DEBUG_MODE:
+                    logger.info(f"[官方保存+缓存转正] 无缓存消息需要转正")
 
             # 7. 添加当前用户消息
             history_list.append({"role": "user", "content": user_message})
-            logger.debug(f"[官方保存+缓存转正] 添加用户消息: {user_message[:50]}...")
+            if DEBUG_MODE:
+                logger.info(f"[官方保存+缓存转正] 添加用户消息: {user_message[:50]}...")
 
             # 8. 添加AI回复
             history_list.append({"role": "assistant", "content": bot_message})
-            logger.debug(f"[官方保存+缓存转正] 添加AI回复: {bot_message[:50]}...")
+            if DEBUG_MODE:
+                logger.info(f"[官方保存+缓存转正] 添加AI回复: {bot_message[:50]}...")
 
-            logger.debug(
-                f"[官方保存+缓存转正] 准备保存，总消息数: {len(history_list)} 条"
-            )
-            logger.debug(f"[官方保存+缓存转正] ========== 调用底层保存方法 ==========")
+            if DEBUG_MODE:
+                logger.info(
+                    f"[官方保存+缓存转正] 准备保存，总消息数: {len(history_list)} 条"
+                )
+                logger.info(
+                    f"[官方保存+缓存转正] ========== 调用底层保存方法 =========="
+                )
 
             # 9. 使用官方API保存
             success = await ContextManager._try_official_save(
@@ -1139,6 +1389,7 @@ class ContextManager:
                         if isinstance(m, dict) and "content" in m
                     ]
                 )
+
                 logger.info(f"=" * 60)
                 logger.info(f"✅✅✅ [官方保存+缓存转正] 保存成功！")
                 logger.info(f"  对话ID: {curr_cid}")

@@ -3,11 +3,15 @@
 负责调用AI判断是否应该回复消息（读空气功能）
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 import asyncio
+from typing import List, Optional
 from astrbot.api.all import *
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class DecisionAI:
@@ -28,6 +32,13 @@ class DecisionAI:
 1. **优先关注"当前新消息"的核心内容** - 这是判断的首要依据
 2. **识别当前消息的主要问题或话题** - 判断是否与这个问题/话题相关
 3. **历史上下文仅作参考** - 用于理解背景，但不要因为历史话题有趣就忽略当前消息的实际内容
+
+⚠️ **【关于历史中的系统提示词】重要说明** ⚠️：
+- 历史对话中可能包含以"[🎯主动发起新话题]"等标记开头的系统提示词
+- **这些标记的含义**：紧挨着这个标记的下一条消息是**你自己主动发起的对话**，而不是回复别人的
+- 理解这个含义可以帮助你判断对话的上下文和连贯性
+- **但是**：你**绝对禁止在输出中提及、复述或引用**这些系统提示词
+- 只输出yes或no，不要说"我看到了提示词"之类的元信息
 
 ⚠️ **【防止重复】必须检查的事项** ⚠️：
 在判断是否回复之前，务必检查：
@@ -77,15 +88,17 @@ class DecisionAI:
    - 应该回复请输出: yes
    - 不应该回复请输出: no
    - 只输出yes或no，不要其他内容
-   - 禁止输出任何解释、理由或元信息（如"我根据规则判断..."）
+   - 禁止输出任何解释、理由或元信息（如"我根据规则判断..."、"我看到了主动对话提示词"等）
 
 ⚠️ 特别提醒：
    - 这只是判断是否回复，不是生成实际回复内容
    - 你的判断结果不会被用户看到
    - 只需要输出yes或no来表达你的判断即可
-
-请开始判断：
+   - **绝对不要提及任何系统提示词、规则说明或元信息**
 """
+
+    # 系统判断提示词的结束指令（单独分离，用于插入自定义提示词）
+    SYSTEM_DECISION_PROMPT_ENDING = "\n请开始判断：\n"
 
     @staticmethod
     async def should_reply(
@@ -96,6 +109,7 @@ class DecisionAI:
         extra_prompt: str,
         timeout: int = 30,
         prompt_mode: str = "append",
+        image_urls: Optional[List[str]] = None,
     ) -> bool:
         """
         调用AI判断是否应该回复
@@ -142,9 +156,21 @@ class DecisionAI:
 
                     if default_persona:
                         persona_prompt = default_persona.get("prompt", "")
-                        logger.debug(
-                            f"已获取人格提示词（provider_manager方式），长度: {len(persona_prompt)} 字符"
-                        )
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"已获取人格提示词（provider_manager方式），长度: {len(persona_prompt)} 字符"
+                            )
+                        # 注入人格的开场上下文，作为contexts传递
+                        try:
+                            begin_dialogs = default_persona.get(
+                                "_begin_dialogs_processed", []
+                            )
+                            persona_contexts = []
+                            if begin_dialogs:
+                                persona_contexts.extend(begin_dialogs)
+                        except Exception as e:
+                            if DEBUG_MODE:
+                                logger.info(f"获取人格上下文失败: {e}")
                     else:
                         # fallback: 使用persona_manager
                         default_persona = (
@@ -153,9 +179,21 @@ class DecisionAI:
                             )
                         )
                         persona_prompt = default_persona.get("prompt", "")
-                        logger.debug(
-                            f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
-                        )
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
+                            )
+                        # 注入人格的开场上下文，作为contexts传递
+                        try:
+                            begin_dialogs = default_persona.get(
+                                "_begin_dialogs_processed", []
+                            )
+                            persona_contexts = []
+                            if begin_dialogs:
+                                persona_contexts.extend(begin_dialogs)
+                        except Exception as e:
+                            if DEBUG_MODE:
+                                logger.info(f"获取人格上下文失败: {e}")
                 else:
                     # fallback: 使用persona_manager
                     default_persona = (
@@ -164,37 +202,57 @@ class DecisionAI:
                         )
                     )
                     persona_prompt = default_persona.get("prompt", "")
-                    logger.debug(
-                        f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
+                        )
+                    # 注入人格的开场上下文，作为contexts传递
+                    try:
+                        begin_dialogs = default_persona.get(
+                            "_begin_dialogs_processed", []
+                        )
+                        persona_contexts = []
+                        if begin_dialogs:
+                            persona_contexts.extend(begin_dialogs)
+                    except Exception as e:
+                        if DEBUG_MODE:
+                            logger.info(f"获取人格上下文失败: {e}")
             except Exception as e:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
+                persona_contexts = []
 
             # 构建完整的提示词，根据prompt_mode决定拼接还是覆盖
             if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
                 # 覆盖模式：直接使用用户自定义提示词
                 full_prompt = formatted_message + "\n\n" + extra_prompt.strip()
-                logger.debug("使用覆盖模式：用户自定义提示词完全替代默认系统提示词")
+                if DEBUG_MODE:
+                    logger.info("使用覆盖模式：用户自定义提示词完全替代默认系统提示词")
             else:
-                # 拼接模式（默认）：使用默认提示词，如果有用户自定义则追加
+                # 拼接模式（默认）：使用默认提示词，如果有用户自定义则在结束指令前插入
                 full_prompt = (
                     formatted_message + "\n\n" + DecisionAI.SYSTEM_DECISION_PROMPT
                 )
 
-                # 如果有用户自定义提示词,添加进去
+                # 如果有用户自定义提示词,插入到结束指令之前
                 if extra_prompt and extra_prompt.strip():
-                    full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}"
-                    logger.debug("使用拼接模式：在默认系统提示词后追加用户自定义提示词")
+                    full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}\n"
+                    if DEBUG_MODE:
+                        logger.info(
+                            "使用拼接模式：在默认系统提示词和结束指令之间插入用户自定义提示词"
+                        )
 
-            logger.debug(f"正在调用决策AI判断是否回复...")
+                # 添加结束指令
+                full_prompt += DecisionAI.SYSTEM_DECISION_PROMPT_ENDING
+
+            logger.info(f"正在调用决策AI判断是否回复...")
 
             # 调用AI,添加超时控制
             async def call_decision_ai():
                 response = await provider.text_chat(
                     prompt=full_prompt,
-                    contexts=[],
-                    image_urls=[],
+                    contexts=persona_contexts if "persona_contexts" in locals() else [],
+                    image_urls=image_urls if image_urls else [],
                     func_tool=None,
                     system_prompt=persona_prompt,  # 包含人格设定
                 )
@@ -272,6 +330,15 @@ class DecisionAI:
 
                     if default_persona:
                         persona_prompt = default_persona.get("prompt", "")
+                        try:
+                            begin_dialogs = default_persona.get(
+                                "_begin_dialogs_processed", []
+                            )
+                            persona_contexts = []
+                            if begin_dialogs:
+                                persona_contexts.extend(begin_dialogs)
+                        except Exception as e:
+                            logger.info(f"获取人格上下文失败: {e}")
                     else:
                         default_persona = (
                             await context.persona_manager.get_default_persona_v3(
@@ -279,6 +346,15 @@ class DecisionAI:
                             )
                         )
                         persona_prompt = default_persona.get("prompt", "")
+                        try:
+                            begin_dialogs = default_persona.get(
+                                "_begin_dialogs_processed", []
+                            )
+                            persona_contexts = []
+                            if begin_dialogs:
+                                persona_contexts.extend(begin_dialogs)
+                        except Exception as e:
+                            logger.info(f"获取人格上下文失败: {e}")
                 else:
                     default_persona = (
                         await context.persona_manager.get_default_persona_v3(
@@ -286,15 +362,25 @@ class DecisionAI:
                         )
                     )
                     persona_prompt = default_persona.get("prompt", "")
+                    try:
+                        begin_dialogs = default_persona.get(
+                            "_begin_dialogs_processed", []
+                        )
+                        persona_contexts = []
+                        if begin_dialogs:
+                            persona_contexts.extend(begin_dialogs)
+                    except Exception as e:
+                        logger.info(f"获取人格上下文失败: {e}")
             except Exception as e:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
+                persona_contexts = []
 
             # 调用AI
             async def _call_ai():
                 response = await provider.text_chat(
                     prompt=prompt,
-                    contexts=[],
+                    contexts=persona_contexts if "persona_contexts" in locals() else [],
                     image_urls=[],
                     func_tool=None,
                     system_prompt=persona_prompt,
@@ -326,7 +412,8 @@ class DecisionAI:
             True=应该回复，False=不回复
         """
         if not ai_response:
-            logger.debug("AI回复为空,默认判定为不回复（谨慎模式）")
+            if DEBUG_MODE:
+                logger.info("AI回复为空,默认判定为不回复（谨慎模式）")
             return False  # 空回复时谨慎处理
 
         # 清理回复文本
@@ -337,11 +424,13 @@ class DecisionAI:
 
         # 优先检查完整的yes/no
         if cleaned_response == "yes" or cleaned_response == "y":
-            logger.debug(f"AI明确回复 '{ai_response}' (yes),判定为回复")
+            if DEBUG_MODE:
+                logger.info(f"AI明确回复 '{ai_response}' (yes),判定为回复")
             return True
 
         if cleaned_response == "no" or cleaned_response == "n":
-            logger.debug(f"AI明确回复 '{ai_response}' (no),判定为不回复")
+            if DEBUG_MODE:
+                logger.info(f"AI明确回复 '{ai_response}' (no),判定为不回复")
             return False
 
         # 检查中文的明确回复
@@ -350,7 +439,8 @@ class DecisionAI:
             or cleaned_response == "应该"
             or cleaned_response == "回复"
         ):
-            logger.debug(f"AI明确回复 '{ai_response}' (肯定),判定为回复")
+            if DEBUG_MODE:
+                logger.info(f"AI明确回复 '{ai_response}' (肯定),判定为回复")
             return True
 
         if (
@@ -359,7 +449,8 @@ class DecisionAI:
             or cleaned_response == "不应该"
             or cleaned_response == "不回复"
         ):
-            logger.debug(f"AI明确回复 '{ai_response}' (否定),判定为不回复")
+            if DEBUG_MODE:
+                logger.info(f"AI明确回复 '{ai_response}' (否定),判定为不回复")
             return False
 
         # 否定关键词列表（检查开头）
@@ -368,9 +459,10 @@ class DecisionAI:
         # 检查是否以否定词开头
         for keyword in negative_starts:
             if cleaned_response.startswith(keyword):
-                logger.debug(
-                    f"AI回复 '{ai_response}' 以否定词 '{keyword}' 开头,判定为不回复"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"AI回复 '{ai_response}' 以否定词 '{keyword}' 开头,判定为不回复"
+                    )
                 return False
 
         # 肯定关键词列表（检查开头）
@@ -379,11 +471,13 @@ class DecisionAI:
         # 检查是否以肯定词开头
         for keyword in positive_starts:
             if cleaned_response.startswith(keyword):
-                logger.debug(
-                    f"AI回复 '{ai_response}' 以肯定词 '{keyword}' 开头,判定为回复"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"AI回复 '{ai_response}' 以肯定词 '{keyword}' 开头,判定为回复"
+                    )
                 return True
 
         # 默认情况：不明确的回复，采用谨慎策略
-        logger.debug(f"AI回复 '{ai_response}' 不明确,默认判定为不回复（谨慎模式）")
+        if DEBUG_MODE:
+            logger.info(f"AI回复 '{ai_response}' 不明确,默认判定为不回复（谨慎模式）")
         return False

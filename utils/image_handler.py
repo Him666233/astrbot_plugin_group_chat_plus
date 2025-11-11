@@ -3,12 +3,16 @@
 负责处理消息中的图片，包括检测、过滤和转文字
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 import asyncio
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 from astrbot.api.all import *
+from astrbot.api.message_components import Face, At
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class ImageHandler:
@@ -32,7 +36,7 @@ class ImageHandler:
         image_to_text_prompt: str,
         is_at_message: bool,
         timeout: int = 60,
-    ) -> Tuple[bool, Union[str, List[BaseMessageComponent]]]:
+    ) -> Tuple[bool, str, List[str]]:
         """
         处理消息中的图片
 
@@ -47,8 +51,9 @@ class ImageHandler:
             timeout: 图片转文字超时时间（秒）
 
         Returns:
-            (是否继续处理, 处理后的消息)
+            (是否继续处理, 处理后的消息, 图片URL列表)
             - True=继续，False=丢弃
+            - 图片URL列表：用于多模态AI直接处理
         """
         try:
             # 获取消息链
@@ -56,7 +61,7 @@ class ImageHandler:
                 event.message_obj, "message"
             ):
                 # 没有消息链,使用原始文本
-                return True, event.get_messages()
+                return True, event.get_message_outline(), []
 
             message_chain = event.message_obj.message
 
@@ -67,53 +72,69 @@ class ImageHandler:
 
             # 如果没有图片,直接返回原消息
             if not has_image:
-                return True, event.get_messages()
+                return True, event.get_message_outline(), []
 
-            logger.debug(
-                f"检测到消息包含 {len(image_components)} 张图片, 是否有文字: {has_text}"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"检测到消息包含 {len(image_components)} 张图片, 是否有文字: {has_text}"
+                )
 
             # === 第一步：mention_only 模式下过滤非@消息的图片 ===
             if image_to_text_scope == "mention_only" and not is_at_message:
-                logger.debug("图片转文字应用范围为mention_only,当前非@消息,过滤图片")
+                if DEBUG_MODE:
+                    logger.info("图片转文字应用范围为mention_only,当前非@消息,过滤图片")
                 # 如果是纯图片消息,丢弃
                 if not has_text:
-                    logger.info("非@消息的纯图片消息,丢弃该消息")
-                    return False, ""
+                    if DEBUG_MODE:
+                        logger.info("非@消息的纯图片消息,丢弃该消息")
+                    return False, "", []
                 else:
                     # 如果是图文混合,移除图片只保留文字
                     text_only = ImageHandler._extract_text_only(message_chain)
-                    logger.debug(f"非@消息的图文混合,移除图片保留文字: {text_only}")
-                    return True, text_only
+                    if DEBUG_MODE:
+                        logger.info(f"非@消息的图文混合,移除图片保留文字: {text_only}")
+                    return True, text_only, []
 
             # === 第二步：检查图片处理开关 ===
             # 如果不启用图片处理，所有带图片的消息都要过滤（不管是什么模式）
             if not enable_image_processing:
-                logger.debug("图片处理未启用,过滤所有图片")
+                if DEBUG_MODE:
+                    logger.info("图片处理未启用,过滤所有图片")
                 # 如果是纯图片消息,丢弃
                 if not has_text:
-                    logger.info("检测到纯图片消息,但图片处理未启用,丢弃该消息")
-                    return False, ""
+                    if DEBUG_MODE:
+                        logger.info("检测到纯图片消息,但图片处理未启用,丢弃该消息")
+                    return False, "", []
                 else:
                     # 如果是图文混合,移除图片只保留文字
                     text_only = ImageHandler._extract_text_only(message_chain)
-                    logger.debug(f"移除图片后的消息: {text_only}")
-                    return True, text_only
+                    if DEBUG_MODE:
+                        logger.info(f"移除图片后的消息: {text_only}")
+                    return True, text_only, []
 
             # === 第三步：启用了图片处理，根据是否配置图片转文字ID决定处理方式 ===
-            logger.debug("图片处理已启用")
+            if DEBUG_MODE:
+                logger.info("图片处理已启用")
 
-            # 如果没有填写图片转文字的提供商ID,说明使用多模态AI,直接返回原消息（保留原始图片信息）
+            # 如果没有填写图片转文字的提供商ID,说明使用多模态AI,提取图片URL传递
             if not image_to_text_provider_id:
-                logger.debug(
-                    "未配置图片转文字提供商ID,保留原始图片信息传递给下游多模态AI"
-                )
-                return True, event.get_messages()
+                if DEBUG_MODE:
+                    logger.info("未配置图片转文字提供商ID,提取图片URL传递给多模态AI")
+                # 提取图片URL
+                image_urls = await ImageHandler._extract_image_urls(image_components)
+                # 提取文本内容（不包含图片）
+                text_content = ImageHandler._extract_text_only(message_chain)
+                if DEBUG_MODE:
+                    logger.info(
+                        f"🟢 [多模态模式] 提取到 {len(image_urls)} 张图片，文本内容: {text_content[:100] if text_content else '(无文本)'}"
+                    )
+                return True, text_content, image_urls
 
             # === 第四步：配置了图片转文字提供商ID，尝试转换图片 ===
-            logger.debug(
-                f"已配置图片转文字提供商ID,尝试转换图片(超时时间: {timeout}秒)"
-            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"已配置图片转文字提供商ID,尝试转换图片(超时时间: {timeout}秒)"
+                )
             processed_message = await ImageHandler._convert_images_to_text(
                 message_chain,
                 context,
@@ -128,24 +149,25 @@ class ImageHandler:
                 logger.warning("图片转文字超时或失败,进行过滤处理")
                 # 如果是纯图片,丢弃
                 if not has_text:
-                    logger.info("纯图片消息且转换失败,丢弃该消息")
-                    return False, ""
+                    if DEBUG_MODE:
+                        logger.info("纯图片消息且转换失败,丢弃该消息")
+                    return False, "", []
                 else:
                     # 如果是图文混合,只保留文字
                     text_only = ImageHandler._extract_text_only(message_chain)
-                    logger.debug(f"降级处理: 移除图片,保留文字: {text_only}")
-                    return True, text_only
+                    if DEBUG_MODE:
+                        logger.info(f"降级处理: 移除图片,保留文字: {text_only}")
+                    return True, text_only, []
 
-            # 转换成功，返回转换后的消息
-            logger.debug("图片转文字成功")
-            # 强制日志：图片转文字结果
-            logger.info(f"🔴 [图片转文字成功] 结果: {processed_message[:150]}")
-            return True, processed_message
+            # 转换成功，返回转换后的消息（图片已转成文字描述）
+            if DEBUG_MODE:
+                logger.info(f"🔴 [图片转文字成功] 结果: {processed_message[:150]}")
+            return True, processed_message, []  # 图片已转成文字，不需要URL
 
         except Exception as e:
             logger.error(f"处理消息图片时发生错误: {e}")
             # 发生错误时,返回原消息文本
-            return True, event.get_messages()
+            return True, event.get_message_outline(), []
 
     @staticmethod
     def _analyze_message(
@@ -186,8 +208,6 @@ class ImageHandler:
         Returns:
             格式化后的文本，如果不是特殊组件返回空字符串
         """
-        from astrbot.api.message_components import Face, At
-
         if isinstance(component, Face):
             return f"[表情:{component.id}]"
         elif isinstance(component, At):
@@ -226,6 +246,34 @@ class ImageHandler:
                 f"[图片处理] _extract_text_only 提取到空文本！text_parts={text_parts[:5]}"
             )
         return result
+
+    @staticmethod
+    async def _extract_image_urls(image_components: List[Image]) -> List[str]:
+        """
+        从图片组件列表中提取图片URL
+
+        Args:
+            image_components: 图片组件列表
+
+        Returns:
+            图片URL列表（可能包含本地路径或base64等格式）
+        """
+        image_urls = []
+        for idx, img_component in enumerate(image_components):
+            try:
+                # 尝试获取图片路径或URL
+                image_path = await img_component.convert_to_file_path()
+                if image_path:
+                    image_urls.append(image_path)
+                    if DEBUG_MODE:
+                        logger.info(f"提取到图片 {idx}: {image_path}")
+                else:
+                    logger.warning(f"无法提取图片 {idx} 的路径")
+            except Exception as e:
+                logger.error(f"提取图片 {idx} 的URL时发生错误: {e}")
+                continue
+
+        return image_urls
 
     @staticmethod
     async def _convert_images_to_text(
@@ -276,7 +324,8 @@ class ImageHandler:
                         logger.warning(f"无法获取图片 {idx} 的路径")
                         continue
 
-                    logger.debug(f"正在转换图片 {idx}: {image_path}")
+                    if DEBUG_MODE:
+                        logger.info(f"正在转换图片 {idx}: {image_path}")
 
                     # 调用AI进行图片转文字,添加超时控制
                     async def call_vision_ai():
@@ -296,7 +345,8 @@ class ImageHandler:
 
                     if description:
                         image_descriptions[idx] = description
-                        logger.debug(f"图片 {idx} 转换成功: {description[:50]}...")
+                        if DEBUG_MODE:
+                            logger.info(f"图片 {idx} 转换成功: {description[:50]}...")
 
                 except asyncio.TimeoutError:
                     logger.warning(
@@ -337,7 +387,8 @@ class ImageHandler:
                         result_parts.append(formatted)
 
             result_text = "".join(result_parts)
-            logger.info(f"图片转文字完成,处理后的消息: {result_text[:100]}...")
+            if DEBUG_MODE:
+                logger.info(f"图片转文字完成,处理后的消息: {result_text[:100]}...")
             return result_text
 
         except Exception as e:

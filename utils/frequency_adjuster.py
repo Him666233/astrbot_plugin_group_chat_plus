@@ -8,14 +8,23 @@
 - 自动微调概率参数
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 参考: MaiBot frequency_control.py (简化实现)
 """
 
 import time
 from typing import Dict, Optional
 from astrbot.api.all import logger, Context
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 from astrbot.api.event import AstrMessageEvent
+
+# 导入 DecisionAI（延迟导入以避免循环依赖）
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .decision_ai import DecisionAI
 
 
 class FrequencyAdjuster:
@@ -51,18 +60,20 @@ class FrequencyAdjuster:
         """
         self.context = context
 
-        # 存储每个群聊的检查状态
-        # 格式: {chat_id: {"last_check_time": 时间戳, "message_count": 消息数}}
+        # 存储每个会话的检查状态（使用完整的会话标识确保隔离）
+        # 格式: {chat_key: {"last_check_time": 时间戳, "message_count": 消息数}}
+        # 其中 chat_key = "{platform}_{type}_{id}"，例如 "aiocqhttp_group_123456"
         self.check_states: Dict[str, Dict] = {}
 
-        logger.info("[频率动态调整器] 已初始化")
+        if DEBUG_MODE:
+            logger.info("[频率动态调整器] 已初始化")
 
-    def should_check_frequency(self, chat_id: str, message_count: int) -> bool:
+    def should_check_frequency(self, chat_key: str, message_count: int) -> bool:
         """
         判断是否应该检查频率
 
         Args:
-            chat_id: 群聊ID
+            chat_key: 会话唯一标识（格式：platform_type_id）
             message_count: 自上次检查以来的消息数量
 
         Returns:
@@ -70,15 +81,15 @@ class FrequencyAdjuster:
         """
         current_time = time.time()
 
-        if chat_id not in self.check_states:
+        if chat_key not in self.check_states:
             # 初始化检查状态
-            self.check_states[chat_id] = {
+            self.check_states[chat_key] = {
                 "last_check_time": current_time,
                 "message_count": 0,
             }
             return False
 
-        state = self.check_states[chat_id]
+        state = self.check_states[chat_key]
         time_since_check = current_time - state["last_check_time"]
 
         # 条件1: 距离上次检查超过指定时间
@@ -133,7 +144,7 @@ class FrequencyAdjuster:
 - 过于频繁
 - 过少"""
 
-            # 调用AI分析
+            # 调用AI分析（动态导入以避免循环依赖）
             from .decision_ai import DecisionAI
 
             response = await DecisionAI.call_decision_ai(
@@ -202,6 +213,7 @@ class FrequencyAdjuster:
         elif decision == "过少":
             # 提升概率
             new_probability = current_probability * self.ADJUST_FACTOR_INCREASE
+
             logger.info(
                 f"[频率动态调整器] 检测到发言过少，提升概率: {current_probability:.2f} → {new_probability:.2f}"
             )
@@ -209,7 +221,8 @@ class FrequencyAdjuster:
         else:  # "正常"
             # 保持不变
             new_probability = current_probability
-            logger.debug(
+
+            logger.info(
                 f"[频率动态调整器] 发言频率正常，保持概率: {current_probability:.2f}"
             )
 
@@ -220,44 +233,44 @@ class FrequencyAdjuster:
 
         return new_probability
 
-    def update_check_state(self, chat_id: str):
+    def update_check_state(self, chat_key: str):
         """
         更新检查状态（在完成一次检查后调用）
 
         Args:
-            chat_id: 群聊ID
+            chat_key: 会话唯一标识（格式：platform_type_id）
         """
-        self.check_states[chat_id] = {
+        self.check_states[chat_key] = {
             "last_check_time": time.time(),
             "message_count": 0,
         }
 
-    def record_message(self, chat_id: str):
+    def record_message(self, chat_key: str):
         """
         记录新消息（用于统计消息数量）
 
         Args:
-            chat_id: 群聊ID
+            chat_key: 会话唯一标识（格式：platform_type_id）
         """
-        if chat_id not in self.check_states:
-            self.check_states[chat_id] = {
+        if chat_key not in self.check_states:
+            self.check_states[chat_key] = {
                 "last_check_time": time.time(),
                 "message_count": 0,
             }
 
-        self.check_states[chat_id]["message_count"] += 1
+        self.check_states[chat_key]["message_count"] += 1
 
-    def get_message_count(self, chat_id: str) -> int:
+    def get_message_count(self, chat_key: str) -> int:
         """
         获取自上次检查以来的消息数量
 
         Args:
-            chat_id: 群聊ID
+            chat_key: 会话唯一标识（格式：platform_type_id）
 
         Returns:
             消息数量
         """
-        if chat_id not in self.check_states:
+        if chat_key not in self.check_states:
             return 0
 
-        return self.check_states[chat_id]["message_count"]
+        return self.check_states[chat_key]["message_count"]

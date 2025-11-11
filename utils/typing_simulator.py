@@ -8,12 +8,15 @@
 - 不影响核心逻辑，仅在发送前延迟
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 import asyncio
 import random
 from astrbot.api.all import logger
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class TypingSimulator:
@@ -47,9 +50,10 @@ class TypingSimulator:
         self.max_delay = max_delay
         self.random_factor = random_factor
 
-        logger.info(
-            f"[回复延迟模拟器] 已初始化，打字速度: {typing_speed}字/秒，延迟范围: {min_delay}-{max_delay}秒"
-        )
+        if DEBUG_MODE:
+            logger.info(
+                f"[回复延迟模拟器] 已初始化，打字速度: {typing_speed}字/秒，延迟范围: {min_delay}-{max_delay}秒"
+            )
 
     def calculate_delay(self, text: str) -> float:
         """
@@ -90,7 +94,10 @@ class TypingSimulator:
         """
         delay = self.calculate_delay(text)
 
-        logger.debug(f"[回复延迟模拟器] 延迟 {delay:.2f} 秒（文本长度: {len(text)}）")
+        if DEBUG_MODE:
+            logger.info(
+                f"[回复延迟模拟器] 延迟 {delay:.2f} 秒（文本长度: {len(text)}）"
+            )
 
         await asyncio.sleep(delay)
 

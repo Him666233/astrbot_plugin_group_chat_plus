@@ -7,11 +7,16 @@ v1.0.4 更新：
 - 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
+import re
 from datetime import datetime
 from astrbot.api.all import *
+from astrbot.api.message_components import At, Plain
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class MessageProcessor:
@@ -114,9 +119,10 @@ class MessageProcessor:
                         processed_message = mention_notice
 
             if timestamp_str or sender_prefix:
-                logger.debug(
-                    f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
+                    )
 
             # 🆕 v1.0.9: 添加戳一戳系统提示（如果存在）
             # 注意：使用[]括号而非【】括号，确保能被MessageCleaner正确过滤
@@ -130,15 +136,17 @@ class MessageProcessor:
                 if is_poke_bot:
                     # 戳的是机器人自己
                     poke_notice = f"\n[戳一戳提示]有人在戳你，戳你的人是{poke_sender_name}(ID:{poke_sender_id})"
-                    logger.debug(
-                        f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
+                        )
                 else:
                     # 戳的是别人
                     poke_notice = f"\n[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{poke_sender_name}(ID:{poke_sender_id})在戳{poke_target_name}(ID:{poke_target_id})"
-                    logger.debug(
-                        f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
-                    )
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
+                        )
 
                 processed_message += poke_notice
 
@@ -168,7 +176,8 @@ class MessageProcessor:
 
                 if system_notice:
                     processed_message += system_notice
-                    logger.debug(f"已添加发送者识别提示（触发方式: {trigger_type}）")
+                    if DEBUG_MODE:
+                        logger.info(f"已添加发送者识别提示（触发方式: {trigger_type}）")
 
             return processed_message
 
@@ -275,7 +284,7 @@ class MessageProcessor:
                         processed_message = mention_notice
 
             if timestamp_str or sender_prefix:
-                logger.debug(
+                logger.info(
                     f"消息已添加元数据（从缓存，统一格式）: [{timestamp_str}] {sender_prefix}"
                 )
 
@@ -291,13 +300,13 @@ class MessageProcessor:
                 if is_poke_bot:
                     # 戳的是机器人自己
                     poke_notice = f"\n[戳一戳提示]有人在戳你，戳你的人是{poke_sender_name}(ID:{poke_sender_id})"
-                    logger.debug(
+                    logger.info(
                         f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
                     )
                 else:
                     # 戳的是别人
                     poke_notice = f"\n[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{poke_sender_name}(ID:{poke_sender_id})在戳{poke_target_name}(ID:{poke_target_id})"
-                    logger.debug(
+                    logger.info(
                         f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
                     )
 
@@ -327,7 +336,7 @@ class MessageProcessor:
 
                 if system_notice:
                     processed_message += system_notice
-                    logger.debug(
+                    logger.info(
                         f"已添加发送者识别提示（从缓存，触发方式: {trigger_type}）"
                     )
 
@@ -449,7 +458,7 @@ class MessageProcessor:
             is_bot = sender_id == bot_id
 
             if is_bot:
-                logger.debug(
+                logger.info(
                     f"检测到机器人自己的消息,将忽略: sender_id={sender_id}, bot_id={bot_id}"
                 )
 
@@ -480,8 +489,6 @@ class MessageProcessor:
         try:
             # 方法1: 检查消息链中是否有At组件指向机器人（优先使用）
             if hasattr(event, "message_obj") and hasattr(event.message_obj, "message"):
-                from astrbot.api.message_components import At
-
                 bot_id = event.get_self_id()
                 message_chain = event.message_obj.message
 
@@ -491,7 +498,8 @@ class MessageProcessor:
                         if hasattr(component, "qq") and str(component.qq) == str(
                             bot_id
                         ):
-                            logger.debug("检测到@机器人的消息（At组件）")
+                            if DEBUG_MODE:
+                                logger.info("检测到@机器人的消息（At组件）")
                             return True
 
             # 方法2: 检查消息文本中是否包含@机器人（兼容旧版本QQ）
@@ -511,31 +519,33 @@ class MessageProcessor:
                 message_text = event.get_message_str()
 
                 # 强制日志：显示文本@检测的详细信息（用于排查）
-                logger.debug(
-                    f"[文本@检测] bot_id={bot_id}, bot_name={bot_name}, message={message_text[:50] if message_text else 'None'}"
-                )
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[文本@检测] bot_id={bot_id}, bot_name={bot_name}, message={message_text[:50] if message_text else 'None'}"
+                    )
 
                 # 检查是否包含 @机器人ID 或 @机器人名称
                 if message_text:
                     # 检查 @机器人ID
                     if f"@{bot_id}" in message_text:
-                        logger.debug(f"检测到@机器人的消息（文本@ID: @{bot_id}）")
+                        if DEBUG_MODE:
+                            logger.info(f"检测到@机器人的消息（文本@ID: @{bot_id}）")
                         return True
 
                     # 检查 @机器人名称（支持部分匹配，如 @Monika(AI) 也能匹配 @Monika）
                     if bot_name:
                         # 使用 startswith 检查 @bot_name 后面可以跟任何字符
-                        import re
-
                         # 检查是否有 @bot_name 后面跟着非字母数字（如空格、括号等）或字符串结束
                         pattern = rf"@{re.escape(bot_name)}(?:[^a-zA-Z0-9_]|$)"
                         if re.search(pattern, message_text):
-                            logger.debug(
-                                f"检测到@机器人的消息（文本@名称: @{bot_name}）"
-                            )
+                            if DEBUG_MODE:
+                                logger.info(
+                                    f"检测到@机器人的消息（文本@名称: @{bot_name}）"
+                                )
                             return True
             except Exception as e:
-                logger.debug(f"文本@检测时出错: {e}")
+                if DEBUG_MODE:
+                    logger.info(f"文本@检测时出错: {e}")
 
             return False
 

@@ -15,11 +15,14 @@
 - 未来应考虑使用更稳定的插件间通信机制
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 from typing import Optional
 from astrbot.api.all import *
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class MemoryInjector:
@@ -53,16 +56,19 @@ class MemoryInjector:
             # 获取LLM工具管理器
             tool_manager = context.get_llm_tool_manager()
             if not tool_manager:
-                logger.debug("无法获取LLM工具管理器")
+                if DEBUG_MODE:
+                    logger.info("无法获取LLM工具管理器")
                 return False
 
             # 检查是否有get_memories工具
             get_memories_tool = tool_manager.get_func("get_memories")
             if get_memories_tool:
-                logger.debug("检测到记忆插件已安装(找到get_memories工具)")
+                if DEBUG_MODE:
+                    logger.info("检测到记忆插件已安装(找到get_memories工具)")
                 return True
 
-            logger.debug("未检测到记忆插件(未找到get_memories工具)")
+            if DEBUG_MODE:
+                logger.info("未检测到记忆插件(未找到get_memories工具)")
             return False
 
         except Exception as e:
@@ -102,7 +108,7 @@ class MemoryInjector:
                 logger.warning("未找到get_memories工具,可能记忆插件未正确注册")
                 return None
 
-            logger.debug("正在调用记忆插件获取记忆...")
+            logger.info("正在调用记忆插件获取记忆...")
 
             # ⚠️ 紧密耦合点：直接访问内部 handler 属性
             # 这依赖于 strbot_plugin_play_sy 插件的具体实现细节
@@ -115,11 +121,11 @@ class MemoryInjector:
 
             if memory_result and isinstance(memory_result, str):
                 logger.info(f"成功获取记忆: {len(memory_result)} 字符")
-                # 详细日志：显示实际获取到的记忆内容
-                logger.debug(f"获取到的记忆内容:\n{memory_result}")
+                if DEBUG_MODE:
+                    logger.info(f"获取到的记忆内容:\n{memory_result}")
                 return memory_result
             else:
-                logger.debug("记忆插件返回空内容或无记忆")
+                logger.info("记忆插件返回空内容或无记忆")
                 return "当前没有任何记忆。"
 
         except Exception as e:
@@ -139,12 +145,14 @@ class MemoryInjector:
             注入记忆后的文本
         """
         if not memories or not memories.strip():
-            logger.debug("没有记忆内容需要注入")
+            logger.info("没有记忆内容需要注入")
             return original_message
 
         # 在消息末尾添加记忆部分
         injected_message = original_message + "\n\n=== 背景信息 ===\n" + memories
         injected_message += "\n\n(这些信息可能对理解当前对话有帮助，请自然地融入到你的回答中，而不要明确提及)"
 
-        logger.debug("记忆已注入到消息中")
+        logger.info(f"成功注入记忆: {len(memories)} 字符")
+        if DEBUG_MODE:
+            logger.info(f"注入后的消息内容:\n{injected_message}")
         return injected_message

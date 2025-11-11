@@ -3,10 +3,13 @@
 负责检查消息中的触发关键词和黑名单关键词
 
 作者: Him666233
-版本: v1.0.9
+版本: v1.1.0
 """
 
 from astrbot.api.all import *
+
+# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
+DEBUG_MODE: bool = False
 
 
 class KeywordChecker:
@@ -37,7 +40,8 @@ class KeywordChecker:
             # 检查是否包含关键词
             for keyword in keywords:
                 if keyword and keyword in message_text:
-                    logger.debug(f"检测到{keyword_type}: {keyword}")
+                    if DEBUG_MODE:
+                        logger.info(f"检测到{keyword_type}: {keyword}")
                     return True
 
             return False
