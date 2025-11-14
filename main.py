@@ -29,7 +29,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.1.0
+版本: v1.1.1
 
 v1.1.0 更新内容：
 - 🆕 主动对话功能 - AI会在长时间沉默后主动发起新话题
@@ -52,13 +52,23 @@ import time
 import sys
 import hashlib
 import asyncio
+import json
+import os
+import shutil
+from pathlib import Path
 from typing import List, Optional
+from collections import OrderedDict
+import aiohttp
+from astrbot.api import logger
+
+from click import command
 from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.core.star.star_tools import StarTools
 
 # 导入消息组件类型
 from astrbot.core.message.components import Plain, Poke, At
+from astrbot.core.message.message_event_result import MessageChain
 
 # 导入 ProviderRequest 类型用于类型判断
 from astrbot.core.provider.entities import ProviderRequest
@@ -66,6 +76,9 @@ from astrbot.core.provider.entities import ProviderRequest
 # 导入 aiocqhttp 相关类型
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
+)
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter import (
+    AiocqhttpAdapter,
 )
 
 # 导入所有工具模块
@@ -94,7 +107,7 @@ from .utils import (
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.1.0",
+    "v1.1.1",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -115,6 +128,16 @@ class ChatPlus(Star):
         super().__init__(context)
         self.context = context
         self.config = config
+
+        # Dashboard 配置与重启 URL
+        self.dbc = self.context.get_config().get("dashboard", {})
+        self.host = self.dbc.get("host", "127.0.0.1")
+        self.port = self.dbc.get("port", 6185)
+        if os.environ.get("DASHBOARD_PORT"):
+            self.port = int(os.environ.get("DASHBOARD_PORT"))
+        if self.host == "0.0.0.0":
+            self.host = "127.0.0.1"
+        self.restart_url = f"http://{self.host}:{self.port}/api/stat/restart-core"
 
         # 获取调试日志开关
         self.debug_mode = config.get("enable_debug_log", False)
@@ -264,9 +287,17 @@ class ChatPlus(Star):
                 f"收到戳一戳后反戳功能启用，概率={self.poke_reverse_on_poke_probability} (原始={raw_reverse_prob})"
             )
 
+        # ========== 🆕 AI戳后追踪提示功能 ==========
+        self.poke_trace_enabled = config.get("enable_poke_trace_prompt", False)
+        self.poke_trace_max_tracked_users = config.get(
+            "poke_trace_max_tracked_users", 5
+        )
+        self.poke_trace_ttl_seconds = config.get("poke_trace_ttl_seconds", 300)
+        self.poke_trace_records = {}
+
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.1.0")
+        logger.info("群聊增强插件已加载 - v1.1.1")
         logger.info(f"初始读空气概率: {config.get('initial_probability', 0.1)}")
         logger.info(f"回复后概率: {config.get('after_reply_probability', 0.8)}")
         logger.info(f"概率提升持续时间: {config.get('probability_duration', 300)}秒")
@@ -468,6 +499,7 @@ class ChatPlus(Star):
 
         启动主动对话功能的后台任务
         """
+        self.session = aiohttp.ClientSession()
         if self.proactive_enabled:
             try:
                 # 启动主动对话后台任务
@@ -492,6 +524,68 @@ class ChatPlus(Star):
                 logger.info("⏹️ [主动对话] 后台任务已停止，状态已保存")
             except Exception as e:
                 logger.error(f"[主动对话] 停止后台任务失败: {e}", exc_info=True)
+        if hasattr(self, "session"):
+            await self.session.close()
+
+    @filter.on_platform_loaded()
+    async def on_platform_loaded(self):
+        restart_umo = self.config.get("restart_umo")
+        platform_id = self.config.get("platform_id")
+        restart_start_ts = self.config.get("restart_start_ts")
+        if not restart_umo or not platform_id or not restart_start_ts:
+            return
+
+        platform = self.context.get_platform_inst(platform_id)
+        if not isinstance(platform, AiocqhttpAdapter):
+            logger.warning("未找到 aiocqhttp 平台实例，跳过重启提示")
+            return
+        client = platform.get_client()
+        if not client:
+            logger.warning("未找到 CQHttp 实例，跳过重启提示")
+            return
+
+        ws_connected = asyncio.Event()
+
+        @client.on_websocket_connection
+        def _(_):
+            ws_connected.set()
+
+        try:
+            await asyncio.wait_for(ws_connected.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "等待 aiocqhttp WebSocket 连接超时，可能未能发送重启完成提示。"
+            )
+
+        elapsed = time.time() - float(restart_start_ts)
+
+        await self.context.send_message(
+            session=restart_umo,
+            message_chain=MessageChain(
+                [Plain(f"AstrBot重启完成（耗时{elapsed:.2f}秒）")]
+            ),
+        )
+
+        self.config["restart_umo"] = ""
+        self.config["restart_start_ts"] = 0
+        self.config.save_config()
+
+    async def _get_auth_token(self):
+        login_url = f"http://{self.host}:{self.port}/api/auth/login"
+        login_data = {
+            "username": self.dbc["username"],
+            "password": self.dbc["password"],
+        }
+        async with self.session.post(login_url, json=login_data) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data and data.get("status") == "ok" and "data" in data:
+                    return data["data"]["token"]
+                else:
+                    raise Exception(f"登录响应格式错误: {data}")
+            else:
+                text = await response.text()
+                raise Exception(f"登录失败，状态码: {response.status}, 响应: {text}")
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize - 1)
     async def command_filter_handler(self, event: AstrMessageEvent):
@@ -598,6 +692,563 @@ class ChatPlus(Star):
                 yield result
         except Exception as e:
             logger.error(f"处理群消息时发生错误: {e}", exc_info=True)
+
+    async def _get_auth_token(self):
+        """获取认证token"""
+        login_url = f"http://{self.host}:{self.port}/api/auth/login"
+        login_data = {
+            "username": self.dbc["username"],
+            "password": self.dbc["password"],
+        }
+        async with self.session.post(login_url, json=login_data) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data and data.get("status") == "ok" and "data" in data:
+                    return data["data"]["token"]
+                else:
+                    raise Exception(f"登录响应格式错误: {data}")
+            else:
+                text = await response.text()
+                raise Exception(f"登录失败，状态码: {response.status}, 响应: {text}")
+
+    async def restart_core(self):
+        """
+        发送重启请求,重启AstrBot,并记录重启信息
+        """
+        try:
+            token = await self._get_auth_token()
+            headers = {"Authorization": f"Bearer {token}"}
+            async with self.session.post(self.restart_url, headers=headers) as response:
+                if response.status == 200:
+                    logger.info("系统重启请求已发送")
+                else:
+                    logger.error(f"重启请求失败，状态码: {response.status}")
+                    raise RuntimeError(f"重启请求失败，状态码: {response.status}")
+        except Exception as e:
+            logger.error(f"发送重启请求时出错: {e}")
+            raise e
+
+    @filter.command("gcp_reset")
+    async def gcp_reset(self, event: AstrMessageEvent):
+        """
+        检测并处理“插件重置指令”，重启AstrBot。
+
+        触发条件：
+        - 仅群聊有效（私聊直接忽略）
+        - 插件对该群处于启用状态
+        - 白名单检查通过（`plugin_reset_allowed_user_ids` 为空=允许所有用户）
+
+        """
+        try:
+            # 只处理群聊（规避私聊误触）
+            if event.is_private_chat():
+                return
+            # 群未启用则直接忽略
+            if not self._is_enabled(event):
+                return
+            # 需要能访问到原始消息链
+            if not hasattr(event, "message_obj") or not hasattr(
+                event.message_obj, "message"
+            ):
+                return
+            components = event.message_obj.message
+            if not components:
+                return
+            # 必须是“纯文本”消息，防止图片/引用等组件混入而误触
+            if not all(isinstance(c, Plain) for c in components):
+                return
+            # 白名单：为空=允许所有用户；否则仅允许列表内用户
+            whitelist = self.config.get("plugin_reset_allowed_user_ids", [])
+            allow_all = not whitelist or len(whitelist) == 0
+            sender_id = str(event.get_sender_id())
+            allowed = allow_all or (str(sender_id) in {str(x) for x in whitelist})
+            if not allowed:
+                # 不在白名单：按“已处理”返回，防止本条消息继续触发本插件的其他逻辑
+                logger.info(
+                    "【会话重置】用户 %s 未在白名单中，重置指令被忽略",
+                    sender_id,
+                )
+                return
+            # 通过全部校验：执行清理+热重载，并发送提示
+            try:
+                await self._reset_plugin_data_and_reload()
+                # 成功提示
+                try:
+                    platform_name = event.get_platform_name()
+                    chat_id = event.get_group_id()
+                    session_str = f"{platform_name}:GroupMessage:{chat_id}"
+                    notice = (
+                        "【Group Chat Plus】插件重置指令处理结果：成功\n"
+                        "已清空本插件缓存即将重启AstrBot。此提示不计入对话历史。"
+                    )
+                    yield event.plain_result(f"{notice}")
+                    logger.info(f"{session_str}: {notice}")
+
+                    self.config["platform_id"] = event.get_platform_id()
+                    self.config["restart_umo"] = event.unified_msg_origin
+                    self.config["restart_start_ts"] = time.time()
+                    self.config.save_config()
+                    logger.info(
+                        "重启：已记录 platform_id、restart_umo 与 restart_start_ts，准备重启"
+                    )
+                    try:
+                        await self.restart_core()
+                    except Exception as e:
+                        yield event.plain_result(f"重启失败：{e}")
+                        logger.error(f"重启失败：{e}")
+                except Exception:
+                    pass
+            except Exception:
+                # 失败提示
+                try:
+                    platform_name = event.get_platform_name()
+                    chat_id = event.get_group_id()
+                    session_str = f"{platform_name}:GroupMessage:{chat_id}"
+                    notice = (
+                        "【Group Chat Plus】插件重置指令处理结果：失败\n"
+                        "原因：执行重置时发生内部错误，请查看日志。此提示不计入对话历史。"
+                    )
+                    yield event.plain_result(f"{notice}")
+                    logger.info(f"{session_str}: {notice}")
+                except Exception:
+                    pass
+            return
+        except Exception:
+            return
+
+    @filter.command("gcp_reset_here")
+    async def gcp_reset_here(self, event: AstrMessageEvent):
+        """
+        检测并处理“会话级重置”指令，重启AstrBot：仅重置当前会话的本插件运行态与本地缓存。
+        不影响 AstrBot 官方对话系统的历史，也不影响其他群或会话。
+
+        """
+        try:
+            # 仅群聊生效；为避免误触，私聊环境不处理该指令
+            if event.is_private_chat():
+                return
+            # 若该群聊未启用插件，则直接忽略
+            if not self._is_enabled(event):
+                return
+            # 需访问到底层消息结构（原始消息链）以便做“纯文本”判断
+            if not hasattr(event, "message_obj") or not hasattr(
+                event.message_obj, "message"
+            ):
+                return
+            components = event.message_obj.message
+            # 空消息（极少见）直接忽略
+            if not components:
+                return
+            # 必须是“纯文本”消息（仅 Plain 组件），防止图片/引用等造成误触
+            if not all(isinstance(c, Plain) for c in components):
+                return
+            # 白名单判定：空列表=允许所有用户；否则仅允许列表内用户
+            whitelist = self.config.get("plugin_reset_allowed_user_ids", [])
+            allow_all = not whitelist or len(whitelist) == 0
+            sender_id = str(event.get_sender_id())
+            allowed = allow_all or (str(sender_id) in {str(x) for x in whitelist})
+            # 若不被允许，按“已处理”返回，阻止该消息继续触发本插件其它逻辑
+            if not allowed:
+                logger.info(
+                    "【会话重置】用户 %s 未在白名单中，重置指令被忽略",
+                    sender_id,
+                )
+                return
+            # 执行当前会话的数据重置并发送提示
+            try:
+                await self._reset_session_data(event)
+                # 成功提示
+                try:
+                    platform_name = event.get_platform_name()
+                    chat_id = event.get_group_id()
+                    session_str = f"{platform_name}:GroupMessage:{chat_id}"
+                    notice = (
+                        "【Group Chat Plus】会话重置指令处理结果：成功\n"
+                        "已清理当前会话的本插件缓存与运行态（不影响官方对话历史）,即将重启AstrBot。此提示不计入对话历史。"
+                    )
+                    yield event.plain_result(f"{notice}")
+                    logger.info(f"{session_str}: {notice}")
+
+                    self.config["platform_id"] = event.get_platform_id()
+                    self.config["restart_umo"] = event.unified_msg_origin
+                    self.config["restart_start_ts"] = time.time()
+                    self.config.save_config()
+                    logger.info(
+                        "重启：已记录 platform_id、restart_umo 与 restart_start_ts，准备重启"
+                    )
+                    try:
+                        await self.restart_core()
+                    except Exception as e:
+                        yield event.plain_result(f"重启失败：{e}")
+                        logger.error(f"重启失败：{e}")
+                except Exception:
+                    pass
+            except Exception:
+                # 失败提示
+                try:
+                    platform_name = event.get_platform_name()
+                    chat_id = event.get_group_id()
+                    session_str = f"{platform_name}:GroupMessage:{chat_id}"
+                    notice = (
+                        "【Group Chat Plus】会话重置指令处理结果：失败\n"
+                        "原因：执行重置时发生内部错误，请查看日志。此提示不计入对话历史。"
+                    )
+                    yield event.plain_result(f"{notice}")
+                    logger.info(f"{session_str}: {notice}")
+                except Exception:
+                    pass
+            return
+        except Exception:
+            # 兜底保护：异常时返回 ，不影响其他插件处理
+            return
+
+    async def _reset_session_data(self, event: AstrMessageEvent) -> None:
+        """
+        清理“当前会话”的本插件缓存与派生状态，不触碰 AstrBot 官方对话历史。
+
+        主要包含：
+        - 清空与该会话相关的内存缓存（待转存消息、处理中标记、去重缓存、戳一戳追踪等）
+        - 重置该会话的概率/注意力/情绪等增强模块状态
+        - 删除该会话在本插件数据目录中的持久化上下文文件
+        - 持久化保存必要的状态变更
+        """
+        try:
+            # 获取定位当前会话所需的关键维度
+            platform_name = event.get_platform_name()
+            is_private = event.is_private_chat()
+            chat_id = event.get_group_id() if not is_private else event.get_sender_id()
+
+            logger.info(
+                "【会话重置】开始: platform=%s, 类型=%s, chat_id=%s",
+                platform_name,
+                "私聊" if is_private else "群聊",
+                chat_id,
+            )
+
+            # —— 内存态缓存清理 ——
+            try:
+                # 待转存的消息缓存（本插件的自定义历史，用于不回复时保留上下文）
+                if chat_id in self.pending_messages_cache:
+                    cached_count = len(self.pending_messages_cache.get(chat_id, []))
+                    del self.pending_messages_cache[chat_id]
+
+                    logger.info(
+                        "【会话重置】已清空待转存消息缓存 chat_id=%s, 清理条数=%s",
+                        chat_id,
+                        cached_count,
+                    )
+            except Exception:
+                logger.warning("【会话重置】清空待转存消息缓存失败", exc_info=True)
+            try:
+                # 处理中会话标记（用于避免并发处理同一会话）
+                if chat_id in self.processing_sessions:
+                    del self.processing_sessions[chat_id]
+
+                    logger.info(
+                        "【会话重置】已移除处理中标记 chat_id=%s",
+                        chat_id,
+                    )
+            except Exception:
+                logger.warning("【会话重置】移除处理中标记失败", exc_info=True)
+            try:
+                # 最近回复缓存（用于去重检查，避免短时间内重复回复同内容）
+                if chat_id in self.recent_replies_cache:
+                    replies_cleared = len(self.recent_replies_cache.get(chat_id, []))
+                    del self.recent_replies_cache[chat_id]
+
+                    logger.info(
+                        "【会话重置】已清空最近回复缓存 chat_id=%s, 清理条数=%s",
+                        chat_id,
+                        replies_cleared,
+                    )
+            except Exception:
+                logger.warning("【会话重置】清空最近回复缓存失败", exc_info=True)
+            try:
+                # “回复后戳一戳”追踪记录（限定该会话）
+                k = str(chat_id)
+                if (
+                    isinstance(getattr(self, "poke_trace_records", None), dict)
+                    and k in self.poke_trace_records
+                ):
+                    del self.poke_trace_records[k]
+
+                    logger.info("【会话重置】已移除戳一戳追踪记录 chat_id=%s", chat_id)
+            except Exception:
+                logger.warning("【会话重置】移除戳一戳追踪记录失败", exc_info=True)
+            try:
+                # 情绪系统：重置该会话的情绪基线
+                if hasattr(self, "mood_tracker") and self.mood_tracker:
+                    self.mood_tracker.reset_mood(str(chat_id))
+
+                    logger.info("【会话重置】情绪状态已重置 chat_id=%s", chat_id)
+            except Exception:
+                logger.warning("【会话重置】重置情绪状态失败", exc_info=True)
+
+            # —— 模块状态重置 ——
+            try:
+                # 概率管理：恢复该会话的触发概率到初始状态
+
+                logger.info("【会话重置】开始重置概率状态 chat_id=%s", chat_id)
+                await ProbabilityManager.reset_probability(
+                    platform_name, is_private, chat_id
+                )
+
+                logger.info("【会话重置】概率状态重置完成 chat_id=%s", chat_id)
+            except Exception:
+                logger.warning("【会话重置】重置概率状态失败", exc_info=True)
+            try:
+                # 注意力管理：清空该会话的注意力与情绪权重
+
+                logger.info("【会话重置】开始清空注意力状态 chat_id=%s", chat_id)
+                await AttentionManager.clear_attention(
+                    platform_name, is_private, chat_id
+                )
+
+                logger.info("【会话重置】注意力状态清空完成 chat_id=%s", chat_id)
+            except Exception:
+                logger.warning("【会话重置】清空注意力状态失败", exc_info=True)
+            try:
+                # 主动对话：撤销临时概率提升并清理会话状态
+                chat_key = ProbabilityManager.get_chat_key(
+                    platform_name, is_private, chat_id
+                )
+                try:
+                    ProactiveChatManager.deactivate_temp_probability_boost(
+                        chat_key, "会话重置"
+                    )
+                except Exception:
+                    logger.warning(
+                        "【会话重置】撤销临时概率提升失败 chat_key=%s",
+                        chat_key,
+                        exc_info=True,
+                    )
+                if (
+                    hasattr(ProactiveChatManager, "_chat_states")
+                    and chat_key in ProactiveChatManager._chat_states
+                ):
+                    del ProactiveChatManager._chat_states[chat_key]
+
+                    logger.info(
+                        "【会话重置】已移除主动对话状态 chat_key=%s",
+                        chat_key,
+                    )
+                if (
+                    hasattr(ProactiveChatManager, "_temp_probability_boost")
+                    and chat_key in ProactiveChatManager._temp_probability_boost
+                ):
+                    del ProactiveChatManager._temp_probability_boost[chat_key]
+
+                    logger.info(
+                        "【会话重置】已清空临时概率提升状态 chat_key=%s",
+                        chat_key,
+                    )
+                if hasattr(ProactiveChatManager, "_save_states_to_disk"):
+                    ProactiveChatManager._save_states_to_disk()
+
+                    logger.info(
+                        "【会话重置】主动对话状态已持久化 chat_key=%s", chat_key
+                    )
+            except Exception:
+                logger.warning("【会话重置】清理主动对话状态失败", exc_info=True)
+
+            # —— 持久化上下文清理 ——
+            try:
+                # 删除该会话在本插件用于缓存的上下文文件（非官方历史）
+                file_path = ContextManager._get_storage_path(
+                    platform_name, is_private, chat_id
+                )
+                if file_path and file_path.exists():
+                    try:
+                        file_path.unlink()
+
+                        logger.info(
+                            "【会话重置】已删除会话上下文文件 path=%s",
+                            file_path,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "【会话重置】删除会话上下文文件失败 path=%s",
+                            file_path,
+                            exc_info=True,
+                        )
+            except Exception:
+                logger.warning("【会话重置】处理上下文文件失败", exc_info=True)
+            try:
+                # 将注意力变更落盘，确保重置后的状态被保存
+                if hasattr(AttentionManager, "_save_to_disk"):
+                    AttentionManager._save_to_disk(force=True)
+
+                    logger.info("【会话重置】注意力状态已持久化 chat_id=%s", chat_id)
+            except Exception:
+                logger.warning("【会话重置】注意力状态持久化失败", exc_info=True)
+
+            logger.info(
+                "【会话重置】完成: platform=%s, chat_id=%s",
+                platform_name,
+                chat_id,
+            )
+        except Exception:
+            # 兜底保护：任何异常都不传播，避免影响外部流程
+
+            logger.error("【会话重置】执行失败", exc_info=True)
+            pass
+
+    async def _reset_plugin_data_and_reload(self) -> None:
+        """
+        清空本插件的本地缓存与派生数据。
+
+        注意：
+        - 不会删除 AstrBot 官方对话系统中的历史（ConversationManager 维护的官方历史保留）
+        - 仅清理本插件维护的内存态与数据目录下的本地缓存文件
+        - 重载通过 PluginManager.reload('chat_plus') 实现，名称与 @register 一致
+        """
+        try:
+            logger.info("【插件重置】开始: 清理全局缓存并热重载")
+            try:
+                # 待转正的消息缓存（主动回复模式产生）
+                pending_total = sum(
+                    len(v) for v in self.pending_messages_cache.values()
+                )
+                self.pending_messages_cache.clear()
+
+                logger.info(
+                    "【插件重置】已清空待转存消息缓存 清理会话=%s, 清理条数=%s",
+                    pending_total,
+                    len(self.pending_messages_cache),
+                )
+            except Exception:
+                logger.warning("【插件重置】清空待转存消息缓存失败", exc_info=True)
+            try:
+                # 会话处理中标记
+                processing_count = len(self.processing_sessions)
+                self.processing_sessions.clear()
+
+                logger.info(
+                    "【插件重置】已清空处理中标记 清理会话=%s",
+                    processing_count,
+                )
+            except Exception:
+                logger.warning("【插件重置】清空处理中标记失败", exc_info=True)
+            try:
+                # 指令标记缓存（跨处理器通信用）
+                command_count = len(self.command_messages)
+                self.command_messages.clear()
+
+                logger.info(
+                    "【插件重置】已清空指令标记缓存 清理条数=%s",
+                    command_count,
+                )
+            except Exception:
+                logger.warning("【插件重置】清空指令标记缓存失败", exc_info=True)
+            try:
+                # 最近回复缓存（去重使用）
+                replies_total = sum(len(v) for v in self.recent_replies_cache.values())
+                self.recent_replies_cache.clear()
+
+                logger.info(
+                    "【插件重置】已清空最近回复缓存 清理会话=%s, 清理条目=%s",
+                    replies_total,
+                    len(self.recent_replies_cache),
+                )
+            except Exception:
+                logger.warning("【插件重置】清空最近回复缓存失败", exc_info=True)
+            try:
+                # 戳一戳追踪记录
+                self.poke_trace_records = {}
+
+                logger.info("【插件重置】已清空戳一戳追踪记录")
+            except Exception:
+                logger.warning("【插件重置】清空戳一戳追踪记录失败", exc_info=True)
+            try:
+                # 情绪追踪：清空内存态
+                if hasattr(self, "mood_tracker") and hasattr(
+                    self.mood_tracker, "moods"
+                ):
+                    mood_count = len(self.mood_tracker.moods)
+                    self.mood_tracker.moods.clear()
+
+                    logger.info(
+                        "【插件重置】已清空情绪状态 清理会话=%s",
+                        mood_count,
+                    )
+            except Exception:
+                logger.warning("【插件重置】清空情绪状态失败", exc_info=True)
+            try:
+                # 主动对话：清空各群聊状态
+                chat_state_count = len(
+                    getattr(ProactiveChatManager, "_chat_states", {})
+                )
+                ProactiveChatManager._chat_states.clear()
+
+                logger.info(
+                    "【插件重置】已清空主动对话状态 清理会话=%s",
+                    chat_state_count,
+                )
+            except Exception:
+                logger.warning("【插件重置】清空主动对话状态失败", exc_info=True)
+            try:
+                # 主动对话：清空临时概率提升
+                if hasattr(ProactiveChatManager, "_temp_probability_boost"):
+                    temp_boost_count = len(ProactiveChatManager._temp_probability_boost)
+                    ProactiveChatManager._temp_probability_boost.clear()
+
+                    logger.info(
+                        "【插件重置】已清空临时概率提升 清理会话=%s",
+                        temp_boost_count,
+                    )
+            except Exception:
+                logger.warning("【插件重置】清空临时概率提升失败", exc_info=True)
+            try:
+                # 注意力数据：清空内存映射
+                attention_count = len(getattr(AttentionManager, "_attention_map", {}))
+                AttentionManager._attention_map.clear()
+
+                logger.info(
+                    "【插件重置】已清空注意力映射 清理会话=%s",
+                    attention_count,
+                )
+            except Exception:
+                logger.warning("【插件重置】清空注意力映射失败", exc_info=True)
+            try:
+                # 删除本插件数据目录下的持久化缓存文件/目录
+                data_dir = StarTools.get_data_dir()
+                base_path = Path(str(data_dir))
+                # 自定义历史缓存（仅本插件使用的本地历史，非官方）
+                chat_history_dir = base_path / "chat_history"
+                if chat_history_dir.exists():
+                    shutil.rmtree(chat_history_dir, ignore_errors=True)
+
+                    logger.info(
+                        "【插件重置】已删除自定义历史目录 path=%s",
+                        chat_history_dir,
+                    )
+                # 注意力持久化文件
+                att_file = base_path / "attention_data.json"
+                if att_file.exists():
+                    try:
+                        att_file.unlink()
+
+                        logger.info(
+                            "【插件重置】已删除注意力持久化文件 path=%s",
+                            att_file,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "【插件重置】删除注意力持久化文件失败 path=%s",
+                            att_file,
+                            exc_info=True,
+                        )
+                # 主动对话状态持久化文件
+                pcs_file = base_path / "proactive_chat_states.json"
+                if pcs_file.exists():
+                    try:
+                        pcs_file.unlink()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"插件重置失败: {e}", exc_info=True)
 
     async def _perform_initial_checks(self, event: AstrMessageEvent) -> tuple:
         """
@@ -808,6 +1459,7 @@ class ChatPlus(Star):
         mention_info: dict = None,
         has_trigger_keyword: bool = False,
         poke_info: dict = None,
+        raw_is_at_message: bool = None,
     ) -> tuple:
         """
         处理消息内容（图片处理、上下文格式化）
@@ -837,9 +1489,13 @@ class ChatPlus(Star):
         if self.debug_mode:
             logger.info(f"  纯净原始消息: {original_message_text[:100]}...")
 
+        real_is_at_message = (
+            raw_is_at_message if raw_is_at_message is not None else is_at_message
+        )
+
         # 检查是否是空@消息
         is_empty_at = MessageCleaner.is_empty_at_message(
-            original_message_text, is_at_message
+            original_message_text, real_is_at_message
         )
         if is_empty_at:
             if self.debug_mode:
@@ -861,7 +1517,8 @@ class ChatPlus(Star):
             self.config.get("image_to_text_scope", "all"),
             self.config.get("image_to_text_provider_id", ""),
             self.config.get("image_to_text_prompt", "请详细描述这张图片的内容"),
-            is_at_message,
+            real_is_at_message,
+            has_trigger_keyword,
             self.config.get("image_to_text_timeout", 60),
         )
 
@@ -1001,6 +1658,17 @@ class ChatPlus(Star):
             poke_info,  # 🆕 v1.0.9: 传递戳一戳信息
         )
 
+        if self.poke_trace_enabled and self._check_and_consume_poke_trace(
+            chat_id, event.get_sender_id()
+        ):
+            _n = event.get_sender_name() or "未知用户"
+            _id = event.get_sender_id()
+            message_text_for_ai += (
+                f"\n[戳过对方提示]你刚刚戳过这条消息的发送者{_n}(ID:{_id})"
+            )
+            if self.debug_mode:
+                logger.info(f"  已添加戳过对方提示: 目标={_n}(ID:{_id})")
+
         if self.debug_mode:
             logger.info("【步骤7.5】为当前消息添加元数据（用于AI识别）")
             logger.info(f"  处理后消息: {processed_message[:100]}...")
@@ -1012,29 +1680,302 @@ class ChatPlus(Star):
             logger.info("【步骤8】提取历史上下文")
             logger.info(f"  最大上下文数: {max_context}")
 
+            def _log_msgs(tag, msgs):
+                try:
+                    cnt = len(msgs) if msgs else 0
+                    logger.info(f"  {tag} 条数: {cnt}")
+                    if not msgs:
+                        return
+                    # 展示末尾最多5条的详细信息
+                    bot_id_for_check = str(event.get_self_id())
+                    show = msgs[-min(5, len(msgs)) :]
+                    lines = []
+                    for idx, m in enumerate(show, start=cnt - len(show) + 1):
+                        try:
+                            # 提取通用字段
+                            t = None
+                            sid = ""
+                            sname = ""
+                            mid = ""
+                            gid = None
+                            selfid = ""
+                            sess = ""
+                            content = ""
+                            if isinstance(m, AstrBotMessage):
+                                t = getattr(m, "timestamp", None)
+                                if hasattr(m, "sender") and m.sender:
+                                    sid = str(getattr(m.sender, "user_id", ""))
+                                    sname = getattr(m.sender, "nickname", "") or ""
+                                mid = getattr(m, "message_id", "") or ""
+                                gid = getattr(m, "group_id", None)
+                                selfid = str(getattr(m, "self_id", "") or "")
+                                sess = str(getattr(m, "session_id", "") or "")
+                                content = getattr(m, "message_str", "") or ""
+                            elif isinstance(m, dict):
+                                # 官方原始历史等
+                                t = m.get("timestamp") or m.get("ts")
+                                # 规范里只有role/content
+                                content = m.get("content", "")
+                                # 尝试补充sender（若有的话）
+                                if isinstance(m.get("sender"), dict):
+                                    sid = str(m["sender"].get("user_id", ""))
+                                    sname = m["sender"].get("nickname", "") or ""
+                            # 时间格式化
+                            if t:
+                                try:
+                                    timestr = time.strftime(
+                                        "%Y-%m-%d %H:%M:%S", time.localtime(float(t))
+                                    )
+                                except Exception:
+                                    timestr = "n/a"
+                            else:
+                                timestr = "n/a"
+                            # 是否为机器人自己的消息
+                            is_bot = sid and sid == bot_id_for_check
+                            # 文本摘要
+                            snippet = str(content).replace("\n", " ")
+                            if len(snippet) > 80:
+                                snippet = snippet[:80] + "…"
+                            line = (
+                                f"  [{idx}] t={timestr} sender={sname}(ID:{sid}) bot={is_bot} "
+                                f"gid={gid} self_id={selfid} sess={sess} mid={mid} len={len(content)} txt={snippet}"
+                            )
+                            lines.append(line)
+                        except Exception as _inner:
+                            lines.append(f"  [预览异常] {type(m)}")
+                    if lines:
+                        for ln in lines:
+                            logger.info(ln)
+                except Exception:
+                    pass
+
         history_messages = ContextManager.get_history_messages(event, max_context)
+        if self.debug_mode:
+            _log_msgs("历史-本地", history_messages)
+        if not (isinstance(max_context, int) and max_context == 0):
+            try:
+                cm = self.context.conversation_manager
+                if cm:
+                    uid = event.unified_msg_origin
+                    cid = await cm.get_curr_conversation_id(uid)
+                    if cid:
+                        conv = await cm.get_conversation(
+                            unified_msg_origin=uid, conversation_id=cid
+                        )
+                        official_history = None
+                        if conv is not None:
+                            if getattr(conv, "history", None):
+                                try:
+                                    official_history = json.loads(conv.history)
+                                except Exception:
+                                    official_history = None
+                            if official_history is None and getattr(
+                                conv, "content", None
+                            ):
+                                if isinstance(conv.content, list):
+                                    official_history = conv.content
+                                else:
+                                    try:
+                                        official_history = json.loads(conv.content)
+                                    except Exception:
+                                        official_history = None
+                        if (
+                            isinstance(official_history, list)
+                            and len(official_history) > 0
+                        ):
+                            if self.debug_mode:
+                                try:
+                                    logger.info(
+                                        f"  官方历史原始条数: {len(official_history)}"
+                                    )
+                                    if isinstance(max_context, int) and max_context > 0:
+                                        logger.info(
+                                            f"  官方历史选取窗口: 末尾 {max_context} 条"
+                                        )
+                                    else:
+                                        logger.info("  官方历史选取窗口: 全量")
+                                    _raw_prev = []
+                                    for r in official_history[
+                                        -min(5, len(official_history)) :
+                                    ]:
+                                        _s = (
+                                            r.get("content", "")
+                                            if isinstance(r, dict)
+                                            else str(r)
+                                        )
+                                        _s = str(_s).replace("\n", " ")
+                                        if len(_s) > 80:
+                                            _s = _s[:80] + "…"
+                                        _raw_prev.append(_s)
+                                    if _raw_prev:
+                                        logger.info(
+                                            "  官方历史-原始预览: "
+                                            + " | ".join(_raw_prev)
+                                        )
+                                except Exception:
+                                    pass
+                            hist_msgs = []
+                            self_id = event.get_self_id()
+                            platform_name = event.get_platform_name()
+                            is_private_chat = event.is_private_chat()
+                            default_user_name = "对方" if is_private_chat else "群友"
+                            history_user_prefix = "history_user"
+                            msgs_iter = (
+                                official_history[-max_context:]
+                                if (isinstance(max_context, int) and max_context > 0)
+                                else official_history
+                            )
+                            for idx, msg in enumerate(msgs_iter):
+                                if (
+                                    isinstance(msg, dict)
+                                    and "role" in msg
+                                    and "content" in msg
+                                ):
+                                    m = AstrBotMessage()
+                                    m.message_str = msg["content"]
+                                    m.platform_name = platform_name
+                                    _ts = (
+                                        msg.get("timestamp")
+                                        or msg.get("ts")
+                                        or msg.get("time")
+                                    )
+                                    try:
+                                        m.timestamp = (
+                                            int(float(_ts)) if _ts else int(time.time())
+                                        )
+                                    except Exception:
+                                        m.timestamp = int(time.time())
+                                    m.type = (
+                                        MessageType.GROUP_MESSAGE
+                                        if not is_private_chat
+                                        else MessageType.FRIEND_MESSAGE
+                                    )
+                                    if not is_private_chat:
+                                        m.group_id = event.get_group_id()
+                                    m.self_id = self_id
+                                    m.session_id = getattr(
+                                        event, "session_id", None
+                                    ) or (
+                                        event.get_sender_id()
+                                        if is_private_chat
+                                        else event.get_group_id()
+                                    )
+                                    raw_message_id = (
+                                        msg.get("message_id")
+                                        or msg.get("id")
+                                        or msg.get("mid")
+                                        or ""
+                                    )
+                                    m.message_id = (
+                                        str(raw_message_id)
+                                        or f"official_{idx}_{m.timestamp}"
+                                    )
+
+                                    if msg["role"] == "assistant":
+                                        m.sender = MessageMember(
+                                            user_id=self_id, nickname="AI"
+                                        )
+                                    else:
+                                        sender_info = (
+                                            msg.get("sender")
+                                            if isinstance(msg.get("sender"), dict)
+                                            else None
+                                        )
+                                        sender_id = None
+                                        sender_name = None
+                                        if sender_info:
+                                            sender_id = (
+                                                sender_info.get("user_id")
+                                                or sender_info.get("id")
+                                                or sender_info.get("uid")
+                                                or sender_info.get("qq")
+                                                or sender_info.get("uin")
+                                            )
+                                            sender_name = sender_info.get(
+                                                "nickname"
+                                            ) or sender_info.get("name")
+                                        sender_id = (
+                                            str(sender_id)
+                                            if sender_id is not None
+                                            else f"{history_user_prefix}_{idx}"
+                                        )
+                                        sender_name = sender_name or default_user_name
+                                        m.sender = MessageMember(
+                                            user_id=sender_id,
+                                            nickname=sender_name,
+                                        )
+                                    hist_msgs.append(m)
+                            if hist_msgs:
+                                if history_messages:
+                                    existing_contents = set()
+                                    for _existing in history_messages:
+                                        content = None
+                                        if isinstance(_existing, AstrBotMessage):
+                                            content = getattr(
+                                                _existing, "message_str", None
+                                            )
+                                        elif isinstance(_existing, dict):
+                                            content = _existing.get("content")
+                                        if content:
+                                            existing_contents.add(content)
+
+                                    for hm in hist_msgs:
+                                        if (
+                                            hm.message_str
+                                            and hm.message_str in existing_contents
+                                        ):
+                                            continue
+                                        history_messages.append(hm)
+                                        if hm.message_str:
+                                            existing_contents.add(hm.message_str)
+                                else:
+                                    history_messages = hist_msgs
+                                if self.debug_mode:
+                                    logger.info("  已合并官方历史")
+                                    _log_msgs("历史-合并官方", history_messages)
+                        elif self.debug_mode:
+                            logger.info("  未获取到官方历史")
+            except Exception as _:
+                pass
+        else:
+            if self.debug_mode:
+                logger.info("  跳过官方历史读取: max_context_messages=0")
 
         # 合并缓存消息
         cached_messages_to_merge = []
-        if (
-            chat_id in self.pending_messages_cache
-            and len(self.pending_messages_cache[chat_id]) > 1
-        ):
-            cached_messages = self.pending_messages_cache[chat_id][:-1]
-            if cached_messages and history_messages:
-                history_contents = set()
-                for msg in history_messages:
-                    if isinstance(msg, AstrBotMessage) and hasattr(msg, "message_str"):
-                        history_contents.add(msg.message_str)
-                    elif isinstance(msg, dict) and "content" in msg:
-                        history_contents.add(msg["content"])
+        if isinstance(max_context, int) and max_context == 0:
+            if self.debug_mode:
+                logger.info("  跳过缓存合并: max_context_messages=0")
+        else:
+            if (
+                chat_id in self.pending_messages_cache
+                and len(self.pending_messages_cache[chat_id]) > 1
+            ):
+                cached_messages = self.pending_messages_cache[chat_id][:-1]
+                cached_candidates_count = len(cached_messages) if cached_messages else 0
+                dedup_skipped = 0
+                if cached_messages and history_messages:
+                    history_contents = set()
+                    for msg in history_messages:
+                        if isinstance(msg, AstrBotMessage) and hasattr(
+                            msg, "message_str"
+                        ):
+                            history_contents.add(msg.message_str)
+                        elif isinstance(msg, dict) and "content" in msg:
+                            history_contents.add(msg["content"])
 
-                for cached_msg in cached_messages:
-                    if isinstance(cached_msg, dict) and "content" in cached_msg:
-                        if cached_msg["content"] not in history_contents:
-                            cached_messages_to_merge.append(cached_msg)
-            elif cached_messages:
-                cached_messages_to_merge = cached_messages
+                    for cached_msg in cached_messages:
+                        if isinstance(cached_msg, dict) and "content" in cached_msg:
+                            if cached_msg["content"] not in history_contents:
+                                cached_messages_to_merge.append(cached_msg)
+                            else:
+                                dedup_skipped += 1
+                elif cached_messages:
+                    cached_messages_to_merge = cached_messages
+                if self.debug_mode:
+                    logger.info(
+                        f"  缓存候选: {cached_candidates_count} 条, 去重跳过: {dedup_skipped} 条, 计划合并: {len(cached_messages_to_merge)} 条"
+                    )
 
         if cached_messages_to_merge:
             if history_messages is None:
@@ -1083,10 +2024,24 @@ class ChatPlus(Star):
                     history_messages.append(cached_msg)
             if self.debug_mode:
                 logger.info(f"  合并缓存消息: {len(cached_messages_to_merge)} 条")
+                _log_msgs("历史-合并缓存后", history_messages)
 
         # 应用上下文限制
-        if history_messages and max_context > 0 and len(history_messages) > max_context:
+        if (
+            history_messages
+            and isinstance(max_context, int)
+            and max_context > 0
+            and len(history_messages) > max_context
+        ):
+            before_cnt = len(history_messages)
             history_messages = history_messages[-max_context:]
+            if self.debug_mode:
+                logger.info(
+                    f"  已应用上下文限制: {before_cnt} -> {len(history_messages)}"
+                )
+                _log_msgs("历史-截断后", history_messages)
+        elif self.debug_mode:
+            logger.info("  未触发上下文限制")
 
         if self.debug_mode:
             logger.info(
@@ -1101,6 +2056,14 @@ class ChatPlus(Star):
 
         if self.debug_mode:
             logger.info(f"  格式化后长度: {len(formatted_context)} 字符")
+            try:
+                _pv = formatted_context or ""
+                snippet = _pv[:300].replace("\n", " ")
+                logger.info(
+                    "  格式化后预览: " + snippet + ("…" if len(_pv) > 300 else "")
+                )
+            except Exception:
+                pass
 
         # 返回：原始消息文本、处理后的消息（不含元数据，用于保存）、格式化的上下文、图片URL列表
         return (
@@ -1221,10 +2184,13 @@ class ChatPlus(Star):
 
         # 🆕 v1.0.2: 模拟打字延迟
         if self.typing_simulator_enabled and self.typing_simulator and reply_result:
-            if self.debug_mode:
-                logger.info("【步骤13.6】模拟打字延迟")
+            if isinstance(reply_result, str):
+                if self.debug_mode:
+                    logger.info("【步骤13.6】模拟打字延迟")
 
-            await self.typing_simulator.simulate_if_needed(str(reply_result))
+                await self.typing_simulator.simulate_if_needed(reply_result)
+            elif self.debug_mode:
+                logger.info("【步骤13.6】跳过打字延迟（非字符串回复）")
 
         # 保存用户消息（从缓存读取并添加元数据）
         if self.debug_mode:
@@ -1407,6 +2373,10 @@ class ChatPlus(Star):
         if self.proactive_enabled:
             chat_key = ProbabilityManager.get_chat_key(
                 platform_name, is_private, chat_id
+            )
+            # 在实际记录回复前，若处于主动对话临时提升阶段，则在此时机取消临时提升（AI已决定回复）
+            ProactiveChatManager.check_and_handle_reply_after_proactive(
+                chat_key, force=True
             )
             ProactiveChatManager.record_bot_reply(chat_key, is_proactive=False)
             if self.debug_mode:
@@ -1642,6 +2612,9 @@ class ChatPlus(Star):
                 else:
                     logger.info(f"[戳一戳] 已戳一戳用户")
 
+                if self.poke_trace_enabled:
+                    self._register_poke_trace(chat_id, str(user_id))
+
             except Exception as e:
                 logger.error(f"[戳一戳] 执行戳一戳失败: {e}")
 
@@ -1708,6 +2681,8 @@ class ChatPlus(Star):
                     logger.info(f"【反戳】✅ 已反戳用户 {sender_id} (群:{chat_id})")
                 else:
                     logger.info("【反戳】已执行反戳")
+                if self.poke_trace_enabled:
+                    self._register_poke_trace(chat_id, str(sender_id))
             except Exception as e:
                 logger.error(f"【反戳】执行反戳失败: {e}")
                 # 即使失败，也不影响主流程，继续正常处理
@@ -1718,6 +2693,71 @@ class ChatPlus(Star):
 
         except Exception as e:
             logger.error(f"【反戳】反戳流程发生错误: {e}")
+            return False
+
+    def _get_poke_trace_store(self, chat_id: str) -> OrderedDict:
+        key = str(chat_id)
+        store = self.poke_trace_records.get(key)
+        if not isinstance(store, OrderedDict):
+            store = OrderedDict()
+            self.poke_trace_records[key] = store
+        return store
+
+    def _cleanup_poke_trace(self, chat_id: str):
+        store = self._get_poke_trace_store(chat_id)
+        now_ts = time.time()
+        to_delete = [uid for uid, exp in store.items() if exp <= now_ts]
+        for uid in to_delete:
+            try:
+                del store[uid]
+            except Exception:
+                pass
+
+    def _register_poke_trace(self, chat_id: str, user_id: str):
+        try:
+            if not self.poke_trace_enabled:
+                return
+            store = self._get_poke_trace_store(chat_id)
+            self._cleanup_poke_trace(chat_id)
+            uid = str(user_id)
+            if uid in store:
+                try:
+                    del store[uid]
+                except Exception:
+                    pass
+            while len(store) >= max(1, int(self.poke_trace_max_tracked_users)):
+                try:
+                    store.popitem(last=False)
+                except Exception:
+                    break
+            expire_at = time.time() + max(1, int(self.poke_trace_ttl_seconds))
+            store[uid] = expire_at
+            if self.debug_mode:
+                logger.info(
+                    f"[戳过对方追踪] 注册: chat={chat_id} user={uid} ttl={self.poke_trace_ttl_seconds}s"
+                )
+        except Exception as e:
+            logger.error(f"[戳过对方追踪] 注册失败: {e}")
+
+    def _check_and_consume_poke_trace(self, chat_id: str, user_id: str) -> bool:
+        try:
+            if not self.poke_trace_enabled:
+                return False
+            store = self._get_poke_trace_store(chat_id)
+            self._cleanup_poke_trace(chat_id)
+            uid = str(user_id)
+            exp = store.get(uid)
+            if exp and exp > time.time():
+                try:
+                    del store[uid]
+                except Exception:
+                    pass
+                if self.debug_mode:
+                    logger.info(f"[戳过对方追踪] 命中并消费: chat={chat_id} user={uid}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[戳过对方追踪] 检查失败: {e}")
             return False
 
     async def _process_message(self, event: AstrMessageEvent):
@@ -1757,8 +2797,10 @@ class ChatPlus(Star):
                 platform_name, is_private, chat_id
             )
             ProactiveChatManager.record_user_message(chat_key)
-            # 检查并处理主动对话后的回复
-            ProactiveChatManager.check_and_handle_reply_after_proactive(chat_key)
+            # 检查并处理主动对话后的回复（新逻辑：仅在AI决定回复时由后续流程强制取消）
+            ProactiveChatManager.check_and_handle_reply_after_proactive(
+                chat_key, force=False
+            )
 
         # 步骤2: 检查消息触发器（决定是否跳过概率判断）
         is_at_message, has_trigger_keyword = await self._check_message_triggers(event)
@@ -1780,7 +2822,6 @@ class ChatPlus(Star):
             logger.info(
                 f"【等同@消息】判断: {'是' if should_treat_as_at else '否'} (is_at={is_at_message}, has_keyword={has_trigger_keyword})"
             )
-            logger.info("⭐ [等同@消息] 因包含触发关键词，按@消息处理")
 
         # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
         should_process = await self._check_probability_before_processing(
@@ -1822,7 +2863,8 @@ class ChatPlus(Star):
                 return
 
         # 步骤4-6: 处理消息内容（图片处理等耗时操作）
-        # 使用 should_treat_as_at 而不是 is_at_message，这样触发关键词也能触发图片处理
+        # 使用 should_treat_as_at 作为 is_at_message 参与后续元数据/触发方式处理，
+        # 同时通过 raw_is_at_message 传入真实的 @ 状态，便于图片识别范围精细控制
         result = await self._process_message_content(
             event,
             chat_id,
@@ -1830,6 +2872,7 @@ class ChatPlus(Star):
             mention_info,
             has_trigger_keyword,
             poke_info,
+            raw_is_at_message=is_at_message,
         )
         if not result[0]:  # should_continue为False
             return
@@ -1911,6 +2954,10 @@ class ChatPlus(Star):
         if should_reply and self.proactive_enabled:
             chat_key = ProbabilityManager.get_chat_key(
                 platform_name, is_private, chat_id
+            )
+            # 先取消主动对话的临时概率提升与连续尝试（AI已决定回复）
+            ProactiveChatManager.check_and_handle_reply_after_proactive(
+                chat_key, force=True
             )
             ProactiveChatManager.record_bot_reply(chat_key, is_proactive=False)
             if self.debug_mode:
@@ -2316,6 +3363,23 @@ class ChatPlus(Star):
             # 如果生成失败，返回一个基于时间的唯一ID
             return f"fallback_{time.time()}_{random.randint(1000, 9999)}"
 
+    def _normalize_bare(self, s: str) -> str:
+        """
+        归一化字符串：
+        - 去除所有空白
+        - 转小写
+        - 去掉开头的任意非字母数字字符（视为前缀符号，如 / ! # 等）
+        返回“裸指令/裸文本”以便与平台无关地比较。
+        """
+        try:
+            s2 = "".join(s.split()).lower()
+            i = 0
+            while i < len(s2) and not s2[i].isalnum():
+                i += 1
+            return s2[i:]
+        except Exception:
+            return ""
+
     def _is_command_message(self, event: AstrMessageEvent) -> bool:
         """
         检测消息是否为指令消息（根据配置的指令前缀）
@@ -2513,6 +3577,12 @@ class ChatPlus(Star):
                             logger.info(
                                 f"[@他人检测] 检测到@其他人: ID={mentioned_id}, 名称={mentioned_name or '未知'}"
                             )
+
+            # 若消息中包含对机器人的 @，无论模式如何都应该继续处理
+            if has_at_bot:
+                if self.debug_mode:
+                    logger.info("[@他人检测] 检测到@机器人，继续处理该消息")
+                return False
 
             # 根据模式决定是否忽略
             if ignore_mode == "strict":

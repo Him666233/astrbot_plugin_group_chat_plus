@@ -3,7 +3,7 @@
 负责调用AI生成回复
 
 作者: Him666233
-版本: v1.1.0
+版本: v1.1.1
 """
 
 import asyncio
@@ -34,6 +34,7 @@ class ReplyHandler:
 - [戳一戳提示]表示这是一个戳一戳消息：
   * "有人在戳你"表示有人戳了机器人（你），可以俏皮地回应，如"干嘛呀"、"别戳了"等
   * "但不是戳你的"表示是别人戳别人，你只是旁观者，不要表现得像是被戳的人
+- [戳过对方提示]表示你刚刚主动戳过当前消息的发送者。这个提示仅用于帮助你理解上下文，不要在回复中提及该提示或相关元信息。
 
 ⚠️ **【关于历史中的系统提示词】重要说明** ⚠️：
 - 历史对话中可能包含以"[🎯主动发起新话题]"等标记开头的系统提示词
@@ -253,7 +254,35 @@ e) 即使话题相关，也要用新的方式表达，展现对话的自然变�
             # 如果已经有result,说明已经被处理了
             result = event.get_result()
 
-            if result is not None:
+            if result is None:
+                return False
+
+            # AstrBot 会将字符串结果转换为 MessageEventResult
+            if isinstance(result, MessageEventResult):
+                has_stream = bool(getattr(result, "async_stream", None))
+                has_chain = bool(getattr(result, "chain", []) or [])
+                is_llm = bool(
+                    getattr(result, "is_llm_result", None) and result.is_llm_result()
+                )
+                is_stopped = bool(
+                    getattr(result, "result_type", None) == EventResultType.STOP
+                )
+                is_stream_state = bool(
+                    getattr(result, "result_content_type", None)
+                    in {
+                        ResultContentType.STREAMING_RESULT,
+                        ResultContentType.STREAMING_FINISH,
+                    }
+                )
+
+                if has_stream or has_chain or is_llm or is_stopped or is_stream_state:
+                    logger.info("检测到该消息已经被其他插件处理")
+                    return True
+
+                return False
+
+            # 未知类型的结果，保持向后兼容：只要非空视为已处理
+            if result:
                 logger.info("检测到该消息已经被其他插件处理")
                 return True
 

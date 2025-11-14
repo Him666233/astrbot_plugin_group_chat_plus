@@ -1,4 +1,10 @@
 {
+    "plugin_reset_allowed_user_ids": {
+        "description": "允许使用插件重置指令的用户ID白名单",
+        "type": "list",
+        "hint": "可配置多个用户ID，只有在此列表中的用户才能触发重置指令。留空=允许所有用户使用。仅在群聊中生效。",
+        "default": []
+    },
     "decision_ai_provider_id": {
         "description": "读空气AI提供商ID",
         "type": "string",
@@ -80,8 +86,8 @@
     "image_to_text_scope": {
         "description": "图片转文字应用范围",
         "type": "string",
-        "hint": "选择图片转文字功能的应用范围：all=对所有消息适用；mention_only=只对@机器人的消息适用（非@消息中的图片会被过滤）(建议调为mention_only模式，避免API被频繁调用)",
-        "default": "all"
+        "hint": "选择图片转文字功能的应用范围：all=对所有消息适用；mention_only=对@机器人或包含触发关键词的消息适用（兼容旧版本行为，非@且不含关键词的消息图片会被过滤）；at_only=仅对真正@机器人的消息适用（即使包含关键词也不处理图片）；keyword_only=仅对包含触发关键词的消息适用（即使@了机器人也不处理图片）(建议使用 mention_only 或更严格模式以避免API被频繁调用)",
+        "default": "mention_only"
     },
     "image_to_text_provider_id": {
         "description": "图片转文字AI提供商ID",
@@ -196,6 +202,24 @@
         "type": "float",
         "hint": "发送回复后多久执行戳一戳操作，模拟真人的思考时间。默认0.5秒。建议0.3-2.0秒",
         "default": 0.5
+    }    ,
+    "enable_poke_trace_prompt": {
+        "description": "🆕 启用戳过对方追踪提示",
+        "type": "bool",
+        "hint": "开启后，当AI对某用户执行戳一戳（包括：回复后戳一戳、收到戳一戳后反戳），会在设定的有效期内追踪该用户。若该用户在有效期内发来消息，将在上下文开头为AI添加提示：[戳过对方提示]你刚刚戳过这条消息的发送者…（仅供AI理解，不会保存在官方历史中）",
+        "default": false
+    },
+    "poke_trace_max_tracked_users": {
+        "description": "戳过对方最大追踪人数",
+        "type": "int",
+        "hint": "每个群聊最多同时追踪多少个被AI戳过的用户。超过后会移除最早的记录（先进先出）",
+        "default": 5
+    },
+    "poke_trace_ttl_seconds": {
+        "description": "戳过对方提示有效期(秒)",
+        "type": "int",
+        "hint": "从AI戳用户开始，追踪该用户的时长（秒）。超过时间后将不再提示，并自动清理记录。建议120-900秒",
+        "default": 300
     },
     "enable_ignore_at_others": {
         "description": "启用忽略@他人消息功能",
@@ -414,13 +438,13 @@
         "default": true
     },
     "proactive_min_user_messages": {
-        "description": "最少用户消息数",
+        "description": "最少用户消息数（proactive_require_user_activity=开启时生效）",
         "type": "int",
         "hint": "距离上次AI发言后，至少需要多少条用户消息才能主动对话。默认3条。建议2-5条，避免AI过于频繁主动",
         "default": 3
     },
     "proactive_user_activity_window": {
-        "description": "用户活跃时间窗口(秒)",
+        "description": "用户活跃时间窗口(秒)（proactive_require_user_activity=开启时生效）",
         "type": "int",
         "hint": "检查多少秒内是否有用户发言。默认300秒(5分钟)。用于判断群是否还活跃",
         "default": 300
@@ -468,16 +492,10 @@
         "default": "你已经有一段时间没有说话了。现在你可以主动发起一个新话题，或者针对之前的对话内容做一些自然的延伸。\n要求：\n1. 话题要自然，不要生硬\n2. 可以是问题、分享、或感想\n3. 避免\"在吗\"、\"干嘛呢\"等低质量开场\n4. 最好与之前的聊天内容或群氛围相关\n5. 保持你的人设和语气\n6. ⚠️重要：不要提及\"我主动发起\"、\"我刚才\"等元数据信息，要表现得像自然想起什么而说话"
     },
     "proactive_use_attention": {
-        "description": "使用注意力机制",
+        "description": "主动关注高注意力用户",
         "type": "bool",
-        "hint": "开启后，主动对话时会倾向于@注意力高的用户。需要先启用注意力机制。让主动对话更有针对性",
+        "hint": "开启后，主动对话时话题会倾向于注意力高的用户。需要先启用注意力机制。让主动对话更有针对性",
         "default": true
-    },
-    "proactive_at_probability": {
-        "description": "@用户的概率",
-        "type": "float",
-        "hint": "主动对话时@某个用户的概率(0-1)。默认0.3。建议0.2-0.5，太高会打扰用户，太低显得不够主动",
-        "default": 0.3
     },
     "proactive_temp_boost_probability": {
         "description": "临时概率提升值",

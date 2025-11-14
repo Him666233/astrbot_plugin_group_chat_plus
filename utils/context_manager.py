@@ -10,7 +10,7 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: v1.1.0
+版本: v1.1.1
 """
 
 from typing import List, Dict, Any, Optional

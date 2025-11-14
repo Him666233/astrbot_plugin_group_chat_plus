@@ -10,7 +10,7 @@
 6. 失败处理和冷却机制
 
 作者: Him666233
-版本: v1.1.0
+版本: v1.1.1
 """
 
 import time
@@ -152,6 +152,8 @@ class ProactiveChatManager:
                 "last_proactive_time": 0,  # 上次主动对话时间
                 "user_message_timestamps": [],  # 用户消息时间戳列表（用于活跃度检测）
                 "silent_failures": 0,  # 连续沉默失败次数
+                # 主动对话连续尝试计数（在一次主动对话及后续连续尝试期间计数；AI决定回复后清零）
+                "proactive_attempts_count": 0,
             }
         return cls._chat_states[chat_key]
 
@@ -174,6 +176,8 @@ class ProactiveChatManager:
                 "last_proactive_time": 0,  # 上次主动对话时间
                 "user_message_timestamps": [],  # 用户消息时间戳列表（用于活跃度检测）
                 "silent_failures": 0,  # 连续沉默失败次数
+                # 主动对话连续尝试计数
+                "proactive_attempts_count": 0,
             }
 
     @classmethod
@@ -219,6 +223,13 @@ class ProactiveChatManager:
             state["last_bot_reply_time"] = current_time
             if is_proactive:
                 state["last_proactive_time"] = current_time
+                # 记录一次主动对话尝试
+                try:
+                    state["proactive_attempts_count"] = (
+                        int(state.get("proactive_attempts_count", 0)) + 1
+                    )
+                except Exception:
+                    state["proactive_attempts_count"] = 1
             state["silent_failures"] = 0  # 重置连续失败计数
             # 重置用户消息计数（这是"距离上次AI回复后的用户消息数"）
             state["user_message_count"] = 0
@@ -268,6 +279,12 @@ class ProactiveChatManager:
         state["is_in_cooldown"] = True
         state["cooldown_until"] = time.time() + duration
         state["consecutive_failures"] = 0
+        # 进入冷却时，取消临时概率提升并重置连续尝试
+        try:
+            cls.deactivate_temp_probability_boost(chat_key, "进入冷却期")
+        except Exception:
+            pass
+        state["proactive_attempts_count"] = 0
 
     @classmethod
     def is_in_cooldown(cls, chat_key: str) -> bool:
@@ -360,29 +377,30 @@ class ProactiveChatManager:
         return boost_info["boost_value"]
 
     @classmethod
-    def check_and_handle_reply_after_proactive(cls, chat_key: str):
+    def check_and_handle_reply_after_proactive(cls, chat_key: str, force: bool = False):
         """
-        检查并处理主动对话后的用户回复
+        处理“AI决定回复用户消息”这一时机下的临时概率提升清理
 
-        如果检测到用户回复，取消临时概率提升
+        新逻辑：只有当外部在“概率筛选通过 + 决策AI判断应回复”之后显式调用时才取消临时提升。
+        早期的“任意用户消息到来就取消”逻辑已废弃。
 
         Args:
             chat_key: 群聊唯一标识
+            force: 是否强制执行取消（默认False；为True时无条件取消临时提升并重置计数）
         """
-        if chat_key not in cls._temp_probability_boost:
+        if not force:
             return
 
-        state = cls.get_chat_state(chat_key)
+        # 无条件取消并复位相关状态（由上层在正确时机调用）
+        if chat_key in cls._temp_probability_boost:
+            cls.deactivate_temp_probability_boost(chat_key, "AI决定回复，取消临时提升")
 
-        # 检查是否有新的用户消息
-        if state["user_message_count"] > 0:
-            # 有人回复了，取消临时提升
-            cls.deactivate_temp_probability_boost(chat_key, "检测到用户回复")
-            # 重置失败计数
-            state["consecutive_failures"] = 0
-            logger.info(
-                f"✅ [主动对话成功] 群{chat_key[-8:]} - 有用户回复，重置失败计数"
-            )
+        state = cls.get_chat_state(chat_key)
+        state["consecutive_failures"] = 0
+        state["proactive_attempts_count"] = 0
+        logger.info(
+            f"✅ [主动对话成功] 群{chat_key[-8:]} - AI决定回复，已取消临时提升并重置连续尝试"
+        )
 
     # ========== 检查逻辑 ==========
 
@@ -878,6 +896,94 @@ class ProactiveChatManager:
                 # 遍历所有群聊状态
                 for chat_key in list(cls._chat_states.keys()):
                     try:
+                        current_time = time.time()
+                        # 获取配置
+                        max_failures = config.get(
+                            "proactive_max_consecutive_failures", 2
+                        )
+                        cooldown_duration = config.get(
+                            "proactive_cooldown_duration", 1800
+                        )
+                        boost_duration = config.get(
+                            "proactive_temp_boost_duration", 120
+                        )
+
+                        # ========== 连续尝试机制：检测维持期是否结束且未触发AI回复 ==========
+                        state = cls.get_chat_state(chat_key)
+
+                        in_retry_sequence = (
+                            int(state.get("proactive_attempts_count", 0)) > 0
+                        )
+
+                        # 判断临时提升是否仍然有效
+                        boost_info = cls._temp_probability_boost.get(chat_key)
+                        boost_active = False
+                        if boost_info and isinstance(boost_info, dict):
+                            boost_active = current_time < float(
+                                boost_info.get("boost_until", 0)
+                            )
+
+                        # 如果处于连续尝试序列中且临时提升仍然有效，则在维持期内不再触发新的主动对话
+                        if in_retry_sequence and boost_active:
+                            if cls._debug_mode:
+                                logger.info(
+                                    f"[连续尝试] 群{chat_key[-8:]} 处于维持期内，跳过本轮should_trigger检查"
+                                )
+                            continue
+
+                        # 如果处于连续尝试序列中，但临时提升已过期（且未被上层在AI决定回复时清理）
+                        if in_retry_sequence and not boost_active:
+                            # 结合 last_proactive_time + 配置的维持时长，双重判断避免错判
+                            last_pt = float(state.get("last_proactive_time", 0))
+                            if last_pt > 0 and current_time >= last_pt + boost_duration:
+                                # 视为一次失败尝试
+                                cls.record_proactive_failure(
+                                    chat_key, max_failures, cooldown_duration
+                                )
+
+                                # 若进入冷却，跳过本轮
+                                if cls.is_in_cooldown(chat_key):
+                                    # 确保临时提升关闭、连续尝试清零
+                                    try:
+                                        cls.deactivate_temp_probability_boost(
+                                            chat_key, "失败达到上限，进入冷却"
+                                        )
+                                    except Exception:
+                                        pass
+                                    state["proactive_attempts_count"] = 0
+                                    continue
+
+                                # 未达上限：立即进行下一次连续尝试（不再依赖沉默阈值）
+                                try:
+                                    # 连续尝试也需尊重白名单与禁用时段（有效概率>0）
+                                    if not cls.is_group_enabled(chat_key, config):
+                                        if cls._debug_mode:
+                                            logger.info(
+                                                f"[连续尝试] 群{chat_key[-8:]} 不在白名单，跳过连续尝试"
+                                            )
+                                        continue
+
+                                    base_prob = config.get("proactive_probability", 0.3)
+                                    eff_prob = cls.calculate_effective_probability(
+                                        base_prob, config
+                                    )
+                                    if eff_prob <= 0:
+                                        logger.info(
+                                            f"[连续尝试] 群{chat_key[-8:]} 处于禁用/极低时段，跳过本次连续尝试"
+                                        )
+                                        continue
+
+                                    await cls.trigger_proactive_chat(
+                                        context, config, plugin_instance, chat_key
+                                    )
+                                    # 进入下一轮后，继续处理下一个群
+                                    continue
+                                except Exception as e:
+                                    logger.error(
+                                        f"[连续尝试] 触发下一次主动对话失败: {e}",
+                                        exc_info=True,
+                                    )
+
                         # 检查是否应该触发主动对话
                         should_trigger, reason = cls.should_trigger_proactive_chat(
                             chat_key, config

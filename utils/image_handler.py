@@ -3,7 +3,7 @@
 负责处理消息中的图片，包括检测、过滤和转文字
 
 作者: Him666233
-版本: v1.1.0
+版本: v1.1.1
 """
 
 import asyncio
@@ -35,6 +35,7 @@ class ImageHandler:
         image_to_text_provider_id: str,
         image_to_text_prompt: str,
         is_at_message: bool,
+        has_trigger_keyword: bool,
         timeout: int = 60,
     ) -> Tuple[bool, str, List[str]]:
         """
@@ -44,10 +45,11 @@ class ImageHandler:
             event: 消息事件
             context: Context对象
             enable_image_processing: 是否启用图片处理
-            image_to_text_scope: 应用范围（all/mention_only）
+            image_to_text_scope: 应用范围（all/mention_only/at_only/keyword_only）
             image_to_text_provider_id: 图片转文字AI提供商ID
             image_to_text_prompt: 转换提示词
             is_at_message: 是否@消息
+            has_trigger_keyword: 是否包含触发关键词
             timeout: 图片转文字超时时间（秒）
 
         Returns:
@@ -79,23 +81,7 @@ class ImageHandler:
                     f"检测到消息包含 {len(image_components)} 张图片, 是否有文字: {has_text}"
                 )
 
-            # === 第一步：mention_only 模式下过滤非@消息的图片 ===
-            if image_to_text_scope == "mention_only" and not is_at_message:
-                if DEBUG_MODE:
-                    logger.info("图片转文字应用范围为mention_only,当前非@消息,过滤图片")
-                # 如果是纯图片消息,丢弃
-                if not has_text:
-                    if DEBUG_MODE:
-                        logger.info("非@消息的纯图片消息,丢弃该消息")
-                    return False, "", []
-                else:
-                    # 如果是图文混合,移除图片只保留文字
-                    text_only = ImageHandler._extract_text_only(message_chain)
-                    if DEBUG_MODE:
-                        logger.info(f"非@消息的图文混合,移除图片保留文字: {text_only}")
-                    return True, text_only, []
-
-            # === 第二步：检查图片处理开关 ===
+            # === 第一步：检查图片处理开关 ===
             # 如果不启用图片处理，所有带图片的消息都要过滤（不管是什么模式）
             if not enable_image_processing:
                 if DEBUG_MODE:
@@ -110,6 +96,44 @@ class ImageHandler:
                     text_only = ImageHandler._extract_text_only(message_chain)
                     if DEBUG_MODE:
                         logger.info(f"移除图片后的消息: {text_only}")
+                    return True, text_only, []
+
+            # === 第二步：根据应用范围(image_to_text_scope)决定是否对当前消息启用图片转文字 ===
+            scope = (image_to_text_scope or "all").strip().lower()
+            should_apply_image_to_text = True
+
+            if scope == "all":
+                should_apply_image_to_text = True
+            elif scope == "mention_only":
+                # 兼容旧逻辑：@消息或包含触发关键词的消息都视为适用
+                should_apply_image_to_text = is_at_message or has_trigger_keyword
+            elif scope == "at_only":
+                # 仅对真正的@机器人消息启用图片转文字
+                should_apply_image_to_text = is_at_message
+            elif scope == "keyword_only":
+                # 仅对包含触发关键词的消息启用图片转文字
+                should_apply_image_to_text = has_trigger_keyword
+            else:
+                # 未知配置值时，退回到与mention_only一致的行为
+                should_apply_image_to_text = is_at_message or has_trigger_keyword
+
+            if not should_apply_image_to_text:
+                if DEBUG_MODE:
+                    logger.info(
+                        f"图片转文字应用范围为{scope}, 当前消息不符合范围, 过滤图片"
+                    )
+                # 如果是纯图片消息,丢弃
+                if not has_text:
+                    if DEBUG_MODE:
+                        logger.info("非适用范围内的纯图片消息,丢弃该消息")
+                    return False, "", []
+                else:
+                    # 如果是图文混合,移除图片只保留文字
+                    text_only = ImageHandler._extract_text_only(message_chain)
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"非适用范围内的图文混合,移除图片保留文字: {text_only}"
+                        )
                     return True, text_only, []
 
             # === 第三步：启用了图片处理，根据是否配置图片转文字ID决定处理方式 ===
