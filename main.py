@@ -61,7 +61,7 @@ from collections import OrderedDict
 import aiohttp
 from astrbot.api import logger
 
-from click import command
+
 from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.core.star.star_tools import StarTools
@@ -571,6 +571,7 @@ class ChatPlus(Star):
         self.config.save_config()
 
     async def _get_auth_token(self):
+        """获取认证token"""
         login_url = f"http://{self.host}:{self.port}/api/auth/login"
         login_data = {
             "username": self.dbc["username"],
@@ -692,24 +693,6 @@ class ChatPlus(Star):
                 yield result
         except Exception as e:
             logger.error(f"处理群消息时发生错误: {e}", exc_info=True)
-
-    async def _get_auth_token(self):
-        """获取认证token"""
-        login_url = f"http://{self.host}:{self.port}/api/auth/login"
-        login_data = {
-            "username": self.dbc["username"],
-            "password": self.dbc["password"],
-        }
-        async with self.session.post(login_url, json=login_data) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data and data.get("status") == "ok" and "data" in data:
-                    return data["data"]["token"]
-                else:
-                    raise Exception(f"登录响应格式错误: {data}")
-            else:
-                text = await response.text()
-                raise Exception(f"登录失败，状态码: {response.status}, 响应: {text}")
 
     async def restart_core(self):
         """
