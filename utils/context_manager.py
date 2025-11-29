@@ -10,7 +10,7 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 from typing import List, Dict, Any, Optional
@@ -353,7 +353,11 @@ class ContextManager:
 
     @staticmethod
     async def format_context_for_ai(
-        history_messages: List[AstrBotMessage], current_message: str, bot_id: str
+        history_messages: List[AstrBotMessage],
+        current_message: str,
+        bot_id: str,
+        include_timestamp: bool = True,
+        include_sender_info: bool = True,
     ) -> str:
         """
         将历史消息格式化为AI可理解的文本
@@ -362,6 +366,8 @@ class ContextManager:
             history_messages: 历史消息列表
             current_message: 当前消息
             bot_id: 机器人ID，用于识别自己的回复
+            include_timestamp: 是否包含时间戳（默认为True）
+            include_sender_info: 是否包含发送者信息（默认为True）
 
         Returns:
             格式化后的文本
@@ -378,7 +384,7 @@ class ContextManager:
                     if msg is None or not isinstance(msg, AstrBotMessage):
                         logger.warning(f"跳过无效的历史消息对象: {type(msg)}")
                         continue
-                    # 获取发送者信息
+                    # 获取发送者信息（如果需要）
                     sender_name = "未知用户"
                     sender_id = "unknown"
                     is_bot = False
@@ -405,14 +411,16 @@ class ContextManager:
                         # 对于bot发送的消息，sender.user_id 应该等于 self_id
                         pass
 
-                    # 获取消息时间
-                    time_str = "未知时间"
-                    if hasattr(msg, "timestamp") and msg.timestamp:
-                        try:
-                            dt = datetime.fromtimestamp(msg.timestamp)
-                            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                        except:
-                            pass
+                    # 获取消息时间（如果需要）
+                    time_str = ""
+                    if include_timestamp:
+                        time_str = "未知时间"
+                        if hasattr(msg, "timestamp") and msg.timestamp:
+                            try:
+                                dt = datetime.fromtimestamp(msg.timestamp)
+                                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            except:
+                                pass
 
                     # 获取消息内容
                     message_content = ""
@@ -424,18 +432,37 @@ class ContextManager:
                             if isinstance(comp, Plain):
                                 message_content += comp.text
 
-                    # 格式化消息
-                    if is_bot:
-                        # AI自己的回复,特殊标注（强调提醒不要重复）
-                        # 明确告诉AI这是它自己的历史回复，使用昵称来增强识别
-                        formatted_parts.append(
-                            f"[{time_str}] 【你自己的历史回复】{sender_name}(ID:{sender_id}): {message_content}"
-                        )
+                    # 格式化消息（根据配置决定格式）
+                    # 构建消息前缀部分
+                    prefix_parts = []
+
+                    # 添加时间戳（如果启用）
+                    if include_timestamp and time_str:
+                        prefix_parts.append(f"[{time_str}]")
+
+                    # 添加发送者信息（如果启用）
+                    if include_sender_info:
+                        if is_bot:
+                            # AI自己的回复,特殊标注（强调提醒不要重复）
+                            # 🔧 修复：使用更强的标记，防止AI重复历史回复
+                            prefix_parts.append(
+                                f"⚠️【禁止重复-这是你自己的历史回复】{sender_name}(ID:{sender_id}):"
+                            )
+                        else:
+                            # 其他用户的消息
+                            prefix_parts.append(f"{sender_name}(ID:{sender_id}):")
                     else:
-                        # 其他用户的消息
-                        formatted_parts.append(
-                            f"[{time_str}] {sender_name}(ID:{sender_id}): {message_content}"
-                        )
+                        # 不包含发送者信息时，仍需要区分bot自己的消息
+                        if is_bot:
+                            prefix_parts.append("⚠️【禁止重复-这是你自己的历史回复】:")
+
+                    # 组合完整消息
+                    if prefix_parts:
+                        formatted_msg = " ".join(prefix_parts) + " " + message_content
+                    else:
+                        formatted_msg = message_content
+
+                    formatted_parts.append(formatted_msg)
 
                 formatted_parts.append("")  # 空行分隔
 
@@ -494,11 +521,85 @@ class ContextManager:
             # 导入 MessageCleaner
             from .message_cleaner import MessageCleaner
 
-            # 清理消息，确保不包含系统提示词
+            # 🔧 修复：更强的清理，确保所有系统提示词被移除
             cleaned_message = MessageCleaner.clean_message(message_text)
             if not cleaned_message:
                 # 如果清理后为空，使用原消息
                 cleaned_message = message_text
+
+            # 🔧 修复：二次清理，确保戳一戳和系统提示完全被移除
+            # 检测更多的系统提示词特征
+            if (
+                "[系统提示]" in cleaned_message
+                or "[戳一戳提示]" in cleaned_message
+                or "[戳过对方提示]" in cleaned_message
+                or "[当前时间:" in cleaned_message
+                or "[User ID:" in cleaned_message
+                or "[当前情绪状态:" in cleaned_message
+                or "=== 历史消息上下文 ===" in cleaned_message
+                or "=== 背景信息 ===" in cleaned_message
+                or "💭 相关记忆：" in cleaned_message
+                or "=== 可用工具列表 ===" in cleaned_message
+                or "【当前对话对象】重要提醒" in cleaned_message
+                or "【第一重要】识别当前发送者：" in cleaned_message
+            ):
+                # 如果仍然包含系统提示，再次清理
+                import re
+
+                cleaned_message = re.sub(
+                    r"\n*\s*\[系统提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"\n*\s*\[戳一戳提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"\n*\s*\[戳过对方提示\][^\n]*", "", cleaned_message
+                )
+                # 清理额外的系统提示词
+                cleaned_message = re.sub(
+                    r"\[当前时间:\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[User ID:.*?Nickname:.*?\]", "", cleaned_message
+                )
+                cleaned_message = re.sub(r"\[当前情绪状态:.*?\]", "", cleaned_message)
+                cleaned_message = re.sub(
+                    r"=== 历史消息上下文 ===[\s\S]*?(?==== |$)", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"=== 背景信息 ===[\s\S]*?(?==== |$)", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"💭 相关记忆：[\s\S]*?(?==== |$)", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"=== 可用工具列表 ===[\s\S]*?(?=请根据上述对话|请开始回复|====|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"当前平台共有 \d+ 个可用工具:[\s\S]*?(?=请根据上述对话|请开始回复|====|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"============+\n*.*?【当前对话对象】重要提醒.*?\n*============+[\s\S]*?(?=\n\n[^\s=]|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"【第一重要】识别当前发送者：[\s\S]*?(?=请开始回复|====|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"=+\n*.*?【重要】当前新消息.*?\n*=+", "", cleaned_message
+                )
+                cleaned_message = cleaned_message.strip()
+                if DEBUG_MODE:
+                    logger.info("⚠️ [保存消息] 检测到系统提示残留，已二次清理")
 
             # 获取平台和聊天信息
             platform_name = event.get_platform_name()
@@ -664,11 +765,85 @@ class ContextManager:
             # 导入 MessageCleaner
             from .message_cleaner import MessageCleaner
 
-            # 清理消息，确保不包含系统提示词
+            # 🔧 修复：更强的清理，确保所有系统提示词被移除
             cleaned_message = MessageCleaner.clean_message(bot_message_text)
             if not cleaned_message:
                 # 如果清理后为空，使用原消息
                 cleaned_message = bot_message_text
+
+            # 🔧 修复：二次清理，确保戳一戳和系统提示完全被移除
+            # 检测更多的系统提示词特征
+            if (
+                "[系统提示]" in cleaned_message
+                or "[戳一戳提示]" in cleaned_message
+                or "[戳过对方提示]" in cleaned_message
+                or "[当前时间:" in cleaned_message
+                or "[User ID:" in cleaned_message
+                or "[当前情绪状态:" in cleaned_message
+                or "=== 历史消息上下文 ===" in cleaned_message
+                or "=== 背景信息 ===" in cleaned_message
+                or "💭 相关记忆：" in cleaned_message
+                or "=== 可用工具列表 ===" in cleaned_message
+                or "【当前对话对象】重要提醒" in cleaned_message
+                or "【第一重要】识别当前发送者：" in cleaned_message
+            ):
+                # 如果仍然包含系统提示，再次清理
+                import re
+
+                cleaned_message = re.sub(
+                    r"\n*\s*\[系统提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"\n*\s*\[戳一戳提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"\n*\s*\[戳过对方提示\][^\n]*", "", cleaned_message
+                )
+                # 清理额外的系统提示词
+                cleaned_message = re.sub(
+                    r"\[当前时间:\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[User ID:.*?Nickname:.*?\]", "", cleaned_message
+                )
+                cleaned_message = re.sub(r"\[当前情绪状态:.*?\]", "", cleaned_message)
+                cleaned_message = re.sub(
+                    r"=== 历史消息上下文 ===[\s\S]*?(?==== |$)", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"=== 背景信息 ===[\s\S]*?(?==== |$)", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"💭 相关记忆：[\s\S]*?(?==== |$)", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"=== 可用工具列表 ===[\s\S]*?(?=请根据上述对话|请开始回复|====|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"当前平台共有 \d+ 个可用工具:[\s\S]*?(?=请根据上述对话|请开始回复|====|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"============+\n*.*?【当前对话对象】重要提醒.*?\n*============+[\s\S]*?(?=\n\n[^\s=]|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"【第一重要】识别当前发送者：[\s\S]*?(?=请开始回复|====|$)",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"=+\n*.*?【重要】当前新消息.*?\n*=+", "", cleaned_message
+                )
+                cleaned_message = cleaned_message.strip()
+                if DEBUG_MODE:
+                    logger.info("⚠️ [AI回复保存] 检测到系统提示残留，已二次清理")
 
             # 获取平台和聊天信息
             platform_name = event.get_platform_name()
@@ -858,11 +1033,31 @@ class ContextManager:
             # 导入 MessageCleaner
             from .message_cleaner import MessageCleaner
 
-            # 清理消息，确保不包含系统提示词（与 save_bot_message 保持一致）
+            # 🔧 修复：更强的清理，确保所有系统提示词被移除
             cleaned_message = MessageCleaner.clean_message(bot_message_text)
             if not cleaned_message:
                 # 如果清理后为空，使用原消息
                 cleaned_message = bot_message_text
+
+            # 🔧 修复：二次清理，确保戳一戳和系统提示完全被移除
+            if (
+                "[系统提示]" in cleaned_message
+                or "[戳一戳提示]" in cleaned_message
+                or "[戳过对方提示]" in cleaned_message
+            ):
+                # 如果仍然包含系统提示，再次清理
+                import re
+
+                cleaned_message = re.sub(
+                    r"\n*\s*\[系统提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"\n*\s*\[戳一戳提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = re.sub(
+                    r"\n*\s*\[戳过对方提示\][^\n]*", "", cleaned_message
+                )
+                cleaned_message = cleaned_message.strip()
 
             if not chat_id:
                 logger.warning("无法获取聊天ID,跳过消息保存")
@@ -1321,11 +1516,29 @@ class ContextManager:
             if cached_messages:
                 if DEBUG_MODE:
                     logger.info(f"[官方保存+缓存转正] 开始处理缓存消息转正...")
+
                 # 提取现有历史中的消息内容（用于去重）
+                # 辅助函数：将content转换为可哈希格式
+                def make_content_hashable(content):
+                    """将content转换为可哈希格式，处理多模态消息（list类型）"""
+                    if isinstance(content, list):
+                        # 多模态消息，转为JSON字符串以便哈希
+                        return json.dumps(content, ensure_ascii=False, sort_keys=True)
+                    return content  # 字符串或其他可哈希类型
+
                 existing_contents = set()
                 for msg in history_list:
                     if isinstance(msg, dict) and "content" in msg:
-                        existing_contents.add(msg["content"])
+                        try:
+                            hashable_content = make_content_hashable(msg["content"])
+                            existing_contents.add(hashable_content)
+                        except (TypeError, ValueError) as e:
+                            # 如果转换失败，记录警告并跳过
+                            if DEBUG_MODE:
+                                logger.warning(
+                                    f"[官方保存+缓存转正] 无法哈希content: {e}"
+                                )
+                            continue
 
                 if DEBUG_MODE:
                     logger.info(
@@ -1337,16 +1550,30 @@ class ContextManager:
                 skipped_count = 0
                 for cached_msg in cached_messages:
                     if isinstance(cached_msg, dict) and "content" in cached_msg:
-                        if cached_msg["content"] not in existing_contents:
+                        try:
+                            hashable_content = make_content_hashable(
+                                cached_msg["content"]
+                            )
+                            if hashable_content not in existing_contents:
+                                history_list.append(
+                                    {"role": "user", "content": cached_msg["content"]}
+                                )
+                                existing_contents.add(
+                                    hashable_content
+                                )  # 避免缓存内部重复
+                                added_count += 1
+                            else:
+                                skipped_count += 1
+                        except (TypeError, ValueError) as e:
+                            # 如果转换失败，仍然添加消息但不做去重
+                            if DEBUG_MODE:
+                                logger.warning(
+                                    f"[官方保存+缓存转正] 缓存消息content转换失败: {e}，仍添加"
+                                )
                             history_list.append(
                                 {"role": "user", "content": cached_msg["content"]}
                             )
-                            existing_contents.add(
-                                cached_msg["content"]
-                            )  # 避免缓存内部重复
                             added_count += 1
-                        else:
-                            skipped_count += 1
 
                 cache_converted = added_count
                 if DEBUG_MODE:
@@ -1371,6 +1598,23 @@ class ContextManager:
                 logger.info(
                     f"[官方保存+缓存转正] 准备保存，总消息数: {len(history_list)} 条"
                 )
+
+            # 🔧 修复：限制历史长度，避免向量检索token溢出
+            # 保留最近150条消息（约75轮对话），防止无限增长
+            MAX_HISTORY_LENGTH = 150
+            if len(history_list) > MAX_HISTORY_LENGTH:
+                original_length = len(history_list)
+                history_list = history_list[-MAX_HISTORY_LENGTH:]
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[官方保存+缓存转正] ⚠️ 历史过长，已截断: {original_length} -> {MAX_HISTORY_LENGTH} 条"
+                    )
+                else:
+                    logger.info(
+                        f"[官方保存+缓存转正] 历史截断: {original_length} -> {MAX_HISTORY_LENGTH} 条（避免向量检索溢出）"
+                    )
+
+            if DEBUG_MODE:
                 logger.info(
                     f"[官方保存+缓存转正] ========== 调用底层保存方法 =========="
                 )

@@ -3,7 +3,7 @@
 导出所有工具类供主插件使用
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 from .probability_manager import ProbabilityManager
@@ -27,6 +27,9 @@ from .typing_simulator import TypingSimulator
 # v1.1.0 新增功能
 from .proactive_chat_manager import ProactiveChatManager
 from .time_period_manager import TimePeriodManager
+
+# v1.1.2 新增功能
+from .ai_response_filter import AIResponseFilter
 
 # 全局调试日志开关（供各模块统一读取）
 DEBUG_MODE: bool = False
@@ -61,6 +64,8 @@ __all__ = [
     # v1.1.0 开始的新增
     "ProactiveChatManager",
     "TimePeriodManager",
+    # v1.1.2 开始的新增
+    "AIResponseFilter",
     # 全局调试
     "DEBUG_MODE",
     "set_debug_mode",

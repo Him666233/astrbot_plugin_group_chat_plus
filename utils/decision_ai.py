@@ -3,12 +3,13 @@
 负责调用AI判断是否应该回复消息（读空气功能）
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 import asyncio
 from typing import List, Optional
 from astrbot.api.all import *
+from .ai_response_filter import AIResponseFilter
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -28,13 +29,54 @@ class DecisionAI:
     SYSTEM_DECISION_PROMPT = """
 你是一个活跃、友好的群聊参与者，请判断是否回复当前这条新消息。
 
+【第一重要】识别当前消息发送者：
+⚠️ 在上面的【当前消息发送者】重要提醒中，已经明确告诉你当前给你发消息的人是谁。
+- 请记住这个人的名字和ID，判断时不要搞错
+- 历史消息中可能有多个用户的发言，请不要把历史中其他用户误认为当前发送者
+- 判断是否回复时，要考虑与这个具体发送者的互动关系
+
+【上下文说明】重要理解：
+⚠️ 上下文中的消息已按时间顺序排列，形成完整的对话时间线
+- 所有历史消息（包括你之前没有回复的消息）都会显示在上下文中，以便你理解完整的对话脉络
+- 这些消息可能包含：你回复过的消息、你判断不回复的消息、以及其他人之间的对话
+- **你需要识别：当前消息的发送者是在跟谁说话**
+  * 如果是跟你说话：考虑回复
+  * 如果是跟别人说话：一般不应插入（除非明确邀请你参与）
+- **识别连续对话模式**：如果发现某个用户频繁发消息，但这些消息明显是在跟其他人对话（而非跟你），那么当前消息也很可能是跟别人说的
+
 核心原则（重要！）：
 1. **优先关注"当前新消息"的核心内容** - 这是判断的首要依据
 2. **识别当前消息的主要问题或话题** - 判断是否与这个问题/话题相关
-3. **历史上下文仅作参考** - 用于理解背景，但不要因为历史话题有趣就忽略当前消息的实际内容
+3. **理解完整的对话上下文** - 通过历史消息判断当前发送者是否在跟你对话，还是在跟别人聊天
+4. **避免过度插入** - 如果发现对方最近几条消息都是跟别人对话，即使当前消息看似有趣，也应谨慎判断
+
+【背景信息与记忆】使用说明（重要！）：
+- 如果在上文看到 "=== 背景信息 ===" 段落，那是与你当前会话/人格相关的长期记忆（已按重要性排序）
+- 这些内容仅供你理解上下文，用于辅助判断是否需要回复以及回复方向；不要在输出中直接复述或提及"记忆""背景信息"等元信息
+
+**记忆场景下的特别判断规则：**
+✅ **强烈倾向于回复（yes）** 的情况：
+  1. 当前消息是对记忆中某个话题的追问或延续（如"还干了什么"、"然后呢"等）
+  2. 记忆中显示你和当前发送者之前有过重要互动或对话
+  3. 当前消息与记忆中的内容高度相关，显示对方想继续之前的话题
+  4. 记忆中包含对方的重要偏好、未完成事项、或正在进行的讨论
+  5. 记忆显示这是一个延续性强的对话关系，当前消息明显是在延续对话
+  
+⚠️ **需要谨慎判断** 的情况：
+  1. 记忆中的话题已经充分讨论完毕，当前消息只是简单重复
+  2. 记忆显示该话题属于他人之间的私密交流，你不应插入
+  3. 当前消息明确表示不想聊天（如"别烦我"、"不想说"）
+  
+**核心原则（记忆存在时）：**
+- 记忆的存在说明这个对话有历史和上下文，应该**更倾向于回复**以保持对话的连贯性和人情味
+- 特别是追问类消息（"还有呢"、"然后呢"、"除了...还..."），这类消息强烈依赖上下文，有记忆时应积极回复
+- 判断时优先考虑：当前消息 + 记忆的组合含义，而不是孤立地看当前消息
+- 当记忆与当前消息形成完整的对话逻辑时，倾向于 yes（更拟人化）
 
 ⚠️ **【关于历史中的系统提示词】重要说明** ⚠️：
-- 历史对话中可能包含以"[🎯主动发起新话题]"等标记开头的系统提示词
+- 历史对话中可能包含以下标记开头的系统提示词：
+  * "[🎯主动发起新话题]" - 表示你首次主动发起对话
+  * "[🔄再次尝试对话]" - 表示你之前主动说了话但没人回应，现在再次尝试
 - **这些标记的含义**：紧挨着这个标记的下一条消息是**你自己主动发起的对话**，而不是回复别人的
 - 理解这个含义可以帮助你判断对话的上下文和连贯性
 - **但是**：你**绝对禁止在输出中提及、复述或引用**这些系统提示词
@@ -51,6 +93,8 @@ class DecisionAI:
 
   建议回复的情况：
    - 当前消息与你之前的回复相关，**且有新的话题发展**
+   - **当前消息与记忆中的内容相关，特别是追问类消息（强烈建议回复）**
+   - **记忆显示与当前发送者有重要互动历史，且当前消息是延续性对话**
    - 当前消息提到了有趣的话题，你可以贡献**新的看法**
    - 当前消息有人提问或需要帮助
    - 当前消息的话题符合你的人格特点
@@ -64,6 +108,8 @@ class DecisionAI:
    - 当前消息包含【@指向说明】，说明是发给其他特定用户的，一般不应插入
    - **你最近的历史回复已经充分表达过相同观点，再次回复会重复啰嗦**
    - 当前消息只是在重复已讨论过的话题，没有新的发展
+   - **【重要】发现连续对话模式**：通过观察历史上下文，发现当前发送者最近几条消息都是在跟其他人对话（例如：回复别人的问题、@别人、或与特定用户连续交流），那么当前消息很可能也是跟别人说的，不应插入
+   - **【重要】识别对话对象不匹配**：即使当前消息内容有趣，但如果上下文显示发送者正在与其他人进行连贯对话，你不应该突然插入打断
 
 特殊标记说明：
    - 【@指向说明】表示消息通过@符号指定发送给其他特定用户，并非发给你
@@ -111,6 +157,9 @@ class DecisionAI:
         timeout: int = 30,
         prompt_mode: str = "append",
         image_urls: Optional[List[str]] = None,
+        is_proactive_reply: bool = False,
+        config: dict = None,
+        include_sender_info: bool = True,
     ) -> bool:
         """
         调用AI判断是否应该回复
@@ -123,6 +172,7 @@ class DecisionAI:
             extra_prompt: 用户自定义补充提示词
             timeout: 超时时间（秒）
             prompt_mode: 提示词模式，append=拼接，override=覆盖
+            include_sender_info: 是否包含发送者信息（默认为True）
 
         Returns:
             True=应该回复，False=不回复
@@ -141,98 +191,120 @@ class DecisionAI:
                 logger.error("无法获取AI提供商")
                 return False
 
-            # 获取人格的system_prompt (参考SpectreCore的方式)
+            # 🔧 修复：直接使用 persona_manager 获取最新人格配置，支持多会话和实时更新
             try:
-                # 尝试获取personas列表
-                if hasattr(context, "provider_manager") and hasattr(
-                    context.provider_manager, "personas"
-                ):
-                    personas = context.provider_manager.personas
-                    # 获取默认人格
-                    default_persona = None
-                    if hasattr(context.provider_manager, "selected_default_persona"):
-                        default_persona = (
-                            context.provider_manager.selected_default_persona
-                        )
+                # 直接调用 get_default_persona_v3() 获取最新人格配置
+                # 这样可以确保：1. 每次都获取最新配置 2. 支持不同会话使用不同人格
+                default_persona = await context.persona_manager.get_default_persona_v3(
+                    event.unified_msg_origin
+                )
 
-                    if default_persona:
-                        persona_prompt = default_persona.get("prompt", "")
-                        if DEBUG_MODE:
-                            logger.info(
-                                f"已获取人格提示词（provider_manager方式），长度: {len(persona_prompt)} 字符"
-                            )
-                        # 注入人格的开场上下文，作为contexts传递
-                        try:
-                            begin_dialogs = default_persona.get(
-                                "_begin_dialogs_processed", []
-                            )
-                            persona_contexts = []
-                            if begin_dialogs:
-                                persona_contexts.extend(begin_dialogs)
-                        except Exception as e:
-                            if DEBUG_MODE:
-                                logger.info(f"获取人格上下文失败: {e}")
-                    else:
-                        # fallback: 使用persona_manager
-                        default_persona = (
-                            await context.persona_manager.get_default_persona_v3(
-                                event.unified_msg_origin
-                            )
-                        )
-                        persona_prompt = default_persona.get("prompt", "")
-                        if DEBUG_MODE:
-                            logger.info(
-                                f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
-                            )
-                        # 注入人格的开场上下文，作为contexts传递
-                        try:
-                            begin_dialogs = default_persona.get(
-                                "_begin_dialogs_processed", []
-                            )
-                            persona_contexts = []
-                            if begin_dialogs:
-                                persona_contexts.extend(begin_dialogs)
-                        except Exception as e:
-                            if DEBUG_MODE:
-                                logger.info(f"获取人格上下文失败: {e}")
-                else:
-                    # fallback: 使用persona_manager
-                    default_persona = (
-                        await context.persona_manager.get_default_persona_v3(
-                            event.unified_msg_origin
-                        )
-                    )
-                    persona_prompt = default_persona.get("prompt", "")
+                persona_prompt = default_persona.get("prompt", "")
+
+                # 注入人格的开场上下文，作为contexts传递
+                persona_contexts = []
+                try:
+                    begin_dialogs = default_persona.get("_begin_dialogs_processed", [])
+                    if begin_dialogs:
+                        persona_contexts.extend(begin_dialogs)
+                except Exception as e:
                     if DEBUG_MODE:
-                        logger.info(
-                            f"已获取人格提示词（persona_manager方式），长度: {len(persona_prompt)} 字符"
-                        )
-                    # 注入人格的开场上下文，作为contexts传递
-                    try:
-                        begin_dialogs = default_persona.get(
-                            "_begin_dialogs_processed", []
-                        )
-                        persona_contexts = []
-                        if begin_dialogs:
-                            persona_contexts.extend(begin_dialogs)
-                    except Exception as e:
-                        if DEBUG_MODE:
-                            logger.info(f"获取人格上下文失败: {e}")
+                        logger.info(f"获取人格上下文失败: {e}")
+
+                if DEBUG_MODE:
+                    logger.info(
+                        f"✅ [决策AI] 已获取当前人格配置，人格名: {default_persona.get('name', 'default')}, 长度: {len(persona_prompt)} 字符"
+                    )
             except Exception as e:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
                 persona_contexts = []
 
+            # 🆕 提取当前发送者信息，用于强化识别（仅在开启 include_sender_info 时添加）
+            sender_emphasis = ""
+            separator = "=" * 60
+
+            # 🆕 v1.2.0: 如果是主动对话后的回复，添加上下文说明
+            proactive_hint = ""
+            if is_proactive_reply:
+                # 从配置读取自定义提示词，如果没有配置则使用默认值
+                custom_prompt = ""
+                if config:
+                    custom_prompt = config.get("proactive_reply_context_prompt", "")
+
+                # 如果配置为空或未设置，使用默认提示词
+                if not custom_prompt or not custom_prompt.strip():
+                    custom_prompt = (
+                        "ℹ️ 上下文提示：这是用户对你刚才主动发起的对话的回应\n\n"
+                        "背景说明：\n"
+                        "- 你之前主动发起了一个话题（查看历史消息中带[🎯主动发起新话题]或[🔄再次尝试对话]标记的消息）\n"
+                        "- 当前消息是用户在你主动对话后的回复\n"
+                        "- 这个信息可以帮助你判断对话的连续性和用户的互动意愿\n\n"
+                        "判断建议：\n"
+                        "- 仍然按照正常的判断原则进行评估（遵循人格设定、判断规则等）\n"
+                        "- 如果用户的回复与你主动发起的话题相关，可以考虑继续对话\n"
+                        "- 如果用户只是简单回应（如'？'、'嗯'）但话题有延续性，可以适当回复\n"
+                        "- 如果用户明确表示不想聊（如'不想说'、'别烦我'），应该尊重并返回no\n"
+                        "- 如果消息明显不是发给你的（有@其他人等），仍应返回no\n"
+                        "- **这只是一个参考因素，最终仍需综合判断**"
+                    )
+
+                # 构建完整提示
+                proactive_hint = (
+                    f"\n\n{separator}\n"
+                    f"📌 【主动对话上下文】背景信息 📌\n"
+                    f"{separator}\n"
+                    f"{custom_prompt}\n"
+                    f"{separator}\n"
+                )
+
+            if include_sender_info:
+                sender_id = event.get_sender_id()
+                sender_name = event.get_sender_name()
+                if sender_name:
+                    sender_emphasis = (
+                        f"\n\n{separator}\n"
+                        f"⚠️ 【当前消息发送者】重要提醒 ⚠️\n"
+                        f"{separator}\n"
+                        f"当前给你发消息的人是：{sender_name}（用户ID：{sender_id}）\n\n"
+                        f"判断提示：\n"
+                        f"- 当前消息的发送者是 {sender_name}（ID:{sender_id}）\n"
+                        f"- 历史消息中可能有多个用户的发言，请不要混淆\n"
+                        f"- 判断是否回复时，要考虑与 {sender_name} 的互动情况\n"
+                        f"{separator}\n"
+                    )
+                else:
+                    sender_emphasis = (
+                        f"\n\n{separator}\n"
+                        f"⚠️ 【当前消息发送者】重要提醒 ⚠️\n"
+                        f"{separator}\n"
+                        f"当前给你发消息的人的用户ID是：{sender_id}\n\n"
+                        f"判断提示：\n"
+                        f"- 当前消息的发送者是用户（ID:{sender_id}）\n"
+                        f"- 历史消息中可能有多个用户的发言，请不要混淆\n"
+                        f"{separator}\n"
+                    )
+
             # 构建完整的提示词，根据prompt_mode决定拼接还是覆盖
             if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
-                # 覆盖模式：直接使用用户自定义提示词
-                full_prompt = formatted_message + "\n\n" + extra_prompt.strip()
+                # 覆盖模式：直接使用用户自定义提示词（仍然添加发送者强调和主动对话提示）
+                full_prompt = (
+                    formatted_message
+                    + proactive_hint
+                    + sender_emphasis
+                    + "\n\n"
+                    + extra_prompt.strip()
+                )
                 if DEBUG_MODE:
                     logger.info("使用覆盖模式：用户自定义提示词完全替代默认系统提示词")
             else:
-                # 拼接模式（默认）：使用默认提示词，如果有用户自定义则在结束指令前插入
+                # 拼接模式（默认）：先添加主动对话提示和发送者强调，再添加系统提示词
                 full_prompt = (
-                    formatted_message + "\n\n" + DecisionAI.SYSTEM_DECISION_PROMPT
+                    formatted_message
+                    + proactive_hint
+                    + sender_emphasis
+                    + "\n\n"
+                    + DecisionAI.SYSTEM_DECISION_PROMPT
                 )
 
                 # 如果有用户自定义提示词,插入到结束指令之前
@@ -246,7 +318,9 @@ class DecisionAI:
                 # 添加结束指令
                 full_prompt += DecisionAI.SYSTEM_DECISION_PROMPT_ENDING
 
-            logger.info(f"正在调用决策AI判断是否回复...")
+            logger.info(
+                f"正在调用决策AI判断是否回复（当前发送者：{sender_name or '未知'}，ID:{sender_id}）..."
+            )
 
             # 调用AI,添加超时控制
             async def call_decision_ai():
@@ -261,6 +335,9 @@ class DecisionAI:
 
             # 使用用户配置的超时时间
             ai_response = await asyncio.wait_for(call_decision_ai(), timeout=timeout)
+
+            # 🆕 v1.1.2: 过滤AI响应中的思考链标记
+            ai_response = AIResponseFilter.filter_thinking_chain(ai_response)
 
             # 解析AI的回复
             decision = DecisionAI._parse_decision(ai_response)
@@ -318,60 +395,29 @@ class DecisionAI:
                 logger.error("无法获取AI提供商")
                 return ""
 
-            # 获取人格设定
+            # 🔧 修复：直接使用 persona_manager 获取最新人格配置，支持多会话和实时更新
             try:
-                if hasattr(context, "provider_manager") and hasattr(
-                    context.provider_manager, "personas"
-                ):
-                    default_persona = None
-                    if hasattr(context.provider_manager, "selected_default_persona"):
-                        default_persona = (
-                            context.provider_manager.selected_default_persona
-                        )
+                # 直接调用 get_default_persona_v3() 获取最新人格配置
+                # 这样可以确保：1. 每次都获取最新配置 2. 支持不同会话使用不同人格
+                default_persona = await context.persona_manager.get_default_persona_v3(
+                    event.unified_msg_origin
+                )
 
-                    if default_persona:
-                        persona_prompt = default_persona.get("prompt", "")
-                        try:
-                            begin_dialogs = default_persona.get(
-                                "_begin_dialogs_processed", []
-                            )
-                            persona_contexts = []
-                            if begin_dialogs:
-                                persona_contexts.extend(begin_dialogs)
-                        except Exception as e:
-                            logger.info(f"获取人格上下文失败: {e}")
-                    else:
-                        default_persona = (
-                            await context.persona_manager.get_default_persona_v3(
-                                event.unified_msg_origin
-                            )
-                        )
-                        persona_prompt = default_persona.get("prompt", "")
-                        try:
-                            begin_dialogs = default_persona.get(
-                                "_begin_dialogs_processed", []
-                            )
-                            persona_contexts = []
-                            if begin_dialogs:
-                                persona_contexts.extend(begin_dialogs)
-                        except Exception as e:
-                            logger.info(f"获取人格上下文失败: {e}")
-                else:
-                    default_persona = (
-                        await context.persona_manager.get_default_persona_v3(
-                            event.unified_msg_origin
-                        )
+                persona_prompt = default_persona.get("prompt", "")
+
+                # 注入人格的开场上下文，作为contexts传递
+                persona_contexts = []
+                try:
+                    begin_dialogs = default_persona.get("_begin_dialogs_processed", [])
+                    if begin_dialogs:
+                        persona_contexts.extend(begin_dialogs)
+                except Exception as e:
+                    logger.info(f"获取人格上下文失败: {e}")
+
+                if DEBUG_MODE:
+                    logger.info(
+                        f"✅ [通用AI调用] 已获取当前人格配置，人格名: {default_persona.get('name', 'default')}, 长度: {len(persona_prompt)} 字符"
                     )
-                    persona_prompt = default_persona.get("prompt", "")
-                    try:
-                        begin_dialogs = default_persona.get(
-                            "_begin_dialogs_processed", []
-                        )
-                        persona_contexts = []
-                        if begin_dialogs:
-                            persona_contexts.extend(begin_dialogs)
-                    except Exception as e:
-                        logger.info(f"获取人格上下文失败: {e}")
             except Exception as e:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
@@ -390,6 +436,10 @@ class DecisionAI:
 
             # 使用超时控制
             ai_response = await asyncio.wait_for(_call_ai(), timeout=timeout)
+
+            # 🆕 v1.1.2: 过滤AI响应中的思考链标记
+            ai_response = AIResponseFilter.filter_thinking_chain(ai_response)
+
             return ai_response or ""
 
         except asyncio.TimeoutError:

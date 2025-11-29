@@ -10,7 +10,7 @@
 6. 失败处理和冷却机制
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 import time
@@ -107,6 +107,9 @@ class ProactiveChatManager:
         except Exception:
             cls._debug_mode = False
 
+        # 🆕 配置合理性检查：吐槽系统配置
+        cls._validate_complaint_config(config)
+
         cls._is_running = True
         cls._background_task = asyncio.create_task(
             cls._background_check_loop(context, config, plugin_instance)
@@ -128,12 +131,246 @@ class ProactiveChatManager:
         if cls._debug_mode or getattr(cls, "DEBUG_MODE", False):
             logger.info("⏹️ [主动对话管理器] 后台检查任务已停止")
 
+    @classmethod
+    def _validate_complaint_config(cls, config):
+        """
+        🔧 修复：验证吐槽系统配置的合理性
+
+        检查规则：
+        1. 吐槽系统基于累积失败次数 (total_proactive_failures) 触发，不受冷却影响
+        2. 连续失败次数 (consecutive_failures) 用于判断是否进入冷却，与吐槽系统分离
+        3. 配置检查：吐槽等级应该 <= max_failures * 2，否则可能很难触发
+
+        说明：
+        - 旧版本中吐槽系统依赖 consecutive_failures，导致冷却后吐槽系统被重置
+        - 新版本中吐槽系统使用独立的 total_proactive_failures，持续累积
+        - 只有成功互动时才会重置 total_proactive_failures
+
+        Args:
+            config: 插件配置字典 或 插件实例（会自动提取config属性）
+        """
+        # 🆕 智能处理：如果传入的是插件实例，提取其 config 属性
+        if hasattr(config, "config"):
+            config = config.config
+
+        # 检查是否启用了吐槽系统
+        if not config.get("enable_complaint_system", True):
+            return
+
+        max_failures = config.get("proactive_max_consecutive_failures", 3)
+        complaint_trigger = config.get("complaint_trigger_threshold", 2)
+        complaint_light = config.get("complaint_level_light", 2)
+        complaint_medium = config.get("complaint_level_medium", 3)
+        complaint_strong = config.get("complaint_level_strong", 4)
+
+        warnings = []
+        infos = []
+
+        # 🔧 修复后的说明：吐槽系统基于累积失败次数，可以 >= max_failures
+        infos.append(
+            f" 吐槽系统基于累积失败次数 (total_proactive_failures)，"
+            f"不受冷却影响，可以持续累积"
+        )
+        infos.append(
+            f"  - 连续失败次数 (consecutive_failures): 用于冷却判断，达到 {max_failures} 次进入冷却"
+        )
+        infos.append(
+            f"  - 累积失败次数 (total_proactive_failures): 用于吐槽系统，只在成功互动时重置"
+        )
+
+        # 合理性建议（不是强制要求）
+        max_complaint = max(complaint_light, complaint_medium, complaint_strong)
+        if max_complaint > max_failures * 3:
+            warnings.append(
+                f"⚠️ 最高吐槽等级 ({max_complaint}) 过高（> {max_failures * 3}），"
+                f"可能需要很长时间才能触发。建议设置在 {max_failures} ~ {max_failures * 2} 之间"
+            )
+
+        # 输出信息
+        if infos or warnings:
+            logger.info("📢 ========== 主动对话吐槽系统配置说明 ==========")
+            for info in infos:
+                logger.info(info)
+            if warnings:
+                logger.warning("\n⚠️ 配置建议：")
+                for idx, warning in enumerate(warnings, 1):
+                    logger.warning(f"  {idx}. {warning}")
+            logger.info(
+                f"\n💡 当前配置："
+                f"\n  - 最大连续失败次数（冷却阈值）: {max_failures}"
+                f"\n  - 吐槽触发阈值: {complaint_trigger}"
+                f"\n  - 轻度吐槽阈值: {complaint_light}"
+                f"\n  - 明显吐槽阈值: {complaint_medium}"
+                f"\n  - 强烈吐槽阈值: {complaint_strong}"
+            )
+            logger.info("====================================================")
+
+    # ========== 工具方法 ==========
+
+    @staticmethod
+    def parse_rank_weights(weight_str: str) -> list:
+        """
+        解析排名权重配置字符串
+
+        Args:
+            weight_str: 权重配置字符串，格式：'1:55,2:25,3:12,4:8'
+
+        Returns:
+            权重列表，例如 [0.55, 0.25, 0.12, 0.08]
+            如果解析失败，返回默认权重 [0.55, 0.25, 0.12, 0.08]
+
+        Examples:
+            >>> parse_rank_weights('1:55,2:25,3:12,4:8')
+            [0.55, 0.25, 0.12, 0.08]
+            >>> parse_rank_weights('1:70,2:30')
+            [0.7, 0.3]
+            >>> parse_rank_weights('1:0.4,2:0.3,3:0.2,4:0.1')
+            [0.4, 0.3, 0.2, 0.1]
+        """
+        default_weights = [0.55, 0.25, 0.12, 0.08]
+
+        try:
+            if not weight_str or not isinstance(weight_str, str):
+                logger.warning(
+                    f"[权重解析] 配置为空或类型错误: {weight_str}，使用默认权重"
+                )
+                return default_weights
+
+            # 去除空格
+            weight_str = weight_str.strip()
+
+            # 按逗号分割各个排名配置
+            parts = weight_str.split(",")
+            if not parts:
+                logger.warning("[权重解析] 配置格式错误（无内容），使用默认权重")
+                return default_weights
+
+            # 解析每个 "排名:权重" 对
+            rank_weight_dict = {}
+            for part in parts:
+                part = part.strip()
+                if ":" not in part:
+                    logger.warning(
+                        f"[权重解析] 跳过格式错误的配置项: {part}（缺少冒号）"
+                    )
+                    continue
+
+                try:
+                    rank_str, weight_str_part = part.split(":", 1)
+                    rank = int(rank_str.strip())
+                    weight = float(weight_str_part.strip())
+
+                    if rank < 1:
+                        logger.warning(
+                            f"[权重解析] 跳过无效排名: {rank}（排名必须>=1）"
+                        )
+                        continue
+
+                    if weight < 0:
+                        logger.warning(
+                            f"[权重解析] 跳过负数权重: {weight}（权重必须>=0）"
+                        )
+                        continue
+
+                    rank_weight_dict[rank] = weight
+
+                except ValueError as e:
+                    logger.warning(
+                        f"[权重解析] 跳过无法解析的配置项: {part}，错误: {e}"
+                    )
+                    continue
+
+            if not rank_weight_dict:
+                logger.warning("[权重解析] 没有有效的权重配置，使用默认权重")
+                return default_weights
+
+            # 检查排名是否从1开始连续递增
+            sorted_ranks = sorted(rank_weight_dict.keys())
+            if sorted_ranks[0] != 1:
+                logger.warning(
+                    f"[权重解析] 排名必须从1开始，当前最小排名: {sorted_ranks[0]}，使用默认权重"
+                )
+                return default_weights
+
+            for i, rank in enumerate(sorted_ranks, start=1):
+                if rank != i:
+                    logger.warning(
+                        f"[权重解析] 排名必须连续递增，发现断层: {sorted_ranks}，使用默认权重"
+                    )
+                    return default_weights
+
+            # 构造权重列表（按排名顺序）
+            weights = [rank_weight_dict[rank] for rank in sorted_ranks]
+
+            # 归一化权重（使总和为1）
+            total_weight = sum(weights)
+            if total_weight <= 0:
+                logger.warning(
+                    f"[权重解析] 权重总和必须>0，当前: {total_weight}，使用默认权重"
+                )
+                return default_weights
+
+            normalized_weights = [w / total_weight for w in weights]
+
+            logger.info(
+                f"[权重解析] 成功解析 {len(normalized_weights)} 个排名权重: "
+                f"{', '.join([f'第{i + 1}名={w:.2%}' for i, w in enumerate(normalized_weights)])}"
+            )
+
+            return normalized_weights
+
+        except Exception as e:
+            logger.warning(f"[权重解析] 解析失败: {e}，使用默认权重", exc_info=True)
+            return default_weights
+
     # ========== 状态管理 ==========
+
+    @classmethod
+    def _get_default_state(cls) -> dict:
+        """
+        获取默认状态字典（包含所有字段）
+
+        Returns:
+            包含所有字段的默认状态字典
+        """
+        return {
+            # 原有字段
+            "last_bot_reply_time": 0,  # 上次AI回复时间
+            "last_user_message_time": 0,  # 上次用户发言时间
+            "consecutive_failures": 0,  # 连续主动对话失败次数（用于判断是否进入冷却）
+            "total_proactive_failures": 0,  # 🆕 累积的主动对话失败次数（用于吐槽系统，不会在冷却时重置）
+            "is_in_cooldown": False,  # 是否在冷却期
+            "cooldown_until": 0,  # 冷却结束时间
+            "user_message_count": 0,  # 距离上次AI回复后的用户消息数
+            "last_proactive_time": 0,  # 上次主动对话时间
+            "user_message_timestamps": [],  # 用户消息时间戳列表（用于活跃度检测）
+            "silent_failures": 0,  # 连续沉默失败次数
+            "proactive_attempts_count": 0,  # 主动对话连续尝试计数
+            "last_proactive_content": None,  # 🆕 上一次主动对话的内容（用于重试时提醒AI）
+            # 🆕 v1.2.0 防误判核心字段
+            "proactive_active": False,  # 主动对话是否处于活跃待判定状态（只有成功发送后才为True）
+            "proactive_outcome_recorded": False,  # 当前主动对话是否已记录结果（防止重复判定）
+            # 🆕 v1.2.0 互动评分系统字段
+            "interaction_score": 50,  # 互动评分(0-100)，初始50分
+            "successful_interactions": 0,  # 成功互动总次数
+            "failed_interactions": 0,  # 失败互动总次数
+            "last_success_time": 0,  # 上次成功互动时间
+            "consecutive_successes": 0,  # 连续成功次数
+            "last_score_decay_time": time.time(),  # 上次评分衰减时间
+            "quick_reply_count": 0,  # 快速回复次数(30秒内)
+            "multi_user_reply_count": 0,  # 多人回复次数
+            # 🆕 注意力用户追踪字段
+            "last_attention_user_id": None,  # 上一次主动对话时的最高注意力用户ID
+            "last_attention_user_name": None,  # 上一次主动对话时的最高注意力用户名称
+            # 🆕 累积失败次数相关字段
+            "last_proactive_success_time": 0,  # 上次主动对话成功时间（用于时间衰减）
+            "last_complaint_decay_time": time.time(),  # 上次吐槽衰减检查时间
+        }
 
     @classmethod
     def get_chat_state(cls, chat_key: str) -> dict:
         """
-        获取群聊状态
+        获取群聊状态（确保包含所有字段，兼容旧数据）
 
         Args:
             chat_key: 群聊唯一标识
@@ -142,19 +379,14 @@ class ProactiveChatManager:
             群聊状态字典
         """
         if chat_key not in cls._chat_states:
-            cls._chat_states[chat_key] = {
-                "last_bot_reply_time": 0,  # 上次AI回复时间
-                "last_user_message_time": 0,  # 上次用户发言时间
-                "consecutive_failures": 0,  # 连续主动对话失败次数
-                "is_in_cooldown": False,  # 是否在冷却期
-                "cooldown_until": 0,  # 冷却结束时间
-                "user_message_count": 0,  # 距离上次AI回复后的用户消息数
-                "last_proactive_time": 0,  # 上次主动对话时间
-                "user_message_timestamps": [],  # 用户消息时间戳列表（用于活跃度检测）
-                "silent_failures": 0,  # 连续沉默失败次数
-                # 主动对话连续尝试计数（在一次主动对话及后续连续尝试期间计数；AI决定回复后清零）
-                "proactive_attempts_count": 0,
-            }
+            cls._chat_states[chat_key] = cls._get_default_state()
+        else:
+            # 兼容性处理：为旧数据补充缺失字段
+            state = cls._chat_states[chat_key]
+            default_state = cls._get_default_state()
+            for key, value in default_state.items():
+                if key not in state:
+                    state[key] = value
         return cls._chat_states[chat_key]
 
     @classmethod
@@ -166,19 +398,7 @@ class ProactiveChatManager:
             chat_key: 群聊唯一标识
         """
         if chat_key not in cls._chat_states:
-            cls._chat_states[chat_key] = {
-                "last_bot_reply_time": 0,  # 上次AI回复时间
-                "last_user_message_time": 0,  # 上次用户发言时间
-                "consecutive_failures": 0,  # 连续主动对话失败次数
-                "is_in_cooldown": False,  # 是否在冷却期
-                "cooldown_until": 0,  # 冷却结束时间
-                "user_message_count": 0,  # 距离上次AI回复后的用户消息数
-                "last_proactive_time": 0,  # 上次主动对话时间
-                "user_message_timestamps": [],  # 用户消息时间戳列表（用于活跃度检测）
-                "silent_failures": 0,  # 连续沉默失败次数
-                # 主动对话连续尝试计数
-                "proactive_attempts_count": 0,
-            }
+            cls._chat_states[chat_key] = cls._get_default_state()
 
     @classmethod
     def record_user_message(cls, chat_key: str):
@@ -223,6 +443,10 @@ class ProactiveChatManager:
             state["last_bot_reply_time"] = current_time
             if is_proactive:
                 state["last_proactive_time"] = current_time
+                # 🆕 v1.2.0: 激活主动对话检测（表示主动对话已成功发送，等待判定）
+                state["proactive_active"] = True
+                # 🆕 v1.2.0: 重置结果记录标记（表示这次主动对话还未判定结果）
+                state["proactive_outcome_recorded"] = False
                 # 记录一次主动对话尝试
                 try:
                     state["proactive_attempts_count"] = (
@@ -230,6 +454,22 @@ class ProactiveChatManager:
                     )
                 except Exception:
                     state["proactive_attempts_count"] = 1
+
+                if cls._debug_mode:
+                    logger.info(
+                        f"🎯 [主动对话激活] 群{chat_key[-8:]} - 已发送，等待判定"
+                    )
+            else:
+                # v1.2.0: 普通回复时，如果有活跃的主动对话，需要关闭它（双重保险）
+                # 这防止了在其他流程中遗漏关闭主动对话状态的情况
+                if state.get("proactive_active", False):
+                    if cls._debug_mode:
+                        logger.info(
+                            f"🔒 [主动对话关闭] 群{chat_key[-8:]} - 普通回复时关闭活跃的主动对话"
+                        )
+                    state["proactive_active"] = False
+                    # 注意：不设置 outcome_recorded，因为这不是一个判定，只是关闭
+
             state["silent_failures"] = 0  # 重置连续失败计数
             # 重置用户消息计数（这是"距离上次AI回复后的用户消息数"）
             state["user_message_count"] = 0
@@ -241,18 +481,51 @@ class ProactiveChatManager:
 
     @classmethod
     def record_proactive_failure(
-        cls, chat_key: str, max_failures: int, cooldown_duration: int
+        cls,
+        chat_key: str,
+        max_failures: int,
+        cooldown_duration: int,
+        config: dict = None,
     ):
         """
-        记录主动对话失败
+        记录主动对话失败（仅在未记录过时执行）
 
         Args:
             chat_key: 群聊唯一标识
             max_failures: 最大连续失败次数
             cooldown_duration: 冷却持续时间(秒)
+            config: 插件配置（可选，用于评分系统）
         """
         state = cls.get_chat_state(chat_key)
-        state["consecutive_failures"] += 1
+
+        # 🆕 v1.2.0: 防止重复记录失败
+        if state.get("proactive_outcome_recorded", False):
+            if cls._debug_mode:
+                logger.debug(
+                    f"[主动对话失败] 群{chat_key[-8:]} - 本次主动对话已记录过结果，跳过"
+                )
+            return
+
+        # 🆕 v1.2.0: 关闭主动对话检测（已判定失败）
+        state["proactive_active"] = False
+        # 标记为已记录
+        state["proactive_outcome_recorded"] = True
+
+        # 🔧 修复：同时累积两个失败计数器
+        state["consecutive_failures"] += 1  # 用于冷却判断
+
+        # 🆕 累积失败次数（带上限保护）
+        max_complaint_accumulation = (
+            config.get("complaint_max_accumulation", 15) if config else 15
+        )
+        old_total = state.get("total_proactive_failures", 0)
+        state["total_proactive_failures"] = min(
+            old_total + 1, max_complaint_accumulation
+        )
+
+        # 🆕 v1.2.0 更新互动评分
+        if config:
+            cls.record_proactive_failure_for_score(chat_key, config)
 
         # 重置用户消息计数和时间戳列表
         state["user_message_count"] = 0
@@ -260,10 +533,13 @@ class ProactiveChatManager:
 
         if state["consecutive_failures"] >= max_failures:
             # 达到最大失败次数，进入冷却
+            failure_count = state[
+                "consecutive_failures"
+            ]  # 保存失败次数，避免被重置后无法正确记录
             cls.enter_cooldown(chat_key, cooldown_duration)
             logger.info(
                 f"⚠️ [主动对话失败] 群{chat_key[-8:]} - "
-                f"连续失败{state['consecutive_failures']}次，进入冷却期{cooldown_duration}秒"
+                f"连续失败{failure_count}次，进入冷却期{cooldown_duration}秒"
             )
 
     @classmethod
@@ -278,13 +554,16 @@ class ProactiveChatManager:
         state = cls.get_chat_state(chat_key)
         state["is_in_cooldown"] = True
         state["cooldown_until"] = time.time() + duration
-        state["consecutive_failures"] = 0
+        state["consecutive_failures"] = 0  # 🔧 重置连续失败次数（用于下一轮冷却判断）
+        # 🔧 注意：不重置 total_proactive_failures，它会持续累积用于吐槽系统
+        # 只有成功互动时才会重置 total_proactive_failures
         # 进入冷却时，取消临时概率提升并重置连续尝试
         try:
             cls.deactivate_temp_probability_boost(chat_key, "进入冷却期")
         except Exception:
             pass
         state["proactive_attempts_count"] = 0
+        state["last_proactive_content"] = None  # 🆕 清空上一次主动对话内容
 
     @classmethod
     def is_in_cooldown(cls, chat_key: str) -> bool:
@@ -377,7 +656,9 @@ class ProactiveChatManager:
         return boost_info["boost_value"]
 
     @classmethod
-    def check_and_handle_reply_after_proactive(cls, chat_key: str, force: bool = False):
+    def check_and_handle_reply_after_proactive(
+        cls, chat_key: str, config: dict, force: bool = False
+    ):
         """
         处理“AI决定回复用户消息”这一时机下的临时概率提升清理
 
@@ -386,6 +667,7 @@ class ProactiveChatManager:
 
         Args:
             chat_key: 群聊唯一标识
+            config: 插件配置（用于获取衰减配置）
             force: 是否强制执行取消（默认False；为True时无条件取消临时提升并重置计数）
         """
         if not force:
@@ -396,11 +678,601 @@ class ProactiveChatManager:
             cls.deactivate_temp_probability_boost(chat_key, "AI决定回复，取消临时提升")
 
         state = cls.get_chat_state(chat_key)
-        state["consecutive_failures"] = 0
-        state["proactive_attempts_count"] = 0
-        logger.info(
-            f"✅ [主动对话成功] 群{chat_key[-8:]} - AI决定回复，已取消临时提升并重置连续尝试"
+
+        # 🆕 v1.2.0: 只有当确实有主动对话活跃或连续尝试状态时才处理
+        # 检查关键状态：活跃标记 或 连续尝试计数
+        has_active_proactive = state.get("proactive_active", False)
+        has_attempts = state.get("proactive_attempts_count", 0) > 0
+
+        if not has_active_proactive and not has_attempts:
+            # 没有活跃的主动对话，也没有连续尝试，说明是纯普通对话模式
+            # 不做任何处理，直接返回
+            if cls._debug_mode:
+                logger.debug(
+                    f"[主动对话] 群{chat_key[-8:]} - 普通对话模式，跳过主动对话处理"
+                )
+            return
+
+        # 有主动对话相关状态，需要处理
+        if has_active_proactive and not state.get("proactive_outcome_recorded", False):
+            # 场景1: 有活跃的主动对话等待判定 → 判定为间接成功
+            state["proactive_active"] = False
+            state["proactive_outcome_recorded"] = True
+            state["consecutive_failures"] = 0
+
+            # 🆕 渐进式衰减：间接成功时也减少累积失败次数
+            old_total_failures = state.get("total_proactive_failures", 0)
+            decay_amount = config.get("complaint_decay_on_success", 2)
+            state["total_proactive_failures"] = max(
+                0, old_total_failures - decay_amount
+            )
+
+            # 调试模式：总是输出衰减信息
+            if cls._debug_mode and old_total_failures > 0:
+                logger.info(
+                    f"📉 [累积失败衰减-间接] 群{chat_key[-8:]} - "
+                    f"间接成功，累积失败次数: {old_total_failures} → {state['total_proactive_failures']} (衰减-{decay_amount})"
+                )
+            # 非调试模式：只在累积失败较多时输出（>=5次）
+            elif not cls._debug_mode and old_total_failures >= 5:
+                logger.info(
+                    f"📉 [累积失败衰减-间接] 群{chat_key[-8:]} - "
+                    f"间接成功，累积失败: {old_total_failures} → {state['total_proactive_failures']}"
+                )
+
+            state["consecutive_successes"] = state.get("consecutive_successes", 0) + 1
+            state["proactive_attempts_count"] = 0
+            state["last_proactive_content"] = None  # 🆕 清空上一次主动对话内容
+            state["last_proactive_success_time"] = time.time()
+            logger.info(
+                f"✅ [主动对话成功-间接] 群{chat_key[-8:]} - 主动对话激活互动，AI决定回复"
+            )
+        elif has_attempts:
+            # 场景2: 有连续尝试计数（说明之前有主动对话失败），AI决定回复，重置连续尝试
+            state["consecutive_failures"] = 0
+
+            # 🆕 渐进式衰减：AI决定回复时也减少累积失败次数
+            old_total_failures = state.get("total_proactive_failures", 0)
+            decay_amount = config.get("complaint_decay_on_success", 2)
+            state["total_proactive_failures"] = max(
+                0, old_total_failures - decay_amount
+            )
+
+            # 调试模式：总是输出衰减信息
+            if cls._debug_mode and old_total_failures > 0:
+                logger.info(
+                    f"📉 [累积失败衰减-决定回复] 群{chat_key[-8:]} - "
+                    f"AI决定回复，累积失败次数: {old_total_failures} → {state['total_proactive_failures']} (衰减-{decay_amount})"
+                )
+            # 非调试模式：只在累积失败较多时输出（>=5次）
+            elif not cls._debug_mode and old_total_failures >= 5:
+                logger.info(
+                    f"📉 [累积失败衰减-决定回复] 群{chat_key[-8:]} - "
+                    f"AI决定回复，累积失败: {old_total_failures} → {state['total_proactive_failures']}"
+                )
+
+            state["proactive_attempts_count"] = 0
+            state["last_proactive_content"] = None  # 🆕 清空上一次主动对话内容
+            state["last_proactive_success_time"] = time.time()
+            if cls._debug_mode:
+                logger.debug(
+                    f"[主动对话] 群{chat_key[-8:]} - AI决定回复，重置连续尝试计数"
+                )
+
+    # ========== 🆕 v1.2.0 互动评分系统 ==========
+
+    @classmethod
+    def update_interaction_score(
+        cls, chat_key: str, delta: int, reason: str, config: dict
+    ):
+        """
+        更新互动评分
+
+        Args:
+            chat_key: 群聊唯一标识
+            delta: 评分变化量（正数加分，负数扣分）
+            reason: 变化原因
+            config: 插件配置
+        """
+        if not config.get("enable_adaptive_proactive", True):
+            return
+
+        state = cls.get_chat_state(chat_key)
+        old_score = state.get("interaction_score", 50)
+
+        # 计算新评分（限制在10-100范围内）
+        min_score = config.get("interaction_score_min", 10)
+        max_score = config.get("interaction_score_max", 100)
+        new_score = max(min_score, min(max_score, old_score + delta))
+
+        state["interaction_score"] = new_score
+
+        # 记录评分变化
+        # 调试模式：输出所有变化
+        if cls._debug_mode:
+            logger.info(
+                f"📊 [互动评分] 群{chat_key[-8:]} - {reason}: {old_score}分 → {new_score}分 (变化{delta:+d})"
+            )
+        # 非调试模式：只输出关键变化
+        else:
+            # 1. 跨越重要阈值（30分、50分、70分）
+            thresholds = [30, 50, 70]
+            crossed_threshold = False
+            for threshold in thresholds:
+                if (old_score < threshold <= new_score) or (
+                    old_score > threshold >= new_score
+                ):
+                    crossed_threshold = True
+                    break
+
+            # 2. 极端分数（<=20 或 >=90）
+            is_extreme = new_score <= 20 or new_score >= 90
+
+            # 3. 大幅变化（±15分以上）
+            is_large_change = abs(delta) >= 15
+
+            # 满足任一条件就输出
+            if crossed_threshold or is_extreme or is_large_change:
+                logger.info(
+                    f"📊 [互动评分] 群{chat_key[-8:]} - {reason}: {old_score}分 → {new_score}分 (变化{delta:+d})"
+                )
+
+        # 重要变化立即保存
+        if abs(delta) >= 10:
+            cls._save_states_to_disk()
+
+    @classmethod
+    def record_proactive_success(
+        cls,
+        chat_key: str,
+        config: dict,
+        is_quick: bool = False,
+        is_multi_user: bool = False,
+    ):
+        """
+        记录主动对话成功（有人回复）（仅在未记录过时执行）
+
+        Args:
+            chat_key: 群聊唯一标识
+            config: 插件配置
+            is_quick: 是否为快速回复（30秒内）
+            is_multi_user: 是否为多人回复
+        """
+        if not config.get("enable_adaptive_proactive", True):
+            return
+
+        state = cls.get_chat_state(chat_key)
+
+        # 🆕 v1.2.0: 防止重复记录成功
+        if state.get("proactive_outcome_recorded", False):
+            if cls._debug_mode:
+                logger.debug(
+                    f"[主动对话成功] 群{chat_key[-8:]} - 本次主动对话已记录过结果，跳过"
+                )
+            return
+
+        # 🆕 v1.2.0: 关闭主动对话检测（已判定成功）
+        state["proactive_active"] = False
+        # 标记为已记录
+        state["proactive_outcome_recorded"] = True
+
+        current_time = time.time()
+
+        # 🔧 修复：重置失败相关计数（成功后处理）
+        state["consecutive_failures"] = 0  # 重置连续失败次数
+
+        # 🆕 渐进式衰减：成功时减少累积失败次数，而不是完全清零
+        # 这样更拟人化：偶尔的失败不会因为历史累积而触发过度的吐槽
+        old_total_failures = state.get("total_proactive_failures", 0)
+        decay_amount = config.get("complaint_decay_on_success", 2)
+        state["total_proactive_failures"] = max(0, old_total_failures - decay_amount)
+
+        # 调试模式：总是输出衰减信息
+        if cls._debug_mode and old_total_failures > 0:
+            logger.info(
+                f"📉 [累积失败衰减] 群{chat_key[-8:]} - "
+                f"成功互动，累积失败次数: {old_total_failures} → {state['total_proactive_failures']} (衰减-{decay_amount})"
+            )
+        # 非调试模式：只在累积失败较多时输出（>=5次）
+        elif not cls._debug_mode and old_total_failures >= 5:
+            logger.info(
+                f"📉 [累积失败衰减] 群{chat_key[-8:]} - "
+                f"成功互动，累积失败: {old_total_failures} → {state['total_proactive_failures']}"
+            )
+
+        state["consecutive_successes"] = state.get("consecutive_successes", 0) + 1
+        state["last_proactive_success_time"] = current_time  # 记录上次成功时间
+
+        # 更新成功统计
+        state["successful_interactions"] = state.get("successful_interactions", 0) + 1
+        state["last_success_time"] = current_time
+
+        # 基础加分
+        base_increase = config.get("score_increase_on_success", 15)
+        total_increase = base_increase
+
+        reason_parts = ["有人回复"]
+
+        # 快速回复额外加分
+        if is_quick:
+            quick_bonus = config.get("score_quick_reply_bonus", 5)
+            total_increase += quick_bonus
+            state["quick_reply_count"] = state.get("quick_reply_count", 0) + 1
+            reason_parts.append("快速回复+{0}".format(quick_bonus))
+
+        # 多人回复额外加分
+        if is_multi_user:
+            multi_bonus = config.get("score_multi_user_bonus", 10)
+            total_increase += multi_bonus
+            state["multi_user_reply_count"] = state.get("multi_user_reply_count", 0) + 1
+            reason_parts.append("多人接话+{0}".format(multi_bonus))
+
+        # 连续成功加速奖励
+        if state["consecutive_successes"] >= 3:
+            streak_bonus = config.get("score_streak_bonus", 5)
+            total_increase += streak_bonus
+            reason_parts.append("连续成功+{0}".format(streak_bonus))
+
+        # 从低分复苏奖励
+        current_score = state.get("interaction_score", 50)
+        if current_score < 30:
+            revival_bonus = config.get("score_revival_bonus", 20)
+            total_increase += revival_bonus
+            reason_parts.append("低分复苏+{0}".format(revival_bonus))
+
+        reason = "，".join(reason_parts)
+        cls.update_interaction_score(chat_key, total_increase, reason, config)
+
+    @classmethod
+    def record_proactive_failure_for_score(cls, chat_key: str, config: dict):
+        """
+        记录主动对话失败（无人回复）- 仅用于评分系统
+
+        Args:
+            chat_key: 群聊唯一标识
+            config: 插件配置
+        """
+        if not config.get("enable_adaptive_proactive", True):
+            return
+
+        state = cls.get_chat_state(chat_key)
+
+        # 更新失败统计
+        state["failed_interactions"] = state.get("failed_interactions", 0) + 1
+        state["consecutive_successes"] = 0  # 重置连续成功
+
+        # 获取当前评分（用于判断是否需要警告）
+        current_score = state.get("interaction_score", 50)
+
+        # 扣分
+        decrease = config.get("score_decrease_on_fail", 8)
+        cls.update_interaction_score(chat_key, -decrease, "无人回复", config)
+
+        # 非调试模式：在评分较低时给出警告
+        if not cls._debug_mode and current_score <= 30:
+            logger.warning(
+                f"⚠️ [主动对话] 群{chat_key[-8:]} - 互动评分较低({current_score}分)，主动对话响应不佳"
+            )
+
+    @classmethod
+    def apply_score_decay(cls, config: dict):
+        """
+        应用评分衰减（每24小时执行一次）
+
+        Args:
+            config: 插件配置
+        """
+        if not config.get("enable_adaptive_proactive", True):
+            return
+
+        current_time = time.time()
+        decay_interval = 24 * 3600  # 24小时
+        decay_rate = config.get("interaction_score_decay_rate", 2)
+
+        # 统计衰减情况（非调试模式用于汇总）
+        decay_count = 0
+
+        for chat_key, state in cls._chat_states.items():
+            last_decay = state.get("last_score_decay_time", 0)
+
+            # 检查是否需要衰减
+            if current_time - last_decay >= decay_interval:
+                # 检查是否有新互动
+                last_success = state.get("last_success_time", 0)
+                last_user_msg = state.get("last_user_message_time", 0)
+
+                # 如果24小时内没有任何互动，进行衰减
+                if current_time - max(last_success, last_user_msg) >= decay_interval:
+                    cls.update_interaction_score(
+                        chat_key, -decay_rate, "24小时无互动自然衰减", config
+                    )
+                    decay_count += 1
+
+                # 更新衰减时间
+                state["last_score_decay_time"] = current_time
+
+        # 非调试模式：输出汇总信息（只在有衰减时）
+        if not cls._debug_mode and decay_count > 0:
+            logger.info(f"📉 [评分衰减] 已对 {decay_count} 个群聊执行24小时无互动衰减")
+
+    @classmethod
+    def apply_complaint_decay(cls, config: dict):
+        """
+        🆕 应用累积失败次数的时间自然衰减
+
+        改进逻辑：
+        1. 长时间没有新的失败，失败次数会逐渐减少
+        2. 防止历史累积的失败次数影响当前的吐槽判断
+        3. 更拟人化：偶尔的失败不会因为历史原因触发过度吐槽
+
+        Args:
+            config: 插件配置
+        """
+        if not config.get("enable_complaint_system", True):
+            return
+
+        current_time = time.time()
+        # 每隔一段时间检查一次（默认6小时）
+        check_interval = config.get("complaint_decay_check_interval", 6 * 3600)
+        # 多久没有新失败就开始衰减（默认12小时）
+        no_failure_threshold = config.get(
+            "complaint_decay_no_failure_threshold", 12 * 3600
         )
+        # 每次衰减的数量（默认1次）
+        decay_amount = config.get("complaint_decay_amount", 1)
+
+        for chat_key, state in cls._chat_states.items():
+            try:
+                last_check = state.get("last_complaint_decay_time", 0)
+
+                # 检查是否需要衰减
+                if current_time - last_check >= check_interval:
+                    total_failures = state.get("total_proactive_failures", 0)
+
+                    # 只有累积失败次数 > 0 才需要检查衰减
+                    if total_failures > 0:
+                        # 获取上次失败时间（通过 last_proactive_time 判断）
+                        last_proactive_time = state.get("last_proactive_time", 0)
+                        last_success_time = state.get("last_proactive_success_time", 0)
+
+                        # 如果距离上次主动对话失败已经很久了（通过判断是否有新的成功）
+                        # 或者长时间没有任何主动对话活动
+                        time_since_last_activity = current_time - max(
+                            last_proactive_time, last_success_time
+                        )
+
+                        if time_since_last_activity >= no_failure_threshold:
+                            # 执行衰减
+                            old_failures = total_failures
+                            new_failures = max(0, total_failures - decay_amount)
+                            state["total_proactive_failures"] = new_failures
+
+                            if cls._debug_mode and new_failures != old_failures:
+                                logger.info(
+                                    f"🕐 [时间自然衰减] 群{chat_key[-8:]} - "
+                                    f"{time_since_last_activity / 3600:.1f}小时无主动对话活动，"
+                                    f"累积失败次数: {old_failures} → {new_failures} (衰减-{decay_amount})"
+                                )
+
+                    # 更新检查时间
+                    state["last_complaint_decay_time"] = current_time
+
+            except Exception as e:
+                logger.error(
+                    f"[时间自然衰减] 处理群{chat_key[-8:]}时出错: {e}", exc_info=True
+                )
+
+    @classmethod
+    def get_score_level(cls, score: int) -> str:
+        """
+        根据评分获取等级描述
+
+        Args:
+            score: 互动评分
+
+        Returns:
+            等级描述
+        """
+        if score >= 80:
+            return "热情群🔥"
+        elif score >= 60:
+            return "友好群😊"
+        elif score >= 40:
+            return "冷淡群😐"
+        elif score >= 20:
+            return "冰冷群🥶"
+        else:
+            return "死群💀"
+
+    @classmethod
+    def calculate_adaptive_parameters(cls, chat_key: str, config: dict) -> dict:
+        """
+        根据互动评分计算自适应参数
+
+        ⚠️ 重要：此方法返回的是调整系数，不是最终值
+        最终概率计算顺序：基础概率 → 时间段调整 → 自适应系数
+
+        Args:
+            chat_key: 群聊唯一标识
+            config: 插件配置
+
+        Returns:
+            包含调整参数和系数的字典
+        """
+        if not config.get("enable_adaptive_proactive", True):
+            # 未启用自适应，返回原始参数（系数为1.0，不调整）
+            return {
+                "prob_multiplier": 1.0,  # 概率系数
+                "silence_threshold": config.get("proactive_silence_threshold", 600),
+                "cooldown_duration": config.get("proactive_cooldown_duration", 1800),
+                "max_failures": config.get("proactive_max_consecutive_failures", 2),
+                "score": 50,
+                "level": "友好群😊",
+            }
+
+        state = cls.get_chat_state(chat_key)
+        score = state.get("interaction_score", 50)
+
+        # 基础参数（非概率参数直接计算）
+        base_silence = config.get("proactive_silence_threshold", 600)
+        base_cooldown = config.get("proactive_cooldown_duration", 1800)
+        base_max_failures = config.get("proactive_max_consecutive_failures", 2)
+
+        # 根据评分等级计算调整系数
+        if score >= 80:  # 🔥 热情群
+            prob_multiplier = 1.8
+            silence_multiplier = 0.5
+            cooldown_multiplier = 0.33
+            max_failures = min(3, base_max_failures + 1)
+        elif score >= 60:  # 😊 友好群
+            prob_multiplier = 1.0
+            silence_multiplier = 1.0
+            cooldown_multiplier = 1.0
+            max_failures = base_max_failures
+        elif score >= 40:  # 😐 冷淡群
+            prob_multiplier = 0.5
+            silence_multiplier = 1.5
+            cooldown_multiplier = 1.5
+            max_failures = max(1, base_max_failures - 1)
+        elif score >= 20:  # 🥶 冰冷群
+            prob_multiplier = 0.25
+            silence_multiplier = 3.0
+            cooldown_multiplier = 2.0
+            max_failures = 1
+        else:  # 💀 死群
+            prob_multiplier = 0.1
+            silence_multiplier = 6.0
+            cooldown_multiplier = 4.0
+            max_failures = 1
+
+        return {
+            "prob_multiplier": prob_multiplier,  # ⚠️ 返回系数，不是最终概率
+            "silence_threshold": int(base_silence * silence_multiplier),
+            "cooldown_duration": int(base_cooldown * cooldown_multiplier),
+            "max_failures": max_failures,
+            "score": score,
+            "level": cls.get_score_level(score),
+        }
+
+    @classmethod
+    def generate_complaint_prompt(cls, chat_key: str, config: dict) -> dict:
+        """
+        🔧 修复：生成吐槽提示词（根据累积失败次数和评分）
+
+        改进：
+        1. 使用 total_proactive_failures（累积失败次数）而不是 consecutive_failures
+        2. 返回字典结构，包含是否触发、吐槽等级、提示词等信息
+        3. 如果触发吐槽，应该优先发送吐槽信息，而不是普通主动对话+吐槽提示词
+
+        Args:
+            chat_key: 群聊唯一标识
+            config: 插件配置
+
+        Returns:
+            字典结构：
+            {
+                "triggered": bool,  # 是否触发吐槽
+                "level": str,  # 吐槽等级（"light"/"medium"/"strong"）
+                "prompt": str,  # 吐槽提示词
+                "priority": bool,  # 是否优先发送吐槽（True=只发吐槽，False=普通对话+吐槽提示）
+                "failure_count": int  # 当前累积失败次数
+            }
+        """
+        # 默认返回值（未触发）
+        default_result = {
+            "triggered": False,
+            "level": "none",
+            "prompt": "",
+            "priority": False,
+            "failure_count": 0,
+        }
+
+        if not config.get("enable_complaint_system", True):
+            return default_result
+
+        state = cls.get_chat_state(chat_key)
+        # 🔧 修复：使用累积失败次数而不是连续失败次数
+        total_failures = state.get("total_proactive_failures", 0)
+        score = state.get("interaction_score", 50)
+
+        # 根据配置的阈值决定是否触发吐槽
+        complaint_threshold = config.get("complaint_trigger_threshold", 2)
+        if total_failures < complaint_threshold:
+            default_result["failure_count"] = total_failures
+            return default_result
+
+        # 获取各等级吐槽的触发次数和概率
+        light_threshold = config.get("complaint_level_light", 2)
+        medium_threshold = config.get("complaint_level_medium", 3)
+        strong_threshold = config.get("complaint_level_strong", 4)
+
+        # 按从高到低的顺序检查（优先匹配更严重的等级）
+        if total_failures >= strong_threshold:
+            # 强烈吐槽
+            complaint_prob = config.get("complaint_probability_strong", 0.8)
+            roll = random.random()
+            if (
+                roll > complaint_prob
+            ):  # 🔧 修复：roll > prob 表示不触发，roll <= prob 表示触发
+                default_result["failure_count"] = total_failures
+                return default_result
+            return {
+                "triggered": True,
+                "level": "strong",
+                "prompt": (
+                    "\n\n【情绪提示】你已经连续主动说了{0}次话都没人回复，感觉有些受伤。"
+                    "你可以用比较明显的方式表达委屈或无奈，"
+                    "比如说要安静一段时间、反思自己、或者干脆潜水。"
+                    "保持你的性格特点，可以幽默自嘲，也可以稍微委屈，但不要过于消极。"
+                ).format(total_failures),
+                "priority": True,  # 🔧 修复：强烈吐槽优先发送
+                "failure_count": total_failures,
+            }
+        elif total_failures >= medium_threshold:
+            # 明显吐槽
+            complaint_prob = config.get("complaint_probability_medium", 0.6)
+            roll = random.random()
+            if (
+                roll > complaint_prob
+            ):  # 🔧 修复：roll > prob 表示不触发，roll <= prob 表示触发
+                default_result["failure_count"] = total_failures
+                return default_result
+            return {
+                "triggered": True,
+                "level": "medium",
+                "prompt": (
+                    "\n\n【情绪提示】你已经连续主动说了{0}次话都没人理会。"
+                    "你可以用稍微明显一点的方式表达出被忽视的感觉，"
+                    "但仍然保持幽默感，不要太过严肃或负面。"
+                    "可以用玩笑的方式吐槽一下，或者假装不在意地换个新话题。"
+                ).format(total_failures),
+                "priority": True,  # 🔧 修复：明显吐槽优先发送
+                "failure_count": total_failures,
+            }
+        elif total_failures >= light_threshold:
+            # 轻度吐槽
+            complaint_prob = config.get("complaint_probability_light", 0.3)
+            roll = random.random()
+            if (
+                roll > complaint_prob
+            ):  # 🔧 修复：roll > prob 表示不触发，roll <= prob 表示触发
+                default_result["failure_count"] = total_failures
+                return default_result
+            return {
+                "triggered": True,
+                "level": "light",
+                "prompt": (
+                    "\n\n【情绪提示】你刚才主动说了一句话，但似乎没什么人回应。"
+                    "你可以用轻松幽默的语气稍微提一下这件事，或者自然地换个话题。"
+                    "不要过度戏剧化，保持轻松自然的感觉。"
+                ),
+                "priority": True,  # 🔧 修复：轻度吐槽也优先发送
+                "failure_count": total_failures,
+            }
+        else:
+            # 未达到任何吐槽等级的阈值
+            default_result["failure_count"] = total_failures
+            return default_result
 
     # ========== 检查逻辑 ==========
 
@@ -550,8 +1422,12 @@ class ProactiveChatManager:
             remaining = int(state["cooldown_until"] - current_time)
             return False, f"在冷却期（剩余{remaining}秒）"
 
-        # 2. 检查沉默时长
-        silence_threshold = config.get("proactive_silence_threshold", 600)
+        # 🆕 v1.2.0 获取自适应参数（根据互动评分调整）
+        adaptive_params = cls.calculate_adaptive_parameters(chat_key, config)
+        silence_threshold = adaptive_params["silence_threshold"]
+        prob_multiplier = adaptive_params["prob_multiplier"]
+
+        # 2. 检查沉默时长（使用自适应阈值）
         silence_duration = int(current_time - state["last_bot_reply_time"])
 
         if silence_duration < silence_threshold:
@@ -573,19 +1449,39 @@ class ProactiveChatManager:
                 f"[主动对话检查] 群{chat_key[-8:]} - 已禁用用户活跃度检查，允许无用户消息时触发"
             )
 
-        # 4. 计算有效概率（考虑时间段）
+        # 4. 计算有效概率（正确的顺序）
+        # 步骤1: 获取用户配置的基础概率
         base_prob = config.get("proactive_probability", 0.3)
-        effective_prob = cls.calculate_effective_probability(base_prob, config)
 
-        if effective_prob <= 0:
+        # 步骤2: 应用时间段调整（包括禁用时段检查，最高优先级）
+        time_adjusted_prob = cls.calculate_effective_probability(base_prob, config)
+
+        # 如果禁用时段返回0，直接返回
+        if time_adjusted_prob <= 0:
             return False, "当前时段已禁用"
+
+        # 步骤3: 应用自适应系数
+        final_prob = time_adjusted_prob * prob_multiplier
+
+        # 限制在合理范围内（最高90%）
+        final_prob = min(0.9, max(0.0, final_prob))
+
+        # 记录调试信息
+        if cls._debug_mode and config.get("enable_adaptive_proactive", True):
+            logger.info(
+                f"📊 [自适应参数] 群{chat_key[-8:]} - {adaptive_params['level']} "
+                f"评分={adaptive_params['score']}, "
+                f"基础概率={base_prob:.2f} → 时间调整={time_adjusted_prob:.2f} → "
+                f"自适应系数×{prob_multiplier:.2f} → 最终概率={final_prob:.2f}, "
+                f"沉默阈值={silence_threshold}秒, 最大尝试={adaptive_params['max_failures']}次"
+            )
 
         # 5. 概率判断
         roll = random.random()
-        if roll >= effective_prob:
-            return False, f"概率判断失败（{roll:.2f} >= {effective_prob:.2f}）"
+        if roll >= final_prob:
+            return False, f"概率判断失败（{roll:.2f} >= {final_prob:.2f}）"
 
-        return True, f"触发成功（{roll:.2f} < {effective_prob:.2f}）"
+        return True, f"触发成功（{roll:.2f} < {final_prob:.2f}）"
 
     @classmethod
     def check_user_activity(cls, chat_key: str, config: dict) -> bool:
@@ -686,19 +1582,21 @@ class ProactiveChatManager:
 
                 if transition_factor == 0.0:
                     # 在禁用时段内，直接返回0（完全禁用）
-                    logger.info(
-                        "[主动对话-时间控制] 在禁用时段内，概率=0（禁用时段优先级最高）"
-                    )
+                    if cls._debug_mode:
+                        logger.info(
+                            "[主动对话-时间控制] 在禁用时段内，概率=0（禁用时段优先级最高）"
+                        )
                     return 0.0
                 elif transition_factor < 1.0:
                     # 在过渡期，先应用过渡系数
                     original_prob = base_prob
                     base_prob = base_prob * transition_factor
-                    logger.info(
-                        f"[主动对话-时间控制] 在禁用时段过渡期，"
-                        f"原始概率={original_prob:.2f}, 过渡系数={transition_factor:.2f}, "
-                        f"调整后概率={base_prob:.2f}"
-                    )
+                    if cls._debug_mode:
+                        logger.info(
+                            f"[主动对话-时间控制] 在禁用时段过渡期，"
+                            f"原始概率={original_prob:.2f}, 过渡系数={transition_factor:.2f}, "
+                            f"调整后概率={base_prob:.2f}"
+                        )
             except Exception as e:
                 logger.error(f"[时间段计算-禁用时段] 发生错误: {e}", exc_info=True)
 
@@ -736,7 +1634,7 @@ class ProactiveChatManager:
                     # 确保在0-1范围内
                     base_prob = max(0.0, min(1.0, base_prob))
 
-                    if time_factor != 1.0:
+                    if time_factor != 1.0 and cls._debug_mode:
                         logger.info(
                             f"[主动对话-动态时间调整] "
                             f"原始概率={original_prob:.2f}, 时间系数={time_factor:.2f}, "
@@ -879,6 +1777,12 @@ class ProactiveChatManager:
         if cls._debug_mode:
             logger.info("🔄 [主动对话后台任务] 已启动")
 
+        # 🆕 v1.2.0 定期保存和衰减计时器
+        last_save_time = time.time()
+        last_decay_time = time.time()
+        save_interval = 300  # 每5分钟保存一次
+        decay_interval = 3600  # 每小时检查一次衰减
+
         while cls._is_running:
             try:
                 # 获取当前配置
@@ -893,17 +1797,35 @@ class ProactiveChatManager:
                 # 等待下次检查
                 await asyncio.sleep(check_interval)
 
+                # 🆕 v1.2.0 定期保存状态（防止崩溃丢失数据）
+                current_time = time.time()
+                if current_time - last_save_time >= save_interval:
+                    cls._save_states_to_disk()
+                    last_save_time = current_time
+                    if cls._debug_mode:
+                        logger.info("💾 [自动保存] 主动对话状态已保存")
+
+                # 🆕 v1.2.0 定期执行评分衰减
+                if current_time - last_decay_time >= decay_interval:
+                    cls.apply_score_decay(config)
+                    cls.apply_complaint_decay(
+                        config
+                    )  # 🆕 同时执行累积失败次数的时间衰减
+                    last_decay_time = current_time
+
                 # 遍历所有群聊状态
                 for chat_key in list(cls._chat_states.keys()):
                     try:
                         current_time = time.time()
-                        # 获取配置
-                        max_failures = config.get(
-                            "proactive_max_consecutive_failures", 2
+
+                        # 🆕 v1.2.0 获取自适应参数（根据互动评分调整）
+                        adaptive_params = cls.calculate_adaptive_parameters(
+                            chat_key, config
                         )
-                        cooldown_duration = config.get(
-                            "proactive_cooldown_duration", 1800
-                        )
+                        max_failures = adaptive_params["max_failures"]
+                        cooldown_duration = adaptive_params["cooldown_duration"]
+
+                        # 固定参数
                         boost_duration = config.get(
                             "proactive_temp_boost_duration", 120
                         )
@@ -938,7 +1860,7 @@ class ProactiveChatManager:
                             if last_pt > 0 and current_time >= last_pt + boost_duration:
                                 # 视为一次失败尝试
                                 cls.record_proactive_failure(
-                                    chat_key, max_failures, cooldown_duration
+                                    chat_key, max_failures, cooldown_duration, config
                                 )
 
                                 # 若进入冷却，跳过本轮
@@ -999,9 +1921,10 @@ class ProactiveChatManager:
                             if "概率判断失败" in reason:
                                 state = cls.get_chat_state(chat_key)
                                 state["last_bot_reply_time"] = time.time()
-                                logger.info(
-                                    f"[主动对话检查] 群{chat_key[-8:]} - {reason}，重置计时器"
-                                )
+                                if cls._debug_mode:
+                                    logger.info(
+                                        f"[主动对话检查] 群{chat_key[-8:]} - {reason}，重置计时器"
+                                    )
 
                     except Exception as e:
                         logger.error(
@@ -1037,10 +1960,11 @@ class ProactiveChatManager:
         try:
             logger.info(f"✨ [主动对话触发] 群{chat_key[-8:]} - 开始生成主动话题")
 
-            # 从 chat_key 解析出 platform_name、chat_id 和聊天类型
+            # 从 chat_key 解析出基本信息
+            # 注意：chat_key中存储的是platform_name（平台类型），但我们需要platform_id（适配器实例ID）
             is_private = False
             chat_id = None
-            platform_name = None
+            platform_name_from_key = None  # 从chat_key解析出的平台名称（可能是类型名）
 
             if ":" in chat_key:
                 parts = chat_key.split(":")
@@ -1049,7 +1973,7 @@ class ProactiveChatManager:
                         f"[主动对话触发] 无效的 chat_key (冒号格式): {chat_key}"
                     )
                     return
-                platform_name = parts[0]
+                platform_name_from_key = parts[0]
                 is_private = parts[1] == "private"
                 chat_id = parts[2]
             elif "_" in chat_key:
@@ -1061,7 +1985,7 @@ class ProactiveChatManager:
                     return
                 # chat_key 格式: {platform_name}_{chat_type}_{chat_id}
                 # 例如: aiocqhttp_group_879646332
-                platform_name = parts[0]  # 提取平台名称
+                platform_name_from_key = parts[0]  # 提取平台名称（类型）
                 chat_type = parts[-2]
                 chat_id = parts[-1]
                 is_private = chat_type == "private"
@@ -1069,14 +1993,56 @@ class ProactiveChatManager:
                 logger.error(f"[主动对话触发] 无法识别的 chat_key 格式: {chat_key}")
                 return
 
-            # 如果无法从chat_key中提取platform_name，尝试从历史消息中获取
-            if not platform_name:
+            # ⚠️ 关键修复：获取正确的platform_id用于构造unified_msg_origin
+            # unified_msg_origin需要使用platform_id（适配器实例ID），而不是platform_name（平台类型）
+            platform_id = None
+
+            # 方法1：尝试从context的platform_manager中查找匹配的platform_id
+            try:
+                if hasattr(context, "platform_manager") and hasattr(
+                    context.platform_manager, "platform_insts"
+                ):
+                    # 优先尝试找到与platform_name_from_key匹配的平台实例
+                    for platform_inst in context.platform_manager.platform_insts:
+                        try:
+                            meta = platform_inst.meta()
+                            # 检查平台类型名称是否匹配
+                            if meta.name == platform_name_from_key:
+                                platform_id = meta.id
+                                if cls._debug_mode:
+                                    logger.info(
+                                        f"[主动对话触发] 找到匹配的platform_id: {platform_id} (name: {meta.name})"
+                                    )
+                                break
+                        except Exception:
+                            continue
+
+                    # 如果没找到匹配的，使用第一个平台实例
+                    if not platform_id and context.platform_manager.platform_insts:
+                        platform_id = (
+                            context.platform_manager.platform_insts[0].meta().id
+                        )
+                        logger.warning(
+                            f"[主动对话触发] 未找到匹配的平台，使用第一个: {platform_id}"
+                        )
+            except Exception as e:
+                logger.warning(f"[主动对话触发] 从context获取platform_id失败: {e}")
+
+            # 方法2：如果context方法失败，尝试从历史消息中获取
+            if not platform_id:
                 try:
                     from .context_manager import ContextManager
 
-                    # 尝试获取历史消息来提取platform_name
+                    # 如果platform_name_from_key为空，说明chat_key格式有问题，跳过此群
+                    if not platform_name_from_key:
+                        logger.error(
+                            f"[主动对话触发] chat_key解析失败，无法获取平台名称: {chat_key}"
+                        )
+                        return
+
+                    # 使用platform_name_from_key尝试获取历史消息
                     temp_history = ContextManager.get_history_messages_by_params(
-                        platform_name="aiocqhttp",  # 临时使用默认值
+                        platform_name=platform_name_from_key,
                         is_private=is_private,
                         chat_id=chat_id,
                         max_messages=1,
@@ -1088,41 +2054,24 @@ class ProactiveChatManager:
                             and hasattr(msg, "platform_name")
                             and msg.platform_name
                         ):
-                            platform_name = msg.platform_name
+                            platform_id = msg.platform_name
                             if cls._debug_mode:
                                 logger.info(
-                                    f"[主动对话触发] 从历史消息中获取platform_name: {platform_name}"
+                                    f"[主动对话触发] 从历史消息中获取platform_id: {platform_id}"
                                 )
                 except Exception as e:
-                    logger.warning(
-                        f"[主动对话触发] 从历史消息获取platform_name失败: {e}"
-                    )
+                    logger.warning(f"[主动对话触发] 从历史消息获取platform_id失败: {e}")
 
-            # 如果仍然没有platform_name，尝试从context中获取
-            if not platform_name:
-                try:
-                    # 尝试从context的platform_manager中获取第一个平台
-                    if hasattr(context, "platform_manager") and hasattr(
-                        context.platform_manager, "platform_insts"
-                    ):
-                        if context.platform_manager.platform_insts:
-                            platform_name = (
-                                context.platform_manager.platform_insts[0].meta().id
-                            )
-                            if cls._debug_mode:
-                                logger.info(
-                                    f"[主动对话触发] 从context获取platform_name: {platform_name}"
-                                )
-                except Exception as e:
-                    logger.warning(
-                        f"[主动对话触发] 从context获取platform_name失败: {e}"
+            # 兜底：如果还是获取不到，使用从chat_key解析的值
+            if not platform_id:
+                if not platform_name_from_key:
+                    logger.error(
+                        f"[主动对话触发] 无法获取platform_id，跳过群 {chat_key}"
                     )
-
-            # 如果还是没有platform_name，使用默认值
-            if not platform_name:
-                platform_name = "aiocqhttp"
+                    return
+                platform_id = platform_name_from_key
                 logger.warning(
-                    f"[主动对话触发] 无法确定platform_name，使用默认值: {platform_name}"
+                    f"[主动对话触发] 使用从chat_key解析的platform_id: {platform_id} (可能需要验证准确性)"
                 )
 
             # 复用主流程的逻辑，但简化版本
@@ -1130,7 +2079,7 @@ class ProactiveChatManager:
                 context=context,
                 config=config,
                 plugin_instance=plugin_instance,
-                platform_name=platform_name,  # 使用提取的platform_name
+                platform_id=platform_id,  # 🔧 修复：传递platform_id而不是platform_name
                 is_private=is_private,
                 chat_id=chat_id,
                 chat_key=chat_key,
@@ -1147,7 +2096,7 @@ class ProactiveChatManager:
         context: Context,
         config: dict,
         plugin_instance,
-        platform_name: str,
+        platform_id: str,  # 🔧 修复：使用platform_id而不是platform_name
         is_private: bool,
         chat_id: str,
         chat_key: str,
@@ -1179,35 +2128,410 @@ class ProactiveChatManager:
             if debug_mode:
                 logger.info("[主动对话-步骤1] 构造系统提示词")
 
-            proactive_prompt = config.get(
-                "proactive_prompt",
-                "你已经有一段时间没有说话了。现在你可以主动发起一个新话题，或者针对之前的对话内容做一些自然的延伸。"
-                "要求：\n"
-                "1. 话题要自然，不要生硬\n"
-                "2. 可以是问题、分享、或感想\n"
-                '3. 避免"在吗"、"干嘛呢"等低质量开场\n'
-                "4. 最好与之前的聊天内容或群氛围相关\n"
-                "5. 保持你的人设和语气\n"
-                '6. 不要提及这是你"主动发起的"或任何元数据信息\n'
-                '7. 不要说"根据提示"、"刚才的提示"等元叙述内容\n'
-                "8. 就像是你自己突然想到了什么话题，很自然地说出来",
-            )
+            # 构造详细的主动对话提示词（参考 reply_handler.py 的风格）
+            default_proactive_prompt = """
+你已经有一段时间没有说话了。现在你可以主动发起一个新话题，或者针对之前的对话内容做一些自然的延伸。
 
-            proactive_system_prompt = f"[🎯主动发起新话题]\n{proactive_prompt}"
+核心要求：
+1. **话题要自然** - 不要生硬，就像是你自己突然想到了什么话题
+2. **可以是问题、分享、或感想** - 展现你的个性和想法
+3. **避免低质量开场** - 禁止"在吗"、"干嘛呢"、"有人吗"等无聊开场
+4. **与上下文相关** - 最好与之前的聊天内容或群氛围相关
+5. **保持你的人设和语气** - 遵循你的性格设定
+
+⚠️ **【关于背景信息和记忆】重要说明** ⚠️：
+- 如果在背景信息中看到记忆内容（=== 背景信息 === 部分）：
+  * **这些记忆是你对这个群/人的长期认知**，已经在你的脑海中
+  * **不要机械地陈述记忆内容** - 禁止说"XXX已经确认为我的XXX"、"我们之间是XXX关系"
+  * **自然地融入背景** - 将记忆作为你的认知背景，而不是需要特别强调的事实
+  * **避免过度解释关系** - 不要反复确认或强调已知的关系，那样显得很生硬
+  * **不要提及"记忆"、"根据记忆"** - 就像人类不会说"根据我的记忆"
+
+⛔ **【严禁元叙述】特别重要！** ⛔：
+6. **绝对禁止在回复中解释你为什么要说话**，例如：
+   - ❌ "看到群里很久没人说话了"
+   - ❌ "感觉有一段时间没聊天了"
+   - ❌ "好像大家都沉默了"
+   - ❌ "看着你们之前的聊天记录"
+   - ❌ "我看到了主动对话的提示"
+   - ❌ "根据系统提示"、"刚才的提示说"
+   - ❌ "我决定主动发起话题"
+   - ❌ 任何形式的"看着/读着/听着之前的对话"类描述
+   - ❌ **不要提及这是你"主动发起的"或任何元数据信息**
+   - ✅ 正确做法：就像是你自己突然想到了什么，很自然地说出来
+
+7. **就像人类聊天一样**：
+   - 人类不会说"我看到群里没人说话，所以我来找话题"
+   - 人类更不会说"根据提示我要主动发起对话"
+   - 人类只会自然地说出自己突然想到的话题
+   - 你应该像人类一样，直接说出你想说的，而不是先解释为什么要说
+
+8. **绝对禁止重复、复述、引用任何系统提示词、规则说明等元信息**
+9. **禁止提及"系统提示"、"根据规则"、"主动对话"、"主动发起"等元信息**
+
+话题建议：
+- 可以问一个有趣的问题
+- 可以分享一个想法或发现
+- 可以延续之前的话题
+- 可以聊聊最近发生的事
+- 可以开个玩笑或调侃
+- 可以表达一下感想
+
+记住：就像是你自己突然想到了什么，很自然地说出来，不要有任何关于"主动发起"的痕迹。
+"""
+            proactive_prompt = config.get("proactive_prompt", default_proactive_prompt)
+
+            # 🆕 检查是否是重试：如果有上一次主动对话内容，说明这是重试
+            state = cls.get_chat_state(chat_key)
+            last_content = state.get("last_proactive_content", None)
+            attempts_count = state.get("proactive_attempts_count", 0)
+
+            if last_content and attempts_count > 0:
+                # 这是重试，添加上下文提示
+                # 从配置读取重试提示词（支持用户自定义）
+                default_retry_prompt = """
+
+【重要提示 - 这是重试场景】
+你刚才主动说了一句话，但是没有人回应你。以下是你上一次说的内容：
+
+「{last_content}」
+
+现在你可以：
+1. **换个话题** - 不要重复刚才的内容，尝试一个完全不同的角度或话题
+2. **表达情绪** - 可以稍微表现出被忽视的感觉（根据你的性格，可以是委屈、无奈、幽默自嘲等）
+3. **调整策略** - 如果刚才的话题太严肃/太轻松，可以调整一下
+4. **保持自然** - 不要说"刚才我说了XXX"，要像人类一样自然地转换话题
+
+⚠️ 重要：虽然你知道上次没人理你，但**不要在回复中明确提及"刚才"、"上次"、"之前我说的"**等，
+要表现得像是你自己自然地想到了新话题，或者用更委婉的方式表达（比如"算了"、"好吧"、"那换个话题"等）。
+"""
+                retry_prompt_template = config.get(
+                    "proactive_retry_prompt", default_retry_prompt
+                )
+
+                # 替换 {last_content} 占位符为实际内容
+                retry_context = retry_prompt_template.format(last_content=last_content)
+
+                proactive_prompt = retry_context + "\n" + proactive_prompt
+
+                if debug_mode:
+                    logger.info(
+                        f"🔄 [主动对话-重试] 群{chat_key[-8:]} - "
+                        f"检测到重试（尝试{attempts_count}次），已注入上次内容提示"
+                    )
+
+            # 🔧 修复：检查吐槽系统（如果满足条件）
+            complaint_info = cls.generate_complaint_prompt(chat_key, config)
+            is_complaint_triggered = complaint_info.get("triggered", False)
+            complaint_priority = complaint_info.get("priority", False)
+            complaint_prompt_text = complaint_info.get("prompt", "")
+            complaint_level = complaint_info.get("level", "none")
+
+            # 🔧 修复：根据吐槽优先级决定提示词
+            if is_complaint_triggered and complaint_priority:
+                # 吐槽优先：只使用吐槽提示词，不使用普通主动对话提示词
+                proactive_prompt = complaint_prompt_text
+                logger.info(
+                    f"🤐 [主动对话-吐槽触发] 群{chat_key[-8:]} - "
+                    f"累积失败{complaint_info.get('failure_count', 0)}次，"
+                    f"触发{complaint_level}级吐槽，优先发送吐槽信息"
+                )
+            elif is_complaint_triggered and complaint_prompt_text:
+                # 普通模式：附加吐槽提示词到主动对话提示词
+                proactive_prompt += complaint_prompt_text
+                logger.info(
+                    f"💬 [主动对话-吐槽附加] 群{chat_key[-8:]} - "
+                    f"累积失败{complaint_info.get('failure_count', 0)}次，"
+                    f"触发{complaint_level}级吐槽，附加到主动对话"
+                )
+
+            # 🔧 优化：根据是否是重试场景，使用不同的标记
+            if last_content and attempts_count > 0:
+                # 重试场景：使用"再次尝试"标记而不是"主动发起新话题"
+                proactive_system_prompt = f"[🔄再次尝试对话]\n{proactive_prompt}"
+            else:
+                # 首次主动对话：使用原有的"主动发起新话题"标记
+                proactive_system_prompt = f"[🎯主动发起新话题]\n{proactive_prompt}"
+
             proactive_system_prompt = MessageCleaner.mark_proactive_chat_message(
                 proactive_system_prompt
             )
+
+            # ========== 步骤1.5: 🆕 注入注意力用户信息（如果启用）==========
+            if config.get("enable_attention_mechanism", False) and config.get(
+                "proactive_use_attention", True
+            ):
+                if debug_mode:
+                    logger.info("[主动对话-步骤1.5] 注入注意力用户信息")
+
+                try:
+                    # 🆕 步骤1.5.1: 概率判断是否参考注意力排行榜
+                    reference_probability = config.get(
+                        "proactive_attention_reference_probability", 0.7
+                    )
+                    should_reference = random.random() < reference_probability
+
+                    if debug_mode or cls._debug_mode:
+                        logger.info(
+                            f"[主动对话-注意力] 参考排行榜概率: {reference_probability:.2f}, "
+                            f"本次{'参考' if should_reference else '不参考'}排行榜"
+                        )
+
+                    if not should_reference:
+                        # 不参考排行榜，跳过注意力用户注入
+                        if debug_mode or cls._debug_mode:
+                            logger.info(
+                                "[主动对话-注意力] 本次主动对话不参考注意力排行榜，"
+                                "将进行随机话题"
+                            )
+                    else:
+                        # 导入注意力管理器
+                        from .attention_manager import AttentionManager
+
+                        # 🆕 步骤1.5.2: 解析权重配置并获取候选用户
+                        # 解析权重字符串配置
+                        weight_str = config.get(
+                            "proactive_attention_rank_weights", "1:55,2:25,3:12,4:8"
+                        )
+                        rank_weights = cls.parse_rank_weights(weight_str)
+
+                        # 根据权重配置数量决定候选池大小
+                        # 例如配置了6个权重，就获取前6名用户
+                        candidate_pool_size = len(rank_weights)
+
+                        # 获取高注意力用户列表（数量由权重配置决定）
+                        attention_platform_name = platform_id
+                        top_users = await AttentionManager.get_top_attention_users(
+                            platform_name=attention_platform_name,
+                            is_private=is_private,
+                            chat_id=chat_id,
+                            limit=candidate_pool_size,
+                        )
+
+                    if should_reference and top_users and len(top_users) > 0:
+                        # 🆕 步骤1.5.3: 智能选择要关注的用户（基于权重）
+                        state = cls.get_chat_state(chat_key)
+
+                        # 获取最多选择数量
+                        max_selected = config.get(
+                            "proactive_attention_max_selected_users", 2
+                        )
+
+                        # 准备候选用户列表（取实际用户数和权重配置数的较小值）
+                        candidates = top_users[: min(len(rank_weights), len(top_users))]
+
+                        # 如果实际候选数小于权重配置数，只使用对应数量的权重
+                        effective_weights = rank_weights[: len(candidates)]
+
+                        if debug_mode or cls._debug_mode:
+                            logger.info(
+                                f"[主动对话-注意力] 候选池: {len(candidates)}个用户, "
+                                f"权重分布: {', '.join([f'第{i + 1}名={w:.1%}' for i, w in enumerate(effective_weights)])}"
+                            )
+
+                        # 使用加权随机选择用户
+                        selected_users = []
+                        available_indices = list(range(len(candidates)))
+
+                        # 根据权重进行加权随机选择
+                        for _ in range(min(max_selected, len(candidates))):
+                            if not available_indices:
+                                break
+
+                            # 获取当前可用候选的权重
+                            current_weights = [
+                                effective_weights[i] for i in available_indices
+                            ]
+
+                            # 加权随机选择（random.choices内部会自动归一化）
+                            selected_idx = random.choices(
+                                available_indices, weights=current_weights, k=1
+                            )[0]
+
+                            selected_users.append(
+                                {
+                                    "user": candidates[selected_idx],
+                                    "rank": selected_idx + 1,
+                                }
+                            )
+
+                            # 从可用列表中移除已选择的
+                            available_indices.remove(selected_idx)
+
+                        # 按排名排序选中的用户（第1名在前）
+                        selected_users.sort(key=lambda x: x["rank"])
+
+                        if debug_mode or cls._debug_mode:
+                            selected_names = [
+                                f"{s['user'].get('user_name', '未知')}(第{s['rank']}名)"
+                                for s in selected_users
+                            ]
+                            logger.info(
+                                f"[主动对话-注意力] 智能选择了 {len(selected_users)} 个用户: "
+                                f"{', '.join(selected_names)}"
+                            )
+
+                        # 检查是否有上一次互动的用户记录
+                        last_attention_user = state.get("last_attention_user_id", None)
+                        last_attention_user_name = state.get(
+                            "last_attention_user_name", None
+                        )
+
+                        # 判断是否要特别关注上一次的用户（概率控制）
+                        focus_last_user = False
+                        focus_probability = config.get(
+                            "proactive_focus_last_user_probability", 0.6
+                        )
+                        if (
+                            last_attention_user
+                            and last_attention_user_name
+                            and random.random() < focus_probability
+                        ):
+                            # 检查上次用户是否在本次选中的用户中
+                            if any(
+                                s["user"].get("user_id") == last_attention_user
+                                for s in selected_users
+                            ):
+                                focus_last_user = True
+                                if debug_mode or cls._debug_mode:
+                                    logger.info(
+                                        f"[主动对话-注意力] 概率命中({focus_probability:.2f})，"
+                                        f"将特别关注上一次的用户: {last_attention_user_name}"
+                                    )
+
+                        # 记录当前最高注意力用户（用于下次参考）
+                        # 注意：这里记录的是实际选中的最高排名用户
+                        if selected_users and selected_users[0]["user"].get("user_id"):
+                            state["last_attention_user_id"] = selected_users[0][
+                                "user"
+                            ].get("user_id")
+                            state["last_attention_user_name"] = selected_users[0][
+                                "user"
+                            ].get("user_name", "未知")
+
+                        # 🆕 步骤1.5.4: 构造智能化的注意力用户提示词
+                        attention_info = "\n\n=== 💡 当前对话焦点 ===\n"
+                        if len(selected_users) == 1:
+                            attention_info += "你可以适当关注以下用户：\n\n"
+                        else:
+                            attention_info += (
+                                "你可以适当关注以下用户（按注意力从高到低）：\n\n"
+                            )
+
+                        # 构造选中用户的信息列表
+                        for idx, selected in enumerate(selected_users, 1):
+                            user = selected["user"]
+                            rank = selected["rank"]
+                            user_name = user.get("user_name", "未知用户")
+                            user_id = user.get("user_id", "")
+                            attention_score = user.get("attention_score", 0.0)
+                            emotion = user.get("emotion", 0.0)
+
+                            # 判断是否是上一次关注的用户
+                            is_last_user = (
+                                focus_last_user and user_id == last_attention_user
+                            )
+
+                            # 构造情绪描述
+                            if emotion > 0.6:
+                                emotion_desc = "（情绪：非常积极✨）"
+                            elif emotion > 0.3:
+                                emotion_desc = "（情绪：较为积极😊）"
+                            elif emotion > -0.3:
+                                emotion_desc = "（情绪：中性😐）"
+                            elif emotion > -0.6:
+                                emotion_desc = "（情绪：有些消极😔）"
+                            else:
+                                emotion_desc = "（情绪：较为消极😞）"
+
+                            # 添加用户信息
+                            prefix = f"{idx}. "
+                            if is_last_user:
+                                prefix = f"{idx}. ⭐ "
+                                attention_info += (
+                                    f"{prefix}**{user_name}** "
+                                    f"[注意力: {attention_score:.2f}] {emotion_desc}\n"
+                                )
+                                attention_info += (
+                                    f"   💬 提示：这是你上一次主要互动的对象，"
+                                    f"可以考虑延续之前的话题或关心ta的近况\n\n"
+                                )
+                            else:
+                                attention_info += (
+                                    f"{prefix}{user_name} "
+                                    f"[注意力: {attention_score:.2f}] {emotion_desc}\n"
+                                )
+
+                        attention_info += (
+                            "\n💡 **使用建议**：\n"
+                            "- 你可以根据上述用户的注意力和情绪，选择合适的话题方向\n"
+                            "- 但这只是参考，不一定非要提到他们，也可以聊其他话题\n"
+                            "- 如果选择关注这些用户，请自然地融入话题，不要显得刻意\n"
+                            '- ⚠️ 重要：不要在回复中提及"注意力"、"情绪"、"排行榜"等元信息\n'
+                        )
+
+                        # 将注意力信息添加到提示词中
+                        proactive_system_prompt += attention_info
+
+                        if debug_mode or cls._debug_mode:
+                            logger.info(
+                                f"[主动对话-注意力] 已智能选择并注入 {len(selected_users)} 个用户信息"
+                            )
+                            if focus_last_user:
+                                logger.info(
+                                    f"[主动对话-注意力] 特别标记了上一次互动用户: {last_attention_user_name}"
+                                )
+                    else:
+                        if debug_mode or cls._debug_mode:
+                            logger.info("[主动对话-注意力] 没有找到高注意力用户")
+
+                except Exception as e:
+                    logger.warning(
+                        f"[主动对话-注意力] 注入注意力用户信息失败: {e}",
+                        exc_info=True,
+                    )
 
             # ========== 步骤2: 提取历史上下文（从官方对话系统提取，与主动回复逻辑一致）==========
             if debug_mode:
                 logger.info("[主动对话-步骤2] 提取历史上下文（从官方对话系统）")
 
             max_context = config.get("max_context_messages", 20)
+
+            # 🔧 配置矫正：处理异常值
+            if isinstance(max_context, int) and max_context < -1:
+                logger.warning(
+                    f"⚠️ [主动对话-配置矫正] max_context_messages 配置值 {max_context} 小于 -1，已矫正为 -1（不限制）"
+                )
+                max_context = -1
+
+            if debug_mode:
+                context_limit_desc = (
+                    "不限制"
+                    if max_context == -1
+                    else "不获取历史"
+                    if max_context == 0
+                    else f"限制为 {max_context} 条"
+                )
+                logger.info(
+                    f"[主动对话] 上下文限制: {max_context} ({context_limit_desc})"
+                )
+
             history_messages = []
 
-            # 构造unified_msg_origin（用于从官方对话系统提取历史）
+            # 🔧 修复：使用platform_id构造unified_msg_origin，与普通流程保持一致
+            # unified_msg_origin格式：{platform_id}:{MessageType}:{chat_id}
+            # 这与AstrBot框架中event.unified_msg_origin的格式完全一致
             message_type_str = "FriendMessage" if is_private else "GroupMessage"
-            unified_msg_origin = f"{platform_name}:{message_type_str}:{chat_id}"
+            unified_msg_origin = f"{platform_id}:{message_type_str}:{chat_id}"
+
+            # 关键日志：显示构造的 unified_msg_origin，用于排查记忆获取问题
+            logger.info(
+                f"[主动对话] 构造会话标识:\n"
+                f"  unified_msg_origin: {unified_msg_origin}\n"
+                f"  platform_id: {platform_id}\n"
+                f"  chat_id: {chat_id}\n"
+                f"  is_private: {is_private}"
+            )
 
             # 尝试从官方对话系统提取历史（与主动回复逻辑一致）
             try:
@@ -1230,9 +2554,21 @@ class ProactiveChatManager:
                                         f"[主动对话] 从官方对话系统获取到 {len(official_history)} 条历史记录"
                                     )
 
+                                # 🔧 修复：提前获取真实的bot ID，用于正确标记AI的历史回复
+                                # 这样在格式化上下文时才能识别出哪些是bot的回复，添加"禁止重复"标记
+                                real_bot_id = ""
+                                try:
+                                    if hasattr(context, "get_self_id"):
+                                        real_bot_id = context.get_self_id()
+                                except:
+                                    pass
+                                # 如果无法获取真实ID，使用"bot"作为后备方案
+                                if not real_bot_id:
+                                    real_bot_id = "bot"
+
                                 # 将官方历史转换为AstrBotMessage格式（用于格式化上下文）
                                 # 只提取用户消息和AI回复，转换为AstrBotMessage对象
-                                for msg in official_history:
+                                for idx, msg in enumerate(official_history):
                                     if (
                                         isinstance(msg, dict)
                                         and "role" in msg
@@ -1240,10 +2576,20 @@ class ProactiveChatManager:
                                     ):
                                         msg_obj = AstrBotMessage()
                                         msg_obj.message_str = msg["content"]
-                                        msg_obj.platform_name = platform_name
-                                        msg_obj.timestamp = int(
-                                            time.time()
-                                        )  # 使用当前时间
+                                        msg_obj.platform_name = (
+                                            platform_id  # 🔧 修复：使用platform_id
+                                        )
+                                        # 🔧 修复：尝试从消息中获取真实时间戳，如果没有则使用索引模拟时间顺序
+                                        # 这样可以保证消息的时间顺序，避免所有消息都是当前时间
+                                        if "timestamp" in msg and msg["timestamp"]:
+                                            msg_obj.timestamp = msg["timestamp"]
+                                        else:
+                                            # 使用当前时间减去索引，确保时间递增
+                                            msg_obj.timestamp = (
+                                                int(time.time())
+                                                - (len(official_history) - idx) * 60
+                                            )
+
                                         msg_obj.type = (
                                             MessageType.GROUP_MESSAGE
                                             if not is_private
@@ -1256,9 +2602,13 @@ class ProactiveChatManager:
                                         # 根据role设置发送者信息
                                         if msg["role"] == "assistant":
                                             # AI的回复
+                                            # 🔧 修复：使用真实的bot ID，而不是硬编码"bot"
+                                            # 这样在format_context_for_ai中才能正确识别bot的回复，添加"禁止重复"标记
                                             msg_obj.sender = MessageMember(
-                                                user_id="bot", nickname="AI"
+                                                user_id=real_bot_id, nickname="AI"
                                             )
+                                            # 同时设置self_id，确保能被正确识别
+                                            msg_obj.self_id = real_bot_id
                                         else:
                                             # 用户消息
                                             msg_obj.sender = MessageMember(
@@ -1287,23 +2637,28 @@ class ProactiveChatManager:
                     logger.debug(f"[主动对话] 错误详情: {e}", exc_info=True)
 
             # 如果从官方对话系统获取不到历史，尝试从自定义存储获取（作为fallback）
-            if not history_messages:
+            # 但如果配置为0，则不获取任何历史
+            if not history_messages and not (
+                isinstance(max_context, int) and max_context == 0
+            ):
                 if debug_mode:
                     logger.info("[主动对话] 官方对话系统无历史，尝试从自定义存储获取")
 
-                # 先尝试使用传入的platform_name获取历史消息
+                # 🔧 修复：使用platform_id获取历史消息
+                # 注意：ContextManager存储时使用的是platform_name，但实际可能是platform_id
+                # 🔧 修复：先获取所有历史消息（max_messages=-1），稍后统一应用限制
                 history_messages = ContextManager.get_history_messages_by_params(
-                    platform_name=platform_name,
+                    platform_name=platform_id,  # 先尝试使用platform_id
                     is_private=is_private,
                     chat_id=chat_id,
-                    max_messages=max_context,
+                    max_messages=-1,  # 先获取所有历史，稍后统一应用限制
                 )
 
                 # 如果获取不到历史消息，尝试从所有可用平台中查找
                 if not history_messages or len(history_messages) == 0:
                     if debug_mode:
                         logger.info(
-                            f"[主动对话] 使用platform_name={platform_name}未获取到历史消息，尝试从所有平台查找"
+                            f"[主动对话] 使用platform_id={platform_id}未获取到历史消息，尝试从所有平台查找"
                         )
 
                     # 获取所有可用平台
@@ -1313,18 +2668,18 @@ class ProactiveChatManager:
                             context.platform_manager, "platform_insts"
                         ):
                             for platform in context.platform_manager.platform_insts:
-                                platform_id = (
+                                platform_inst_id = (  # 🔧 修复：使用不同的变量名避免覆盖函数参数
                                     platform.meta().id
                                     if hasattr(platform, "meta")
                                     else "unknown"
                                 )
-                                available_platforms.append(platform_id)
+                                available_platforms.append(platform_inst_id)
                     except Exception as e:
                         logger.warning(f"[主动对话] 获取可用平台列表失败: {e}")
 
                     # 尝试每个平台获取历史消息
                     for test_platform in available_platforms:
-                        if test_platform == platform_name:
+                        if test_platform == platform_id:
                             continue  # 已经试过了
                         try:
                             test_history = (
@@ -1332,7 +2687,7 @@ class ProactiveChatManager:
                                     platform_name=test_platform,
                                     is_private=is_private,
                                     chat_id=chat_id,
-                                    max_messages=max_context,
+                                    max_messages=-1,  # 先获取所有历史，稍后统一应用限制
                                 )
                             )
                             if test_history and len(test_history) > 0:
@@ -1433,7 +2788,9 @@ class ProactiveChatManager:
                         try:
                             msg_obj = AstrBotMessage()
                             msg_obj.message_str = cached_msg.get("content", "")
-                            msg_obj.platform_name = platform_name
+                            msg_obj.platform_name = (
+                                platform_id  # 🔧 修复：使用platform_id
+                            )
                             msg_obj.timestamp = cached_msg.get("timestamp", time.time())
                             msg_obj.type = (
                                 MessageType.GROUP_MESSAGE
@@ -1470,13 +2827,53 @@ class ProactiveChatManager:
                         f"[主动对话] 已合并 {len(cached_messages_to_merge)} 条缓存消息（来自主动回复模式）"
                     )
 
-            # 应用上下文限制
+            # 🆕 优化：合并后按时间戳排序（确保时间线连续）
+            # 这样可以形成完整的时间线，避免上下文跳跃
+            if history_messages and len(history_messages) > 0:
+                # 按时间戳排序
+                history_messages.sort(
+                    key=lambda msg: msg.timestamp
+                    if hasattr(msg, "timestamp") and msg.timestamp
+                    else 0
+                )
+                if debug_mode:
+                    logger.info(
+                        f"[主动对话] 已按时间戳排序，形成完整上下文时间线（共 {len(history_messages)} 条）"
+                    )
+
+            # 🆕 优化：应用上下文限制 - 智能截断策略
+            # 🔧 修复：统一按时间排序后删除最早的消息，不区分缓存或历史
+            # 这样可以保证时间连续性，避免上下文割裂
+            # max_context == -1: 不限制，保留所有
+            # max_context == 0: 已在获取阶段处理，这里不应有消息
+            # max_context > 0: 限制为指定数量
             if (
                 history_messages
+                and isinstance(max_context, int)
                 and max_context > 0
                 and len(history_messages) > max_context
             ):
+                before_cnt = len(history_messages)
+
+                # 统一策略：删除最早的消息，只保留最新的 max_context 条
+                # 由于消息已经按时间戳排序，直接截取末尾即可
                 history_messages = history_messages[-max_context:]
+
+                if debug_mode:
+                    removed_cnt = before_cnt - len(history_messages)
+                    logger.info(
+                        f"[主动对话] 智能截断: {before_cnt} -> {len(history_messages)} "
+                        f"(按时间顺序删除最早的 {removed_cnt} 条消息，保留最新的 {max_context} 条)"
+                    )
+            elif debug_mode:
+                if isinstance(max_context, int) and max_context == -1:
+                    logger.info("[主动对话] 配置为-1，不限制上下文数量")
+                elif isinstance(max_context, int) and max_context == 0:
+                    logger.info("[主动对话] 配置为0，无历史上下文")
+                else:
+                    logger.info(
+                        f"[主动对话] 未触发上下文限制（当前 {len(history_messages) if history_messages else 0} 条，限制 {max_context} 条）"
+                    )
 
             # ========== 步骤3: 格式化上下文 ==========
             if debug_mode:
@@ -1502,7 +2899,11 @@ class ProactiveChatManager:
 
             # 格式化上下文（复用主流程）
             formatted_context = await ContextManager.format_context_for_ai(
-                history_messages, proactive_system_prompt, self_id or ""
+                history_messages,
+                proactive_system_prompt,
+                self_id or "",
+                include_timestamp=config.get("include_timestamp", True),
+                include_sender_info=config.get("include_sender_info", True),
             )
 
             if debug_mode:
@@ -1516,11 +2917,40 @@ class ProactiveChatManager:
                 if debug_mode:
                     logger.info("[主动对话-步骤4.1] 注入记忆内容")
 
-                # 注意：主动对话没有 event，需要构造一个模拟的 event 或直接调用
-                # 这里我们直接调用 MemoryInjector，但需要 event 对象
-                # 暂时跳过记忆注入（主动对话场景下记忆可能不太重要）
-                if debug_mode:
-                    logger.info("[主动对话] 跳过记忆注入（主动对话场景）")
+                # 获取记忆插件配置
+                memory_mode = config.get("memory_plugin_mode", "legacy")
+                livingmemory_top_k = config.get("livingmemory_top_k", 5)
+
+                # 使用新的 get_memories_by_session 方法获取记忆（无需 event 对象）
+                if MemoryInjector.check_memory_plugin_available(
+                    context, mode=memory_mode
+                ):
+                    try:
+                        memories = await MemoryInjector.get_memories_by_session(
+                            context,
+                            unified_msg_origin,
+                            mode=memory_mode,
+                            top_k=livingmemory_top_k,
+                        )
+                        if memories:
+                            old_len = len(final_message)
+                            final_message = MemoryInjector.inject_memories_to_message(
+                                final_message, memories
+                            )
+                            if debug_mode:
+                                logger.info(
+                                    f"[主动对话] 已注入记忆内容({memory_mode}模式)，长度增加: {len(final_message) - old_len} 字符"
+                                )
+                        else:
+                            if debug_mode:
+                                logger.info("[主动对话] 未获取到记忆内容")
+                    except Exception as e:
+                        logger.warning(f"[主动对话] 注入记忆失败: {e}", exc_info=True)
+                else:
+                    if debug_mode:
+                        logger.info(
+                            f"[主动对话] 记忆插件({memory_mode}模式)不可用，跳过记忆注入"
+                        )
 
             # 注入工具信息
             if config.get("enable_tools_reminder", False):
@@ -1558,33 +2988,50 @@ class ProactiveChatManager:
             # 获取工具管理器
             func_tools_mgr = context.get_llm_tool_manager()
 
-            # 获取人格的 system_prompt（复用 ReplyHandler 的逻辑）
+            # 🔧 修复：直接使用 persona_manager 获取最新人格配置，支持多会话和实时更新
             system_prompt = ""
-            contexts = []
+            begin_dialogs_text = ""
             try:
-                if hasattr(context, "provider_manager") and hasattr(
-                    context.provider_manager, "personas"
-                ):
-                    default_persona = None
-                    if hasattr(context.provider_manager, "selected_default_persona"):
-                        default_persona = (
-                            context.provider_manager.selected_default_persona
+                # 直接调用 get_default_persona_v3() 获取最新人格配置
+                # 这样可以确保：1. 每次都获取最新配置 2. 支持不同会话使用不同人格
+                default_persona = await context.persona_manager.get_default_persona_v3(
+                    unified_msg_origin
+                )
+
+                system_prompt = default_persona.get("prompt", "")
+
+                # 获取begin_dialogs并转换为文本
+                begin_dialogs = default_persona.get("_begin_dialogs_processed", [])
+                if begin_dialogs:
+                    # 将begin_dialogs转换为文本格式，并入prompt
+                    dialog_parts = []
+                    for dialog in begin_dialogs:
+                        role = dialog.get("role", "user")
+                        content = dialog.get("content", "")
+                        if role == "user":
+                            dialog_parts.append(f"用户: {content}")
+                        elif role == "assistant":
+                            dialog_parts.append(f"AI: {content}")
+                    if dialog_parts:
+                        begin_dialogs_text = (
+                            "\n=== 预设对话 ===\n" + "\n".join(dialog_parts) + "\n\n"
                         )
 
-                    if default_persona:
-                        system_prompt = default_persona.get("prompt", "")
-                        begin_dialogs = default_persona.get(
-                            "_begin_dialogs_processed", []
+                if debug_mode:
+                    logger.info(
+                        f"✅ [主动对话-人格获取] 已获取当前人格配置，人格名: {default_persona.get('name', 'default')}, 长度: {len(system_prompt)} 字符"
+                    )
+                    if begin_dialogs_text:
+                        logger.info(
+                            f"[主动对话-人格获取] 已获取begin_dialogs并转换为文本，长度: {len(begin_dialogs_text)} 字符"
                         )
-                        if begin_dialogs:
-                            contexts.extend(begin_dialogs)
-                        if debug_mode:
-                            logger.info(
-                                f"[主动对话-人格获取] 已获取人格提示词，长度: {len(system_prompt)} 字符"
-                            )
             except Exception as e:
                 if debug_mode:
-                    logger.warning(f"[主动对话-人格获取] 获取失败: {e}")
+                    logger.warning(f"[主动对话-人格获取] 获取失败: {e}，使用空人格")
+
+            # 如果有begin_dialogs，将其添加到prompt开头
+            if begin_dialogs_text:
+                final_message = begin_dialogs_text + final_message
 
             # 获取 provider
             provider = context.get_using_provider()
@@ -1595,14 +3042,17 @@ class ProactiveChatManager:
             logger.info(f"✨ [主动对话生成] 正在调用AI生成主动话题...")
 
             # 调用AI生成（复用 provider 的接口）
+            # 【关键修复】不使用contexts参数，避免Agent模式下上下文丢失
+            _generation_start = time.time()
             completion_result = await provider.text_chat(
                 prompt=final_message,
-                session_id=f"{platform_name}_{chat_id}",
-                contexts=contexts,
+                session_id=f"{platform_id}_{chat_id}",  # 🔧 修复：使用platform_id
+                contexts=[],  # 【修复】不使用contexts，避免Agent模式下冲突
                 system_prompt=system_prompt,
                 image_urls=None,
                 func_tool_manager=func_tools_mgr,
             )
+            _generation_elapsed = time.time() - _generation_start
 
             if not completion_result or not hasattr(
                 completion_result, "completion_text"
@@ -1611,6 +3061,16 @@ class ProactiveChatManager:
                 return
 
             generated_content = completion_result.completion_text.strip()
+
+            # 耗时监控和警告
+            timeout_warning = config.get("proactive_generation_timeout_warning", 15)
+            if _generation_elapsed > timeout_warning:
+                logger.warning(
+                    f"⚠️ [主动对话生成] AI生成耗时异常: {_generation_elapsed:.2f}秒（超过{timeout_warning}秒）"
+                )
+            elif debug_mode:
+                logger.info(f"[主动对话生成] AI生成耗时: {_generation_elapsed:.2f}秒")
+
             logger.info(
                 f"✅ [主动对话生成] AI成功生成内容，长度: {len(generated_content)} 字符"
             )
@@ -1628,21 +3088,9 @@ class ProactiveChatManager:
                 )
                 return
 
-            # 尝试从历史消息中获取正确的platform_name（如果之前获取的不对）
-            actual_platform_name = platform_name
-            if history_messages:
-                for msg in history_messages:
-                    if (
-                        isinstance(msg, AstrBotMessage)
-                        and hasattr(msg, "platform_name")
-                        and msg.platform_name
-                    ):
-                        actual_platform_name = msg.platform_name
-                        if debug_mode:
-                            logger.info(
-                                f"[主动对话发送] 从历史消息中获取platform_name: {actual_platform_name}"
-                            )
-                        break
+            # 🔧 修复：直接使用platform_id，不需要从历史消息中获取
+            # platform_id已经在上面通过platform_manager或历史消息获取到了
+            actual_platform_id = platform_id
 
             # 获取所有可用平台
             available_platforms = []
@@ -1651,18 +3099,18 @@ class ProactiveChatManager:
                     context.platform_manager, "platform_insts"
                 ):
                     for platform in context.platform_manager.platform_insts:
-                        platform_id = (
+                        platform_inst_id = (  # 🔧 修复：使用不同的变量名避免覆盖函数参数
                             platform.meta().id
                             if hasattr(platform, "meta")
                             else "unknown"
                         )
-                        available_platforms.append(platform_id)
+                        available_platforms.append(platform_inst_id)
             except Exception as e:
                 logger.warning(f"[主动对话发送] 获取可用平台列表失败: {e}")
 
-            # 构造session字符串
+            # 构造session字符串（使用platform_id）
             message_type = "FriendMessage" if is_private else "GroupMessage"
-            session_str = f"{actual_platform_name}:{message_type}:{chat_id}"
+            session_str = f"{actual_platform_id}:{message_type}:{chat_id}"
 
             if debug_mode:
                 logger.info(
@@ -1671,7 +3119,7 @@ class ProactiveChatManager:
 
             # 尝试发送消息
             success = False
-            used_platform = actual_platform_name
+            used_platform = actual_platform_id  # 🔧 修复：使用platform_id
 
             try:
                 success = await context.send_message(session_str, message_chain)
@@ -1684,17 +3132,17 @@ class ProactiveChatManager:
                 success = False
             except Exception as send_error:
                 logger.warning(
-                    f"[主动对话发送] 使用平台 {actual_platform_name} 发送失败: {send_error}，将尝试其他平台"
+                    f"[主动对话发送] 使用平台 {actual_platform_id} 发送失败: {send_error}，将尝试其他平台"
                 )
                 success = False
 
             # 如果发送失败，尝试所有可用平台
             if not success and available_platforms:
                 logger.info(
-                    f"[主动对话发送] 使用平台 {actual_platform_name} 发送失败，尝试其他可用平台: {available_platforms}"
+                    f"[主动对话发送] 使用平台 {actual_platform_id} 发送失败，尝试其他可用平台: {available_platforms}"
                 )
                 for test_platform in available_platforms:
-                    if test_platform == actual_platform_name:
+                    if test_platform == actual_platform_id:
                         continue  # 已经试过了
 
                     test_session_str = f"{test_platform}:{message_type}:{chat_id}"
@@ -1723,14 +3171,22 @@ class ProactiveChatManager:
             if not success:
                 logger.error(
                     f"[主动对话发送] 群{chat_key[-8:]} - 消息发送失败（所有平台都尝试失败）: "
-                    f"尝试的session={session_str}, 初始platform={actual_platform_name}, "
+                    f"尝试的session={session_str}, 初始platform_id={actual_platform_id}, "
                     f"is_private={is_private}, chat_id={chat_id}, "
                     f"可用平台={available_platforms if available_platforms else '无法获取'}"
                 )
                 return
             logger.info(
-                f"✅ [主动对话发送] 群{chat_key[-8:]} - 消息已发送 (platform={used_platform})"
+                f"✅ [主动对话发送] 群{chat_key[-8:]} - 消息已发送 (platform_id={used_platform})"
             )
+
+            # 🆕 保存本次主动对话内容，用于下次重试时提醒AI
+            state["last_proactive_content"] = generated_content
+            if debug_mode:
+                logger.info(
+                    f"💾 [主动对话-保存内容] 群{chat_key[-8:]} - "
+                    f"已保存本次主动对话内容（{len(generated_content)}字符），用于重试场景"
+                )
 
             # ========== 步骤7: 保存历史（使用官方对话系统，与主动回复逻辑一致）==========
             if debug_mode:
@@ -1746,6 +3202,11 @@ class ProactiveChatManager:
             if debug_mode:
                 logger.info(f"[主动对话保存] unified_msg_origin: {unified_msg_origin}")
 
+            # ⚠️ 【重要】保存的内容不包含记忆信息
+            # 这里保存的是原始的 proactive_system_prompt（步骤1构造的）
+            # 而不是注入了记忆的 final_message（步骤4-5使用的）
+            # 这样可以避免记忆内容污染官方对话历史，防止AI根据上下文反向污染记忆库
+
             # 清理系统提示词，但保留主动对话标记（让AI能理解这是主动发起的对话）
             # 系统提示词格式: "[🎯主动发起新话题]\n{实际提示内容}"
             # 使用 clean_message_preserve_proactive 保留主动对话标记，但清理其他系统提示词
@@ -1755,6 +3216,13 @@ class ProactiveChatManager:
             if not user_message:
                 # 如果清理后为空，使用原始提示词
                 user_message = proactive_system_prompt.strip()
+
+            # 确保记忆内容没有被意外混入
+            # user_message 应该只包含主动对话标记和基础提示，不包含 "=== 背景信息 ===" 部分
+            if "=== 背景信息 ===" in user_message:
+                logger.warning("[主动对话保存] 检测到记忆内容意外混入，正在清理...")
+                # 移除记忆部分
+                user_message = user_message.split("=== 背景信息 ===")[0].strip()
 
             # 清理AI回复（确保不包含系统提示词）
             bot_message = (
@@ -1985,7 +3453,20 @@ class ProactiveChatManager:
                 with open(state_file, "r", encoding="utf-8") as f:
                     cls._chat_states = json.load(f)
 
-                logger.info(f"[状态持久化] 已加载 {len(cls._chat_states)} 个群聊状态")
+                # 🔧 清理启动时的临时状态，防止误判为失败
+                # 只保留持久化的长期数据（如互动评分），清理连续尝试等临时状态
+                for chat_key, state in cls._chat_states.items():
+                    state["proactive_attempts_count"] = 0  # 清零连续尝试计数
+                    state["last_proactive_content"] = None  # 🆕 清空上一次主动对话内容
+                    state["proactive_active"] = False  # 重置活跃标记
+                    state["proactive_outcome_recorded"] = False  # 重置结果记录标记
+                    state["is_in_cooldown"] = False  # 清除冷却状态
+                    state["cooldown_until"] = 0
+                    # 保留 interaction_score, consecutive_failures, consecutive_successes 等持久化数据
+
+                logger.info(
+                    f"[状态持久化] 已加载 {len(cls._chat_states)} 个群聊状态（已清理临时状态）"
+                )
             else:
                 logger.info("[状态持久化] 未找到历史状态文件")
 

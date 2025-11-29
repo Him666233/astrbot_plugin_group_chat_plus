@@ -14,7 +14,7 @@
 - Enhanced: 多用户追踪 + 情绪系统 + 渐进式调整
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 import time
@@ -74,13 +74,25 @@ class AttentionManager:
     AUTO_SAVE_INTERVAL = 60  # 自动保存间隔（秒）
     _last_save_time: float = 0  # 上次保存时间
 
+    # 情感检测配置（v1.1.2新增）
+    ENABLE_EMOTION_DETECTION = False  # 是否启用情感检测
+    EMOTION_KEYWORDS: Dict[str, List[str]] = {}  # 情感关键词
+    ENABLE_NEGATION = True  # 是否启用否定词检测
+    NEGATION_WORDS: List[str] = []  # 否定词列表
+    NEGATION_CHECK_RANGE = 5  # 否定词检查范围
+    POSITIVE_EMOTION_BOOST = 0.1  # 正面消息额外提升
+    NEGATIVE_EMOTION_DECREASE = 0.15  # 负面消息降低幅度
+
     @staticmethod
-    def initialize(data_dir: Optional[str] = None) -> None:
+    def initialize(
+        data_dir: Optional[str] = None, config: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         初始化注意力管理器（设置存储路径并加载数据）
 
         Args:
             data_dir: 数据目录路径（由 StarTools.get_data_dir() 提供）
+            config: 插件配置字典（用于加载情感检测配置）
         """
         if AttentionManager._initialized:
             return
@@ -100,12 +112,77 @@ class AttentionManager:
 
         # 加载已有数据
         AttentionManager._load_from_disk()
+
+        # 加载情感检测配置
+        if config:
+            AttentionManager._load_emotion_detection_config(config)
+
         AttentionManager._initialized = True
 
         if DEBUG_MODE:
             logger.info(
                 f"[注意力机制] 持久化存储已初始化: {AttentionManager._storage_path}"
             )
+            if AttentionManager.ENABLE_EMOTION_DETECTION:
+                logger.info(
+                    f"[注意力机制] 情感检测已启用: 正面关键词{len(AttentionManager.EMOTION_KEYWORDS.get('正面', []))}个, "
+                    f"负面关键词{len(AttentionManager.EMOTION_KEYWORDS.get('负面', []))}个"
+                )
+
+    @staticmethod
+    def _load_emotion_detection_config(config: Dict[str, Any]) -> None:
+        """
+        加载情感检测配置
+
+        Args:
+            config: 插件配置字典
+        """
+        # 是否启用情感检测
+        AttentionManager.ENABLE_EMOTION_DETECTION = config.get(
+            "enable_attention_emotion_detection", False
+        )
+
+        if not AttentionManager.ENABLE_EMOTION_DETECTION:
+            return
+
+        # 加载情感关键词
+        emotion_keywords_raw = config.get("attention_emotion_keywords", "")
+        if isinstance(emotion_keywords_raw, str) and emotion_keywords_raw.strip():
+            try:
+                AttentionManager.EMOTION_KEYWORDS = json.loads(emotion_keywords_raw)
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"[注意力机制-情感检测] 关键词JSON解析失败: {e}，使用默认配置"
+                )
+                AttentionManager.EMOTION_KEYWORDS = {
+                    "正面": ["谢谢", "感谢", "太好了", "棒", "赞"],
+                    "负面": ["傻", "蠢", "笨", "垃圾", "讨厌"],
+                }
+        elif isinstance(emotion_keywords_raw, dict):
+            AttentionManager.EMOTION_KEYWORDS = emotion_keywords_raw
+        else:
+            AttentionManager.EMOTION_KEYWORDS = {
+                "正面": ["谢谢", "感谢", "太好了", "棒", "赞"],
+                "负面": ["傻", "蠢", "笨", "垃圾", "讨厌"],
+            }
+
+        # 否定词相关配置
+        AttentionManager.ENABLE_NEGATION = config.get("attention_enable_negation", True)
+        AttentionManager.NEGATION_WORDS = config.get(
+            "attention_negation_words",
+            ["不", "没", "别", "非", "无", "未", "勿", "莫", "不是", "没有"],
+        )
+        AttentionManager.NEGATION_CHECK_RANGE = config.get(
+            "attention_negation_check_range", 5
+        )
+
+        # 情绪变化幅度
+        AttentionManager.POSITIVE_EMOTION_BOOST = config.get(
+            "attention_positive_emotion_boost", 0.1
+        )
+        AttentionManager.NEGATIVE_EMOTION_DECREASE = config.get(
+            "attention_negative_emotion_decrease", 0.15
+        )
 
     @staticmethod
     def _load_from_disk() -> None:
@@ -255,6 +332,103 @@ class AttentionManager:
         profile["emotion"] *= emotion_decay
 
     @staticmethod
+    def _has_negation_before(text: str, keyword_pos: int) -> bool:
+        """
+        检查关键词前是否有否定词（照搬自MoodTracker）
+
+        Args:
+            text: 完整文本
+            keyword_pos: 关键词在文本中的位置
+
+        Returns:
+            如果检测到否定词返回True
+        """
+        # 提取关键词前的上下文
+        start_pos = max(0, keyword_pos - AttentionManager.NEGATION_CHECK_RANGE)
+        context_before = text[start_pos:keyword_pos]
+
+        # 检查是否包含否定词
+        for neg_word in AttentionManager.NEGATION_WORDS:
+            if neg_word in context_before:
+                return True
+
+        return False
+
+    @staticmethod
+    def _detect_emotion_from_message(message_text: str) -> Optional[str]:
+        """
+        从消息文本中检测情感（正面/负面/中性）
+
+        Args:
+            message_text: 要分析的消息文本
+
+        Returns:
+            "正面"、"负面" 或 None（中性）
+        """
+        if not AttentionManager.ENABLE_EMOTION_DETECTION:
+            return None
+
+        if not message_text:
+            return None
+
+        # 统计正面和负面关键词的得分
+        emotion_scores = {"正面": 0, "负面": 0}
+
+        for emotion_type, keywords in AttentionManager.EMOTION_KEYWORDS.items():
+            if emotion_type not in ["正面", "负面"]:
+                continue
+
+            score = 0
+            for keyword in keywords:
+                # 查找所有该关键词的出现位置
+                start = 0
+                while True:
+                    pos = message_text.find(keyword, start)
+                    if pos == -1:
+                        break
+
+                    # 如果启用了否定词检测，检查前面是否有否定词
+                    if (
+                        AttentionManager.ENABLE_NEGATION
+                        and AttentionManager._has_negation_before(message_text, pos)
+                    ):
+                        # 检测到否定词，跳过这个关键词
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"[注意力机制-情感检测] 检测到否定词，忽略关键词 '{keyword}' "
+                                f"(位置: {pos})"
+                            )
+                    else:
+                        # 没有否定词，正常计分
+                        score += 1
+
+                    start = pos + 1
+
+            if score > 0:
+                emotion_scores[emotion_type] = score
+
+        # 如果没有检测到任何情感关键词，返回None（中性）
+        if emotion_scores["正面"] == 0 and emotion_scores["负面"] == 0:
+            return None
+
+        # 返回得分最高的情感类型
+        if emotion_scores["正面"] > emotion_scores["负面"]:
+            if DEBUG_MODE:
+                logger.info(
+                    f"[注意力机制-情感检测] 检测到正面消息（正面:{emotion_scores['正面']}, 负面:{emotion_scores['负面']}）"
+                )
+            return "正面"
+        elif emotion_scores["负面"] > emotion_scores["正面"]:
+            if DEBUG_MODE:
+                logger.info(
+                    f"[注意力机制-情感检测] 检测到负面消息（正面:{emotion_scores['正面']}, 负面:{emotion_scores['负面']}）"
+                )
+            return "负面"
+        else:
+            # 得分相同，视为中性
+            return None
+
+    @staticmethod
     async def _cleanup_inactive_users(
         chat_users: Dict[str, Dict[str, Any]], current_time: float
     ) -> int:
@@ -307,6 +481,7 @@ class AttentionManager:
         user_id: str,
         user_name: str,
         message_preview: str = "",
+        message_text: str = "",
         attention_boost_step: float = 0.4,
         attention_decrease_step: float = 0.1,
         emotion_boost_step: float = 0.1,
@@ -323,6 +498,7 @@ class AttentionManager:
             user_id: 被回复的用户ID
             user_name: 被回复的用户名字
             message_preview: 消息预览（可选）
+            message_text: 消息原文（用于情感检测，v1.1.2新增）
             attention_boost_step: 被回复用户注意力增加幅度（默认0.4）
             attention_decrease_step: 其他用户注意力减少幅度（默认0.1）
             emotion_boost_step: 被回复用户情绪增加幅度（默认0.1）
@@ -355,8 +531,33 @@ class AttentionManager:
                 AttentionManager.MAX_ATTENTION_SCORE,
             )
 
-            # 轻微提升情绪（被回复是正面交互，使用配置的增加幅度）
-            profile["emotion"] = min(profile["emotion"] + emotion_boost_step, 1.0)
+            # 情感检测并调整情绪（v1.1.2新增）
+            detected_emotion = AttentionManager._detect_emotion_from_message(
+                message_text
+            )
+            old_emotion = profile["emotion"]
+
+            if detected_emotion == "正面":
+                # 正面消息：基础提升 + 额外奖励
+                emotion_change = (
+                    emotion_boost_step + AttentionManager.POSITIVE_EMOTION_BOOST
+                )
+                profile["emotion"] = min(profile["emotion"] + emotion_change, 1.0)
+                logger.info(
+                    f"[注意力机制-情感] 正面消息，情绪提升: {old_emotion:.2f} → {profile['emotion']:.2f} (+{emotion_change:.2f})"
+                )
+            elif detected_emotion == "负面":
+                # 负面消息：降低情绪值
+                profile["emotion"] = max(
+                    profile["emotion"] - AttentionManager.NEGATIVE_EMOTION_DECREASE,
+                    -1.0,
+                )
+                logger.info(
+                    f"[注意力机制-情感] 负面消息，情绪降低: {old_emotion:.2f} → {profile['emotion']:.2f} (-{AttentionManager.NEGATIVE_EMOTION_DECREASE:.2f})"
+                )
+            else:
+                # 中性消息或未启用检测：正常提升（默认行为）
+                profile["emotion"] = min(profile["emotion"] + emotion_boost_step, 1.0)
 
             # 更新其他信息
             profile["last_interaction"] = current_time
@@ -426,6 +627,7 @@ class AttentionManager:
         attention_decreased_probability: float,
         attention_duration: int,
         enabled: bool,
+        poke_boost_reference: float = 0.0,
     ) -> float:
         """
         根据注意力机制和情绪系统调整概率（增强版）
@@ -435,6 +637,7 @@ class AttentionManager:
         2. 对该用户的情绪态度（正面提升，负面降低）
         3. 时间衰减（自然衰减，不突然清零）
         4. 多用户平衡（综合考虑多个用户）
+        5. 戳一戳智能增值（根据情绪和注意力智能缩放）
 
         兼容性说明：
         - 保持与旧配置兼容（attention_increased/decreased_probability）
@@ -451,12 +654,27 @@ class AttentionManager:
             attention_decreased_probability: （兼容参数）最低降低概率
             attention_duration: （兼容参数）用于判断是否清理旧数据
             enabled: 是否启用注意力机制
+            poke_boost_reference: 戳一戳概率增值参考值（0表示无戳一戳）
 
         Returns:
             调整后的概率值（保证在 [0, 1] 范围内）
         """
-        # 如果未启用注意力机制，直接返回原概率（确保在有效范围）
+        # 如果未启用注意力机制，但有戳一戳增值，仍然应用增值
         if not enabled:
+            if poke_boost_reference > 0:
+                # 简化模式：无注意力机制时，使用固定的缩放因子
+                # 假设中性情绪（0.5）和中等注意力（0.5）
+                default_factor = 0.5
+                poke_boost = poke_boost_reference * default_factor
+                adjusted = current_probability + poke_boost
+                adjusted = max(0.0, min(0.98, adjusted))
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[戳一戳增值-简化模式] 用户 {current_user_name}: "
+                        f"概率 {current_probability:.2f} → {adjusted:.2f} "
+                        f"(增值={poke_boost:.2f}, 参考值={poke_boost_reference:.2f})"
+                    )
+                return adjusted
             return max(0.0, min(1.0, current_probability))
 
         # === 输入参数边界检测 ===
@@ -484,8 +702,20 @@ class AttentionManager:
         current_time = time.time()
 
         async with AttentionManager._lock:
-            # 如果该聊天没有记录，返回原概率
+            # 如果该聊天没有记录，检查是否有戳一戳增值
             if chat_key not in AttentionManager._attention_map:
+                if poke_boost_reference > 0:
+                    # 简化模式：无注意力档案时，使用固定的缩放因子
+                    default_factor = 0.5
+                    poke_boost = poke_boost_reference * default_factor
+                    adjusted = current_probability + poke_boost
+                    adjusted = max(0.0, min(0.98, adjusted))
+                    logger.info(
+                        f"[戳一戳增值-无档案] 会话 {chat_key} 用户 {current_user_name}: "
+                        f"概率 {current_probability:.2f} → {adjusted:.2f} "
+                        f"(增值={poke_boost:.2f}, 参考值={poke_boost_reference:.2f})"
+                    )
+                    return adjusted
                 if DEBUG_MODE:
                     logger.info(
                         f"[注意力机制-增强] 会话 {chat_key} - 无历史记录，使用原概率"
@@ -494,8 +724,20 @@ class AttentionManager:
 
             chat_users = AttentionManager._attention_map[chat_key]
 
-            # 如果当前用户没有档案，返回原概率
+            # 如果当前用户没有档案，检查是否有戳一戳增值
             if current_user_id not in chat_users:
+                if poke_boost_reference > 0:
+                    # 简化模式：无用户档案时，使用固定的缩放因子
+                    default_factor = 0.5
+                    poke_boost = poke_boost_reference * default_factor
+                    adjusted = current_probability + poke_boost
+                    adjusted = max(0.0, min(0.98, adjusted))
+                    logger.info(
+                        f"[戳一戳增值-无档案] 用户 {current_user_name}: "
+                        f"概率 {current_probability:.2f} → {adjusted:.2f} "
+                        f"(增值={poke_boost:.2f}, 参考值={poke_boost_reference:.2f})"
+                    )
+                    return adjusted
                 if DEBUG_MODE:
                     logger.info(
                         f"[注意力机制-增强] 用户 {current_user_name} 无档案，使用原概率"
@@ -528,6 +770,43 @@ class AttentionManager:
             last_interaction = profile.get("last_interaction", current_time)
             elapsed = current_time - last_interaction
 
+            # === 戳一戳智能增值处理 ===
+            # 在标准注意力机制之外，额外应用戳一戳增值
+            poke_boost_applied = 0.0
+            if poke_boost_reference > 0:
+                # 智能缩放因子（根据情绪和注意力）
+                # emotion范围: -1(极负面)到+1(极正面)
+                # attention_score范围: 0(无注意)到1(高注意)
+
+                # 情绪因子：负面情绪大幅削弱增值，正面情绪允许更多增值
+                # emotion=-1 -> emotion_factor=0.1 (仅10%增值)
+                # emotion=0  -> emotion_factor=0.5 (50%增值)
+                # emotion=+1 -> emotion_factor=1.0 (100%增值)
+                emotion_factor = max(0.1, min(1.0, 0.5 + emotion * 0.5))
+
+                # 注意力因子：注意力低时减少增值，注意力高时允许更多增值
+                # attention=0 -> attention_factor=0.3 (仅30%增值)
+                # attention=0.5 -> attention_factor=0.65 (65%增值)
+                # attention=1 -> attention_factor=1.0 (100%增值)
+                attention_factor = max(0.3, min(1.0, 0.3 + attention_score * 0.7))
+
+                # 综合缩放因子（情绪权重70%，注意力权重30%）
+                # 这样可以确保即使注意力高，情绪负面时仍会大幅减少增值
+                combined_factor = emotion_factor * 0.7 + attention_factor * 0.3
+
+                # 计算实际增值（参考值 * 综合因子）
+                poke_boost_applied = poke_boost_reference * combined_factor
+
+                if DEBUG_MODE or poke_boost_applied > 0.01:
+                    logger.info(
+                        f"[戳一戳智能增值] 用户 {current_user_name}: "
+                        f"情绪={emotion:+.2f}→因子={emotion_factor:.2f}, "
+                        f"注意力={attention_score:.2f}→因子={attention_factor:.2f}, "
+                        f"综合因子={combined_factor:.2f}, "
+                        f"参考值={poke_boost_reference:.2f}, "
+                        f"实际增值={poke_boost_applied:.2f}"
+                    )
+
             # === 渐进式概率调整算法 ===
             # 基础调整：根据注意力分数
             # attention_score 范围 0-1
@@ -548,6 +827,10 @@ class AttentionManager:
                 emotion_factor = 1.0 + (emotion * 0.3)  # emotion范围-1到1，影响±30%
                 adjusted_probability *= emotion_factor
 
+                # 应用戳一戳增值（在注意力和情绪调整之后）
+                if poke_boost_applied > 0:
+                    adjusted_probability += poke_boost_applied
+
                 # === 严格的边界限制（三重保障）===
                 # 1. 首先限制不超过 0.98（防止 100% 回复）
                 adjusted_probability = min(adjusted_probability, 0.98)
@@ -558,12 +841,17 @@ class AttentionManager:
                 # 3. 最终强制限制在 [0, 1] 范围（防止任何异常情况）
                 adjusted_probability = max(0.0, min(1.0, adjusted_probability))
 
+                poke_msg = (
+                    f", 戳一戳增值={poke_boost_applied:.2f}"
+                    if poke_boost_applied > 0
+                    else ""
+                )
                 logger.info(
                     f"[注意力机制-增强] 🎯 {current_user_name}(ID:{current_user_id}), "
                     f"注意力={attention_score:.2f}, 情绪={emotion:+.2f}, "
                     f"概率 {current_probability:.2f} → {adjusted_probability:.2f} "
                     f"(互动次数:{profile.get('interaction_count', 0)}, "
-                    f"距上次:{elapsed:.0f}秒)"
+                    f"距上次:{elapsed:.0f}秒{poke_msg})"
                 )
 
                 return adjusted_probability
@@ -574,13 +862,22 @@ class AttentionManager:
                     attention_decreased_probability,
                 )
 
+                # 即使注意力低，也应用戳一戳增值（但会被大幅削弱）
+                if poke_boost_applied > 0:
+                    adjusted_probability += poke_boost_applied
+
                 # === 最终边界检测（确保在 [0, 1] 范围内）===
                 adjusted_probability = max(0.0, min(1.0, adjusted_probability))
 
+                poke_msg = (
+                    f", 戳一戳增值={poke_boost_applied:.2f}"
+                    if poke_boost_applied > 0
+                    else ""
+                )
                 logger.info(
                     f"[注意力机制-增强] 👤 {current_user_name}(ID:{current_user_id}), "
                     f"注意力低({attention_score:.2f}), "
-                    f"概率 {current_probability:.2f} → {adjusted_probability:.2f}"
+                    f"概率 {current_probability:.2f} → {adjusted_probability:.2f}{poke_msg}"
                 )
 
                 return adjusted_probability
@@ -833,3 +1130,87 @@ class AttentionManager:
             user_list.sort(key=lambda x: x.get("attention_score", 0.0), reverse=True)
 
             return user_list[:limit]
+
+    @staticmethod
+    async def decrease_attention_on_no_reply(
+        platform_name: str,
+        is_private: bool,
+        chat_id: str,
+        user_id: str,
+        user_name: str,
+        attention_decrease_step: float = 0.15,
+        min_attention_threshold: float = 0.3,
+    ) -> None:
+        """
+        当AI读空气判断不回复时降低对该用户的注意力
+
+        功能说明：
+        - 如果用户频繁发消息但AI判断都不应回复，说明用户在跟别人聊天
+        - 此时应该降低对该用户的注意力，避免AI过度关注
+        - 只有当前注意力高于阈值时才进行衰减，避免过度惩罚
+
+        Args:
+            platform_name: 平台名称
+            is_private: 是否私聊
+            chat_id: 聊天ID
+            user_id: 用户ID
+            user_name: 用户名字
+            attention_decrease_step: 注意力减少幅度（默认0.15）
+            min_attention_threshold: 最小注意力阈值，低于此值不再衰减（默认0.3）
+        """
+        chat_key = AttentionManager.get_chat_key(platform_name, is_private, chat_id)
+        current_time = time.time()
+
+        async with AttentionManager._lock:
+            # 初始化chat_key
+            if chat_key not in AttentionManager._attention_map:
+                if DEBUG_MODE:
+                    logger.info(f"[注意力衰减] 会话 {chat_key} 无注意力记录，跳过衰减")
+                return
+
+            chat_users = AttentionManager._attention_map[chat_key]
+
+            # 检查用户是否存在
+            if user_id not in chat_users:
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[注意力衰减] 用户 {user_name}(ID:{user_id}) 无注意力记录，跳过衰减"
+                    )
+                return
+
+            profile = chat_users[user_id]
+
+            # 应用时间衰减（先应用自然衰减）
+            await AttentionManager._apply_attention_decay(profile, current_time)
+
+            # 获取当前注意力分数
+            current_attention = profile.get("attention_score", 0.0)
+
+            # 只有注意力高于阈值时才进行额外衰减
+            if current_attention < min_attention_threshold:
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[注意力衰减] {user_name}(ID:{user_id}) 注意力已较低 "
+                        f"({current_attention:.2f} < {min_attention_threshold}), 跳过衰减"
+                    )
+                return
+
+            # 执行注意力衰减
+            old_attention = current_attention
+            new_attention = max(
+                current_attention - attention_decrease_step,
+                AttentionManager.MIN_ATTENTION_SCORE,
+            )
+            profile["attention_score"] = new_attention
+
+            # 更新最后交互时间（记录这次衰减操作）
+            profile["last_interaction"] = current_time
+
+            logger.info(
+                f"[注意力衰减] 🔽 {user_name}(ID:{user_id}) AI判断不回复，注意力下降: "
+                f"{old_attention:.2f} → {new_attention:.2f} (-{attention_decrease_step:.2f}), "
+                f"互动次数: {profile.get('interaction_count', 0)}"
+            )
+
+            # 自动保存数据
+            await AttentionManager._auto_save_if_needed()

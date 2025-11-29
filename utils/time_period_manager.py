@@ -11,7 +11,7 @@
 5. 跨天时间段支持
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 import json
@@ -20,8 +20,16 @@ from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 from astrbot import logger
 
-# 详细日志开关（与 main.py 同款方式：单独用 if 控制）
-DEBUG_MODE: bool = False
+
+# 动态获取调试模式状态
+def _get_debug_mode() -> bool:
+    """动态读取utils模块的DEBUG_MODE，确保与main.py同步"""
+    try:
+        from . import DEBUG_MODE
+
+        return bool(DEBUG_MODE)
+    except (ImportError, AttributeError):
+        return False
 
 
 class TimePeriodManager:
@@ -114,7 +122,7 @@ class TimePeriodManager:
         try:
             # 空配置检查
             if not periods_json or periods_json.strip() == "":
-                if not silent and DEBUG_MODE:
+                if not silent and _get_debug_mode():
                     logger.info("[时间段配置] 配置为空，使用默认值")
                 result = []
                 TimePeriodManager._parsed_cache[periods_json] = result
@@ -189,7 +197,7 @@ class TimePeriodManager:
                 validated_periods.append(period)
 
                 # 输出详细信息（仅debug模式，且非静默模式）
-                if not silent and DEBUG_MODE:
+                if not silent and _get_debug_mode():
                     name = period.get("name", f"时间段{idx + 1}")
                     logger.info(
                         f"[时间段配置] 已加载: {name} "
@@ -197,7 +205,7 @@ class TimePeriodManager:
                     )
 
             # 只在非静默模式下输出成功加载日志
-            if validated_periods and not silent and DEBUG_MODE:
+            if validated_periods and not silent and _get_debug_mode():
                 logger.info(f"[时间段配置] 成功加载 {len(validated_periods)} 个时间段")
 
             # 缓存结果
@@ -494,7 +502,7 @@ class TimePeriodManager:
         if matched_factor is not None:
             # 完全匹配
             final_factor = matched_factor
-            if DEBUG_MODE:
+            if _get_debug_mode():
                 logger.info(
                     f"[时间段计算] 当前时间 {current_time.strftime('%H:%M')} "
                     f"匹配时间段，系数={final_factor:.2f}"
@@ -502,7 +510,7 @@ class TimePeriodManager:
         elif transition_info is not None:
             # 在过渡期
             from_factor, to_factor, progress, final_factor = transition_info
-            if DEBUG_MODE:
+            if _get_debug_mode():
                 logger.info(
                     f"[时间段计算] 当前时间 {current_time.strftime('%H:%M')} "
                     f"在过渡期（{from_factor:.2f}→{to_factor:.2f}），"
@@ -511,7 +519,7 @@ class TimePeriodManager:
         else:
             # 正常时段
             final_factor = 1.0
-            if DEBUG_MODE:
+            if _get_debug_mode():
                 logger.info(
                     f"[时间段计算] 当前时间 {current_time.strftime('%H:%M')} "
                     f"无匹配时间段，使用默认系数=1.0"
@@ -521,7 +529,7 @@ class TimePeriodManager:
         original_factor = final_factor
         final_factor = max(min_factor, min(max_factor, final_factor))
 
-        if original_factor != final_factor and DEBUG_MODE:
+        if original_factor != final_factor and _get_debug_mode():
             logger.info(
                 f"[时间段计算] 系数已限制: {original_factor:.2f} → {final_factor:.2f} "
                 f"(范围: {min_factor:.2f}-{max_factor:.2f})"

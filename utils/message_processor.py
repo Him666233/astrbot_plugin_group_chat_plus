@@ -7,7 +7,7 @@ v1.0.4 更新：
 - 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 """
 
 import re
@@ -169,8 +169,8 @@ class MessageProcessor:
                     # 关键词触发
                     system_notice = f"\n\n[系统提示]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是{sender_info_text}"
                 elif trigger_type == "ai_decision":
-                    # AI主动回复
-                    system_notice = f"\n\n[系统提示]注意，你刚刚看到了这条消息，你打算回复他，发送这条消息的人是{sender_info_text}"
+                    # AI主动回复（中性描述，不预设结果）
+                    system_notice = f"\n\n[系统提示]注意，你看到了这条消息，发送这条消息的人是{sender_info_text}"
                 else:
                     system_notice = ""
 
@@ -329,8 +329,8 @@ class MessageProcessor:
                     # 关键词触发
                     system_notice = f"\n\n[系统提示]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是{sender_info_text}"
                 elif trigger_type == "ai_decision":
-                    # AI主动回复
-                    system_notice = f"\n\n[系统提示]注意，你刚刚看到了这条消息，你打算回复他，发送这条消息的人是{sender_info_text}"
+                    # AI主动回复（中性描述，不预设结果）
+                    system_notice = f"\n\n[系统提示]注意，你看到了这条消息，发送这条消息的人是{sender_info_text}"
                 else:
                     system_notice = ""
 

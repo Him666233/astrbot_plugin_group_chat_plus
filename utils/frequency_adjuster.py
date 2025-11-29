@@ -8,13 +8,14 @@
 - 自动微调概率参数
 
 作者: Him666233
-版本: v1.1.1
+版本: v1.1.2
 参考: MaiBot frequency_control.py (简化实现)
 """
 
 import time
 from typing import Dict, Optional
 from astrbot.api.all import logger, Context
+from .ai_response_filter import AIResponseFilter
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -37,28 +38,26 @@ class FrequencyAdjuster:
     - 自动调整概率参数
     """
 
-    # 检查间隔（秒）
+    # 默认检查间隔（秒）- 可通过配置或直接设置类变量修改
     CHECK_INTERVAL = 180  # 3分钟检查一次
 
-    # 最小消息数量阈值（低于此数量不检查）
-    MIN_MESSAGE_COUNT = 8
-
-    # 调整幅度
-    ADJUST_FACTOR_DECREASE = 0.85  # 降低15%
-    ADJUST_FACTOR_INCREASE = 1.15  # 提升15%
-
-    # 概率范围限制
-    MIN_PROBABILITY = 0.05
-    MAX_PROBABILITY = 0.95
-
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: dict = None):
         """
         初始化频率调整器
 
         Args:
             context: AstrBot上下文
+            config: 插件配置字典（可选）
         """
         self.context = context
+        self.config = config or {}
+
+        # 从配置中读取参数，如果没有则使用默认值
+        self.min_message_count = self.config.get("frequency_min_message_count", 8)
+        self.adjust_factor_decrease = self.config.get("frequency_decrease_factor", 0.85)
+        self.adjust_factor_increase = self.config.get("frequency_increase_factor", 1.15)
+        self.min_probability = self.config.get("frequency_min_probability", 0.05)
+        self.max_probability = self.config.get("frequency_max_probability", 0.95)
 
         # 存储每个会话的检查状态（使用完整的会话标识确保隔离）
         # 格式: {chat_key: {"last_check_time": 时间戳, "message_count": 消息数}}
@@ -67,6 +66,16 @@ class FrequencyAdjuster:
 
         if DEBUG_MODE:
             logger.info("[频率动态调整器] 已初始化")
+            logger.info(f"  - 最小消息数: {self.min_message_count}")
+            logger.info(
+                f"  - 降低系数: {self.adjust_factor_decrease} (降低{(1 - self.adjust_factor_decrease) * 100:.0f}%)"
+            )
+            logger.info(
+                f"  - 提升系数: {self.adjust_factor_increase} (提升{(self.adjust_factor_increase - 1) * 100:.0f}%)"
+            )
+            logger.info(
+                f"  - 概率范围: {self.min_probability:.2f} - {self.max_probability:.2f}"
+            )
 
     def should_check_frequency(self, chat_key: str, message_count: int) -> bool:
         """
@@ -87,6 +96,8 @@ class FrequencyAdjuster:
                 "last_check_time": current_time,
                 "message_count": 0,
             }
+            if DEBUG_MODE:
+                logger.info(f"[频率动态调整器] 会话 {chat_key} 首次初始化，暂不检查")
             return False
 
         state = self.check_states[chat_key]
@@ -96,9 +107,30 @@ class FrequencyAdjuster:
         # 条件2: 自上次检查以来有足够的消息
         if (
             time_since_check > self.CHECK_INTERVAL
-            and message_count >= self.MIN_MESSAGE_COUNT
+            and message_count >= self.min_message_count
         ):
+            if DEBUG_MODE:
+                logger.info(
+                    f"[频率动态调整器] ✅ 满足检查条件 - 会话:{chat_key}, "
+                    f"距上次检查:{time_since_check:.0f}秒 (需>{self.CHECK_INTERVAL}秒), "
+                    f"消息数:{message_count} (需≥{self.min_message_count}条)"
+                )
             return True
+
+        # 不满足条件，输出详细信息
+        if DEBUG_MODE:
+            time_remaining = max(0, self.CHECK_INTERVAL - time_since_check)
+            msg_remaining = max(0, self.min_message_count - message_count)
+            reasons = []
+            if time_since_check <= self.CHECK_INTERVAL:
+                reasons.append(f"时间不足(还需{time_remaining:.0f}秒)")
+            if message_count < self.min_message_count:
+                reasons.append(f"消息不足(还需{msg_remaining}条)")
+
+            logger.info(
+                f"[频率动态调整器] ⏸️ 暂不检查 - 会话:{chat_key}, "
+                f"原因:{', '.join(reasons)}"
+            )
 
         return False
 
@@ -127,17 +159,21 @@ class FrequencyAdjuster:
             # 构建分析prompt
             prompt = f"""你是一个群聊观察者。请分析最近的聊天记录，判断AI助手的发言频率是否合适。
 
+【消息格式说明】
+- "user: xxx" = 用户发送的消息
+- "assistant: xxx" = AI助手（你）发送的消息
+
 最近的聊天记录：
 {recent_messages}
 
 请分析：
-1. AI助手的发言是否过于频繁（刷屏、过度活跃）？
-2. AI助手的发言是否过少（太沉默、存在感低）？
+1. AI助手（即"assistant"角色）的发言是否过于频繁（刷屏、过度活跃）？
+2. AI助手（即"assistant"角色）的发言是否过少（太沉默、存在感低）？
 
 判断标准：
-- 如果AI在短时间内连续回复多条，或者打断了用户之间的正常对话 → 过于频繁
-- 如果AI长时间不发言，即使有人提到相关话题也不回应 → 过少
-- 如果AI的发言频率自然，既不抢话也不冷场 → 正常
+- 如果AI（assistant）在短时间内连续回复多条，或者打断了用户（user）之间的正常对话 → 过于频繁
+- 如果AI（assistant）长时间不发言，即使有用户（user）提到相关话题也不回应 → 过少
+- 如果AI（assistant）的发言频率自然，既不抢话也不冷场 → 正常
 
 **你只能输出以下三个词之一，不要输出任何其他文字、解释或标点：**
 - 正常
@@ -160,32 +196,18 @@ class FrequencyAdjuster:
                 logger.warning("[频率动态调整器] AI返回为空")
                 return None
 
-            # 清理响应（移除多余的空白和标点）
-            response = (
-                response.strip().replace("。", "").replace("!", "").replace("！", "")
+            # 🆕 v1.1.2: 使用增强的频率判断提取器
+            # 这个提取器已经包含了过滤思考链和提取关键判断的功能
+            decision = AIResponseFilter.extract_frequency_decision(response)
+
+            if decision:
+                logger.info(f"[频率动态调整器] AI判断结果: {decision}")
+                return decision
+
+            # 如果提取失败，记录警告
+            logger.warning(
+                f"[频率动态调整器] 无法从AI响应中提取有效判断: {response[:50]}..."
             )
-
-            # 验证响应是否有效
-            if response in ["正常", "过于频繁", "过少"]:
-                logger.info(f"[频率动态调整器] AI判断结果: {response}")
-                return response
-
-            # 响应无效（AI可能输出了多余内容）
-            if len(response) > 20:
-                logger.warning(
-                    f"[频率动态调整器] AI返回内容过长，忽略: {response[:50]}..."
-                )
-                return None
-
-            # 尝试从响应中提取关键词
-            if "频繁" in response:
-                return "过于频繁"
-            elif "过少" in response or "太少" in response:
-                return "过少"
-            elif "正常" in response:
-                return "正常"
-
-            logger.warning(f"[频率动态调整器] 无法识别AI返回: {response}")
             return None
 
         except Exception as e:
@@ -205,17 +227,17 @@ class FrequencyAdjuster:
         """
         if decision == "过于频繁":
             # 降低概率
-            new_probability = current_probability * self.ADJUST_FACTOR_DECREASE
+            new_probability = current_probability * self.adjust_factor_decrease
             logger.info(
-                f"[频率动态调整器] 检测到发言过于频繁，降低概率: {current_probability:.2f} → {new_probability:.2f}"
+                f"[频率动态调整器] 检测到发言过于频繁，降低概率: {current_probability:.2f} → {new_probability:.2f} (系数:{self.adjust_factor_decrease})"
             )
 
         elif decision == "过少":
             # 提升概率
-            new_probability = current_probability * self.ADJUST_FACTOR_INCREASE
+            new_probability = current_probability * self.adjust_factor_increase
 
             logger.info(
-                f"[频率动态调整器] 检测到发言过少，提升概率: {current_probability:.2f} → {new_probability:.2f}"
+                f"[频率动态调整器] 检测到发言过少，提升概率: {current_probability:.2f} → {new_probability:.2f} (系数:{self.adjust_factor_increase})"
             )
 
         else:  # "正常"
@@ -228,7 +250,7 @@ class FrequencyAdjuster:
 
         # 限制在合理范围内
         new_probability = max(
-            self.MIN_PROBABILITY, min(self.MAX_PROBABILITY, new_probability)
+            self.min_probability, min(self.max_probability, new_probability)
         )
 
         return new_probability
@@ -259,6 +281,13 @@ class FrequencyAdjuster:
             }
 
         self.check_states[chat_key]["message_count"] += 1
+
+        if DEBUG_MODE:
+            current_count = self.check_states[chat_key]["message_count"]
+            logger.info(
+                f"[频率动态调整器] 📝 记录消息 - 会话:{chat_key}, "
+                f"当前计数:{current_count}/{self.min_message_count}"
+            )
 
     def get_message_count(self, chat_key: str) -> int:
         """
