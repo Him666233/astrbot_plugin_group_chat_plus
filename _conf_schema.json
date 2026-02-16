@@ -326,9 +326,9 @@
         "default": 120
     },
     "attention_max_tracked_users": {
-        "description": "【v1.0.2开始的新增】最大追踪用户数",
+        "description": "最大追踪用户数",
         "type": "int",
-        "hint": "每个群聊最多同时追踪多少个用户的注意力和情绪。超过后会移除注意力最低的用户。建议5-15",
+        "hint": "【v1.0.2开始的新增】每个群聊最多同时追踪多少个用户的注意力和情绪。超过后会移除注意力最低的用户。建议5-15",
         "default": 10
     },
     "attention_decay_halflife": {
