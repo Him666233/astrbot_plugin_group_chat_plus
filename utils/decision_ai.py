@@ -3,13 +3,22 @@
 负责调用AI判断是否应该回复消息（读空气功能）
 
 作者: Him666233
-版本: v1.1.2
+版本: v1.2.0
+
+更新日志 v1.2.0:
+- 新增当前时间与活跃度提示，让AI知道现在是什么时候并据此调整回复倾向
+- 新增关键词触发提示，告知AI消息是通过关键词触发的，但仍需综合判断时间等因素
+- 新增兴趣话题提示，让AI知道用户配置的兴趣话题关键词，对感兴趣的话题更积极回复
+- 新增动态时间段配置信息，让AI知道用户配置的活跃度设定
+- 优化提示词结构，增强对有趣话题的回复倾向
 """
 
 import asyncio
-from typing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Dict, Any
 from astrbot.api.all import *
 from .ai_response_filter import AIResponseFilter
+from ._session_guard import sample_guard
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -26,122 +35,118 @@ class DecisionAI:
     """
 
     # 系统判断提示词模板（积极参与模式）
+    # 🔧 v1.2.0: 调整提示词位置引用（从"上方"改为"下方"），配合缓存友好的拼接顺序
     SYSTEM_DECISION_PROMPT = """
 你是一个活跃、友好的群聊参与者，请判断是否回复当前这条新消息。
 
-【第一重要】识别当前消息发送者：
-⚠️ 在上面的【当前消息发送者】重要提醒中，已经明确告诉你当前给你发消息的人是谁。
-- 请记住这个人的名字和ID，判断时不要搞错
-- 历史消息中可能有多个用户的发言，请不要把历史中其他用户误认为当前发送者
-- 判断是否回复时，要考虑与这个具体发送者的互动关系
+【第一重要】识别当前发送者：
+⚠️ 下方【当前消息发送者】已明确告诉你发送者是谁，记住这个人的名字和ID，不要搞错。
+- 历史消息中有多个用户，不要把其他用户误认为当前发送者
+- 判断时要考虑与这个具体发送者的互动关系
 
-【上下文说明】重要理解：
-⚠️ 上下文中的消息已按时间顺序排列，形成完整的对话时间线
-- 所有历史消息（包括你之前没有回复的消息）都会显示在上下文中，以便你理解完整的对话脉络
-- 这些消息可能包含：你回复过的消息、你判断不回复的消息、以及其他人之间的对话
-- **你需要识别：当前消息的发送者是在跟谁说话**
-  * 如果是跟你说话：考虑回复
-  * 如果是跟别人说话：一般不应插入（除非明确邀请你参与）
-- **识别连续对话模式**：如果发现某个用户频繁发消息，但这些消息明显是在跟其他人对话（而非跟你），那么当前消息也很可能是跟别人说的
+【上下文理解】：
+- 消息已按时间顺序排列，包含：你回复过的、未回复的、以及他人之间的对话
+- **识别对话对象**：当前发送者是在跟你说话，还是跟别人说话？
+- **识别连续对话**：如果发现某用户频繁发消息但都在跟别人对话，当前消息可能也是跟别人说的
+- 标有【📦近期未回复】的是你当时未回复的消息，仅供参考理解上下文
 
-核心原则（重要！）：
-1. **优先关注"当前新消息"的核心内容** - 这是判断的首要依据
-2. **识别当前消息的主要问题或话题** - 判断是否与这个问题/话题相关
-3. **理解完整的对话上下文** - 通过历史消息判断当前发送者是否在跟你对话，还是在跟别人聊天
-4. **避免过度插入** - 如果发现对方最近几条消息都是跟别人对话，即使当前消息看似有趣，也应谨慎判断
+【话题兴趣】核心原则：
+- 你有自己的兴趣和性格，遇到感兴趣的话题会更想参与
+- 有趣的话题=更高参与意愿（游戏、动漫、技术、有趣事件、值得讨论的观点等）
+- 不要过于被动，话题有趣就可以主动参与，像真人一样
 
-【背景信息与记忆】使用说明（重要！）：
-- 如果在上文看到 "=== 背景信息 ===" 段落，那是与你当前会话/人格相关的长期记忆（已按重要性排序）
-- 这些内容仅供你理解上下文，用于辅助判断是否需要回复以及回复方向；不要在输出中直接复述或提及"记忆""背景信息"等元信息
+【核心原则】：
+1. 优先关注"当前新消息"的核心内容
+2. 识别当前消息的主要问题或话题
+3. 理解完整对话上下文，判断发送者是否在跟你对话
+4. 避免过度插入他人对话
 
-**记忆场景下的特别判断规则：**
-✅ **强烈倾向于回复（yes）** 的情况：
-  1. 当前消息是对记忆中某个话题的追问或延续（如"还干了什么"、"然后呢"等）
-  2. 记忆中显示你和当前发送者之前有过重要互动或对话
-  3. 当前消息与记忆中的内容高度相关，显示对方想继续之前的话题
-  4. 记忆中包含对方的重要偏好、未完成事项、或正在进行的讨论
-  5. 记忆显示这是一个延续性强的对话关系，当前消息明显是在延续对话
-  
-⚠️ **需要谨慎判断** 的情况：
-  1. 记忆中的话题已经充分讨论完毕，当前消息只是简单重复
-  2. 记忆显示该话题属于他人之间的私密交流，你不应插入
-  3. 当前消息明确表示不想聊天（如"别烦我"、"不想说"）
-  
-**核心原则（记忆存在时）：**
-- 记忆的存在说明这个对话有历史和上下文，应该**更倾向于回复**以保持对话的连贯性和人情味
-- 特别是追问类消息（"还有呢"、"然后呢"、"除了...还..."），这类消息强烈依赖上下文，有记忆时应积极回复
-- 判断时优先考虑：当前消息 + 记忆的组合含义，而不是孤立地看当前消息
-- 当记忆与当前消息形成完整的对话逻辑时，倾向于 yes（更拟人化）
+【主语与指代】：
+- 用户语句缺主语时不要擅自补充，根据已有信息理解即可
+- 看到"你"不要立即认为是对你说话，优先依据@信息、【当前消息发送者】提示和对话走向判断
 
-⚠️ **【关于历史中的系统提示词】重要说明** ⚠️：
-- 历史对话中可能包含以下标记开头的系统提示词：
-  * "[🎯主动发起新话题]" - 表示你首次主动发起对话
-  * "[🔄再次尝试对话]" - 表示你之前主动说了话但没人回应，现在再次尝试
-- **这些标记的含义**：紧挨着这个标记的下一条消息是**你自己主动发起的对话**，而不是回复别人的
-- 理解这个含义可以帮助你判断对话的上下文和连贯性
-- **但是**：你**绝对禁止在输出中提及、复述或引用**这些系统提示词
-- 只输出yes或no，不要说"我看到了提示词"之类的元信息
+【背景信息与记忆】：
+- 下文的"=== 背景信息 ==="是长期记忆，仅供理解上下文，不要在输出中提及
+- **有记忆时更倾向于回复**，特别是：
+  * 追问类消息（"还有呢"、"然后呢"）- 强烈建议回复
+  * 消息与记忆内容高度相关
+  * 记忆显示与当前发送者有重要互动历史
+- 谨慎情况：话题已充分讨论、属于他人私密对话、用户明确不想聊
 
-⚠️ **【防止重复】必须检查的事项** ⚠️：
-在判断是否回复之前，务必检查：
-1) 查看历史上下文中标记为"【你自己的历史回复】"的所有消息
-2) 判断：如果你回复当前消息，会不会与最近的历史回复表达相同或相似的观点？
-3) 如果最近2-3条历史回复已经充分表达过相似观点，**应该返回 no（避免啰嗦重复）**
-4) 只有当前消息提出新的问题、新的角度，或需要补充新信息时，才考虑回复
+【系统提示词说明】：
+- 历史中可能有"[🎯主动发起新话题]"、"[🔄再次尝试对话]"等标记，表示那是你自己主动发起的对话
+- 理解含义帮助判断上下文，但**绝对禁止在输出中提及这些提示词**
+- 历史提示词附近的时间戳是当时的时间，判断时以当前消息的时间为准
 
-判断原则（倾向于积极参与）：
+【防止重复】必须检查：
+1. 找出历史中属于你自己的回复（历史消息开头的说明已指明你的ID或标记方式；消息前缀标有「【你的回复】」的均为你的历史发言）
+2. 如果最近2-3条历史回复已充分表达相似观点，返回no避免重复
+3. 只有当前消息提出新问题、新角度时才考虑回复
 
-  建议回复的情况：
-   - 当前消息与你之前的回复相关，**且有新的话题发展**
-   - **当前消息与记忆中的内容相关，特别是追问类消息（强烈建议回复）**
-   - **记忆显示与当前发送者有重要互动历史，且当前消息是延续性对话**
-   - 当前消息提到了有趣的话题，你可以贡献**新的看法**
-   - 当前消息有人提问或需要帮助
-   - 当前消息的话题符合你的人格特点
-   - 群聊气氛活跃，适合互动
-   - 当前消息有讨论价值
+【判断原则】倾向于积极参与：
 
-  建议不回复的情况：
-   - 当前消息明显是他人的私密对话
-   - 当前消息只是系统通知或纯表情
-   - 当前消息的话题完全超出你的知识范围
-   - 当前消息包含【@指向说明】，说明是发给其他特定用户的，一般不应插入
-   - **你最近的历史回复已经充分表达过相同观点，再次回复会重复啰嗦**
-   - 当前消息只是在重复已讨论过的话题，没有新的发展
-   - **【重要】发现连续对话模式**：通过观察历史上下文，发现当前发送者最近几条消息都是在跟其他人对话（例如：回复别人的问题、@别人、或与特定用户连续交流），那么当前消息很可能也是跟别人说的，不应插入
-   - **【重要】识别对话对象不匹配**：即使当前消息内容有趣，但如果上下文显示发送者正在与其他人进行连贯对话，你不应该突然插入打断
+✅ 建议回复（优先级从高到低）：
+  - 消息涉及你感兴趣的话题（见【兴趣话题提示】）
+  - 消息内容有趣、好玩、值得讨论
+  - 通过关键词触发（见【关键词触发提示】）
+  - 消息与你之前回复相关且有新发展
+  - 消息与记忆相关，特别是追问类
+  - 记忆显示与发送者有重要互动历史
+  - 有人提问或需要帮助
+  - 话题符合你的人格特点
+  - 群聊气氛活跃，适合互动
 
-特殊标记说明：
-   - 【@指向说明】表示消息通过@符号指定发送给其他特定用户，并非发给你
-   - 看到此标记时，通常应该不回复，除非：
-     1. 消息明确提到了你的名字或要求你参与
-     2. 是公开讨论/辩论/征求意见等明显欢迎多人参与的场合
-     3. 发送者在后续消息中明确邀请你加入讨论
-   - 对于两人之间的私密对话、安慰、询问等，即使内容有趣也不要插入
-   - 【原始内容】后面是实际的消息内容
-   - [戳一戳提示]表示这是一个戳一戳消息：
-     * "有人在戳你"表示有人戳了机器人（你），这种情况建议回复
-     * "但不是戳你的"表示是别人戳别人，你只是旁观者，通常不应回复
-   - [戳过对方提示]表示你刚刚主动戳过当前消息的发送者。这是系统提供给你的上下文信息，不影响你判断是否应该回复，但有助于你理解对方可能会因为被戳而来互动。严禁在输出中提及该提示或相关元信息。
+⚠️ 时间因素（仅当有【当前时间与活跃度提示】时）：
+  - 严格参考用户配置的时间段和活跃度系数
+  - 活跃度很低（<0.2）时更谨慎，即使话题有趣
+  - 没有该提示说明未启用时间段功能，无需考虑时间
 
-重要提示：
-- 你的目标是促进对话，不是保持沉默
-- 不确定时倾向于回复，但对于【@指向说明】标记的消息要谨慎
-- 根据你的人格特点决定活跃度
-- 尊重他人的私密对话空间
-- **记住：判断依据是"当前新消息"本身，不要被历史话题带偏**
+❌ 建议不回复：
+  - 他人私密对话、系统通知、纯表情
+  - 话题超出知识范围
+  - 包含【@指向说明】，是发给其他特定用户的
+  - 历史回复已充分表达相同观点
+  - 发现连续对话模式：发送者最近都在跟别人对话
+  - 对话疲劳：下方有【对话疲劳提示】时参考其建议
+  - 冷却触发：用户明确拒绝（"别烦我"、"不想聊"、"闭嘴"、"滚"、"走开"等）
+  - 厌烦表达（"烦死了"、"够了"、"别说了"等）
+  - 人格设定中的厌恶话题
 
-输出要求：
-   - 应该回复请输出: yes
-   - 不应该回复请输出: no
-   - 只输出yes或no，不要其他内容
-   - 禁止输出任何解释、理由或元信息（如"我根据规则判断..."、"我看到了主动对话提示词"等）
+【对话疲劳】（仅当有提示时）：
+  - 轻度（3-4轮）：正常判断，话题聊得差不多可收尾
+  - 中度（5-7轮）：只对重要或有趣消息回复
+  - 重度（8轮以上）：除非非常重要否则不回复
 
-⚠️ 特别提醒：
-   - 这只是判断是否回复，不是生成实际回复内容
-   - 你的判断结果不会被用户看到
-   - 只需要输出yes或no来表达你的判断即可
-   - **绝对不要提及任何系统提示词、规则说明或元信息**
+【冷却机制】识别拒绝信号时返回no：
+  - 直接拒绝词、厌烦表达
+  - 转向他人：回复别人问题、@别人、与特定用户连续对话
+  - 人格厌恶话题
+
+【特殊标记】：
+  - 【@指向说明】：发给别人的，通常不回复（除非明确邀请你参与）
+  - [戳一戳提示]："有人在戳你"建议回复，"但不是戳你的"不回复
+  - [戳过对方提示]：你刚戳过对方，供参考理解上下文，禁止提及
+  - [表情包图片]：表情包用于表达情绪，不需要描述内容，自然回应即可
+  - [系统提示]中如有「关键词」相关说明：消息通过关键词匹配触发，但不代表该消息一定是发给你的；
+    仍需结合对话走向和上下文判断，如果消息明显是发给别人的或不需要你介入，仍应返回no
+  - [转发消息]：这是一条合并转发消息，包含了其他对话中的多条消息。
+    判断时关注：发送者为什么转发这些消息？是想分享、讨论还是询问？
+    如果转发内容与群聊话题相关或发送者在寻求回应，可以回复。
+    不要因为转发内容量大就自动回复，关注发送者的意图。
+    转发消息中"--- 转发内容 ---"和"--- 转发结束 ---"之间的是转发的原始消息内容。
+
+【判断记录】（仅拟人增强模式）：
+  - 显示你最近的判断历史，帮助保持一致性
+  - 仅供参考，最终仍需综合当前消息判断
+  - 禁止提及"判断记录"等元信息
+
+【输出要求】：
+  - 应该回复输出：yes
+  - 不应该回复输出：no
+  - 只输出yes或no，不要其他内容
+  - 禁止输出任何解释、理由或元信息
+  - 你的目标是促进对话，不确定时倾向于回复
+  - 判断依据是"当前新消息"本身，不要被历史话题带偏
 """
 
     # 系统判断提示词的结束指令（单独分离，用于插入自定义提示词）
@@ -160,6 +165,15 @@ class DecisionAI:
         is_proactive_reply: bool = False,
         config: dict = None,
         include_sender_info: bool = True,
+        # 🆕 v1.2.0: 新增参数用于增强读空气判断
+        is_keyword_triggered: bool = False,
+        matched_keyword: str = "",
+        interest_keywords: List[str] = None,
+        time_period_info: Dict[str, Any] = None,
+        humanize_mode_enabled: bool = False,
+        original_message_text: str = "",  # 🆕 v1.2.0: 原始消息文本（用于关键词检测）
+        # 🆕 v1.2.0: 对话疲劳信息
+        conversation_fatigue_info: Dict[str, Any] = None,
     ) -> bool:
         """
         调用AI判断是否应该回复
@@ -173,11 +187,23 @@ class DecisionAI:
             timeout: 超时时间（秒）
             prompt_mode: 提示词模式，append=拼接，override=覆盖
             include_sender_info: 是否包含发送者信息（默认为True）
+            is_keyword_triggered: 是否通过关键词触发（跳过了概率筛选）
+            matched_keyword: 匹配到的关键词
+            interest_keywords: 用户配置的兴趣话题关键词列表
+            time_period_info: 动态时间段配置信息
+            humanize_mode_enabled: 是否开启拟人增强模式
+            conversation_fatigue_info: 对话疲劳信息（连续对话轮次等）
 
         Returns:
             True=应该回复，False=不回复
         """
+        sample_guard("decision")
         try:
+            if hasattr(event, "_decision_ai_error"):
+                try:
+                    delattr(event, "_decision_ai_error")
+                except Exception:
+                    event._decision_ai_error = False
             # 获取AI提供商
             if provider_id:
                 provider = context.get_provider_by_id(provider_id)
@@ -189,6 +215,10 @@ class DecisionAI:
 
             if not provider:
                 logger.error("无法获取AI提供商")
+                try:
+                    event._decision_ai_error = True
+                except Exception:
+                    pass
                 return False
 
             # 🔧 修复：直接使用 persona_manager 获取最新人格配置，支持多会话和实时更新
@@ -224,13 +254,18 @@ class DecisionAI:
             sender_emphasis = ""
             separator = "=" * 60
 
+            # 🔧 修复：无论 include_sender_info 是否开启，都需要获取发送者信息用于日志输出
+            sender_id = event.get_sender_id()
+            sender_name = event.get_sender_name()
+
             # 🆕 v1.2.0: 如果是主动对话后的回复，添加上下文说明
             proactive_hint = ""
             if is_proactive_reply:
                 # 从配置读取自定义提示词，如果没有配置则使用默认值
+                # 🔧 使用字典键访问替代 config.get()，避免 astrBot 平台多次读取配置的问题
                 custom_prompt = ""
-                if config:
-                    custom_prompt = config.get("proactive_reply_context_prompt", "")
+                if config and "proactive_reply_context_prompt" in config:
+                    custom_prompt = config["proactive_reply_context_prompt"]
 
                 # 如果配置为空或未设置，使用默认提示词
                 if not custom_prompt or not custom_prompt.strip():
@@ -259,8 +294,6 @@ class DecisionAI:
                 )
 
             if include_sender_info:
-                sender_id = event.get_sender_id()
-                sender_name = event.get_sender_name()
                 if sender_name:
                     sender_emphasis = (
                         f"\n\n{separator}\n"
@@ -285,42 +318,217 @@ class DecisionAI:
                         f"{separator}\n"
                     )
 
-            # 构建完整的提示词，根据prompt_mode决定拼接还是覆盖
-            if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
-                # 覆盖模式：直接使用用户自定义提示词（仍然添加发送者强调和主动对话提示）
-                full_prompt = (
-                    formatted_message
-                    + proactive_hint
-                    + sender_emphasis
-                    + "\n\n"
-                    + extra_prompt.strip()
+            # 🆕 v1.2.0: 构建增强上下文信息
+            enhanced_context = ""
+
+            # 1. 当前时间与活跃度提示（仅当用户开启了动态时间段概率调整时才添加）
+            # 注意：这与 include_timestamp 配置无关，include_timestamp 只影响消息中是否显示时间戳
+            if time_period_info and time_period_info.get("enabled", False):
+                now = datetime.now()
+                weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                current_weekday = weekday_names[now.weekday()]
+                current_time_str = now.strftime(f"%Y-%m-%d {current_weekday} %H:%M:%S")
+
+                current_factor = time_period_info.get("current_factor", 1.0)
+                current_period_name = time_period_info.get("current_period_name", "")
+
+                # 根据用户配置的系数生成活跃度建议
+                if current_factor < 0.3:
+                    factor_desc = "非常低"
+                    activity_suggestion = "用户配置此时段应该很少回复。除非消息非常重要，否则应该倾向于不回复。"
+                elif current_factor < 0.5:
+                    factor_desc = "很低"
+                    activity_suggestion = "用户配置此时段应该较少回复。只有重要或特别有趣的消息才考虑回复。"
+                elif current_factor < 0.8:
+                    factor_desc = "偏低"
+                    activity_suggestion = (
+                        "用户配置此时段应该减少回复。可以适当降低活跃度。"
+                    )
+                elif current_factor <= 1.2:
+                    factor_desc = "正常"
+                    activity_suggestion = "用户配置此时段活跃度正常。可以正常参与对话。"
+                elif current_factor <= 1.5:
+                    factor_desc = "偏高"
+                    activity_suggestion = "用户配置此时段应该更活跃。可以积极参与讨论。"
+                else:
+                    factor_desc = "很高"
+                    activity_suggestion = (
+                        "用户配置此时段应该非常活跃。积极参与各种有趣的讨论！"
+                    )
+
+                time_context = (
+                    f"\n\n{separator}\n"
+                    f"🕐 【当前时间与活跃度提示】\n"
+                    f"{separator}\n"
+                    f"当前时间: {current_time_str} ({current_weekday})\n"
+                    f"用户配置的时间段: {current_period_name}\n"
+                    f"活跃度系数: {current_factor:.2f} ({factor_desc})\n"
+                    f"建议: {activity_suggestion}\n"
+                    f"\n⚠️ 请根据上述用户配置来调整你的回复倾向。\n"
+                    f"{separator}\n"
                 )
-                if DEBUG_MODE:
-                    logger.info("使用覆盖模式：用户自定义提示词完全替代默认系统提示词")
-            else:
-                # 拼接模式（默认）：先添加主动对话提示和发送者强调，再添加系统提示词
-                full_prompt = (
-                    formatted_message
-                    + proactive_hint
-                    + sender_emphasis
-                    + "\n\n"
-                    + DecisionAI.SYSTEM_DECISION_PROMPT
+                enhanced_context += time_context
+
+            # 2. 关键词触发提示
+            if is_keyword_triggered and matched_keyword:
+                # 根据是否开启时间段功能决定是否提及时间因素
+                time_factor_hint = ""
+                if time_period_info and time_period_info.get("enabled", False):
+                    time_factor_hint = (
+                        "\n  * 参考上方【当前时间与活跃度提示】中的用户配置"
+                    )
+
+                keyword_context = (
+                    f"\n\n{separator}\n"
+                    f"🔑 【关键词触发提示】\n"
+                    f"{separator}\n"
+                    f"⚠️ 这条消息包含了触发关键词: 「{matched_keyword}」\n\n"
+                    f"说明：\n"
+                    f"- 用户配置了这个关键词，表示遇到包含此关键词的消息时应该更关注\n"
+                    f"- 这条消息已跳过概率筛选，直接进入你的判断环节\n"
+                    f"- 但这并不意味着必须回复，你仍需要综合判断：\n"
+                    f"  * 消息是否是发给你的？\n"
+                    f"  * 内容是否值得回复？{time_factor_hint}\n"
+                    f"{separator}\n"
+                )
+                enhanced_context += keyword_context
+
+            # 3. 兴趣话题提示（仅当开启拟人增强模式且配置了兴趣话题关键词时生效）
+            if (
+                humanize_mode_enabled
+                and interest_keywords
+                and len(interest_keywords) > 0
+            ):
+                # 🔧 v1.2.0: 使用原始消息文本进行关键词检测，而不是格式化后的上下文
+                # 这样可以避免历史消息中的关键词干扰当前消息的检测
+                text_for_keyword_check = (
+                    original_message_text
+                    if original_message_text
+                    else formatted_message
+                )
+                message_lower = text_for_keyword_check.lower()
+                matched_interests = []
+                for kw in interest_keywords:
+                    if kw and kw.lower() in message_lower:
+                        matched_interests.append(kw)
+
+                interest_context = (
+                    f"\n\n{separator}\n"
+                    f"⭐ 【兴趣话题提示】\n"
+                    f"{separator}\n"
+                    f"用户配置的兴趣话题关键词: {', '.join(interest_keywords[:10])}"
+                    f"{'...(共{}个)'.format(len(interest_keywords)) if len(interest_keywords) > 10 else ''}\n\n"
                 )
 
-                # 如果有用户自定义提示词,插入到结束指令之前
+                if matched_interests:
+                    interest_context += (
+                        f"✨ 当前消息命中的兴趣话题: {', '.join(matched_interests)}\n"
+                        f"💡 建议: 这是你感兴趣的话题，应该更积极地参与讨论！\n"
+                        f"   即使消息不是直接问你的，看到感兴趣的话题也可以主动发表看法。\n"
+                    )
+                else:
+                    interest_context += (
+                        f"ℹ️ 当前消息未命中配置的兴趣话题\n"
+                        f"   但如果消息内容本身有趣或与你的人格设定相关，仍可积极参与\n"
+                    )
+
+                interest_context += f"{separator}\n"
+                enhanced_context += interest_context
+
+            # 4. 🆕 对话疲劳提示（当启用对话疲劳机制且有疲劳信息时）
+            if conversation_fatigue_info and conversation_fatigue_info.get(
+                "enabled", False
+            ):
+                consecutive_replies = conversation_fatigue_info.get(
+                    "consecutive_replies", 0
+                )
+                fatigue_level = conversation_fatigue_info.get("fatigue_level", "none")
+
+                if consecutive_replies > 0 and fatigue_level != "none":
+                    # 根据疲劳等级生成不同的提示
+                    if fatigue_level == "heavy":
+                        fatigue_desc = "重度"
+                        fatigue_suggestion = (
+                            "⚠️ 你已经与这个用户连续对话很多轮了！\n"
+                            "建议：除非消息非常重要或用户明确需要你的帮助，否则应该倾向于不回复。\n"
+                            "让对话自然结束，给双方一些休息时间。"
+                        )
+                    elif fatigue_level == "medium":
+                        fatigue_desc = "中度"
+                        fatigue_suggestion = (
+                            "⚠️ 你与这个用户的对话已经持续了一段时间。\n"
+                            "建议：适当减少回复频率，只对重要或有趣的消息回复。\n"
+                            "如果消息只是简单的闲聊或重复内容，可以选择不回复。"
+                        )
+                    else:  # light
+                        fatigue_desc = "轻度"
+                        fatigue_suggestion = (
+                            "ℹ️ 你与这个用户已经连续对话了几轮。\n"
+                            "建议：正常判断是否回复，但如果话题已经聊得差不多了，可以适当收尾。"
+                        )
+
+                    fatigue_context = (
+                        f"\n\n{separator}\n"
+                        f"🔄 【对话疲劳提示】\n"
+                        f"{separator}\n"
+                        f"与当前用户的连续对话轮次: {consecutive_replies} 轮\n"
+                        f"疲劳等级: {fatigue_desc}\n\n"
+                        f"{fatigue_suggestion}\n"
+                        f"{separator}\n"
+                    )
+                    enhanced_context += fatigue_context
+
+            # 🔧 v1.2.0: 缓存友好的提示词拼接顺序
+            # 将静态内容（系统判断提示词、用户额外提示词）放在最前面，
+            # 动态内容（格式化消息、发送者信息、增强上下文）放在后面。
+            # 这样AI服务商的前缀缓存（prefix caching）可以命中静态部分，降低调用成本。
+            # 即使AI服务商不支持前缀缓存，此顺序调整也不影响功能。
+            if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
+                # 覆盖模式：用户自定义提示词在前（静态），动态内容在后
+                full_prompt = (
+                    extra_prompt.strip()
+                    + "\n\n"
+                    + formatted_message
+                    + proactive_hint
+                    + sender_emphasis
+                    + enhanced_context
+                )
+                if DEBUG_MODE:
+                    logger.info(
+                        "使用覆盖模式：用户自定义提示词完全替代默认系统提示词（缓存友好顺序）"
+                    )
+            else:
+                # 拼接模式（默认）：系统提示词（静态）在前，动态内容在后
+                full_prompt = DecisionAI.SYSTEM_DECISION_PROMPT
+
+                # 如果有用户自定义提示词,紧跟在系统提示词后面（也是相对静态的）
                 if extra_prompt and extra_prompt.strip():
                     full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}\n"
                     if DEBUG_MODE:
                         logger.info(
-                            "使用拼接模式：在默认系统提示词和结束指令之间插入用户自定义提示词"
+                            "使用拼接模式：用户自定义提示词紧跟系统提示词（缓存友好顺序）"
                         )
 
-                # 添加结束指令
+                # 添加结束指令（静态）
                 full_prompt += DecisionAI.SYSTEM_DECISION_PROMPT_ENDING
+
+                # 动态内容放在最后
+                full_prompt += (
+                    "\n"
+                    + formatted_message
+                    + proactive_hint
+                    + sender_emphasis
+                    + enhanced_context
+                )
 
             logger.info(
                 f"正在调用决策AI判断是否回复（当前发送者：{sender_name or '未知'}，ID:{sender_id}）..."
             )
+
+            # 🔧 修复：移除 persona_contexts 末尾连续的 "user" 消息，防止与 prompt 形成连续 user 消息
+            # persona_contexts 来自人格 begin_dialogs，若末尾为 "user" 则与 prompt 连续，部分 LLM 会返回空响应
+            while persona_contexts and persona_contexts[-1].get("role") == "user":
+                persona_contexts.pop()
 
             # 调用AI,添加超时控制
             async def call_decision_ai():
@@ -353,9 +561,17 @@ class DecisionAI:
             logger.warning(
                 f"决策AI调用超时（超过 {timeout} 秒），默认不回复，可在配置中调整 decision_ai_timeout 参数"
             )
+            try:
+                event._decision_ai_error = True
+            except Exception:
+                pass
             return False
         except Exception as e:
             logger.error(f"调用决策AI时发生错误: {e}")
+            try:
+                event._decision_ai_error = True
+            except Exception:
+                pass
             return False
 
     @staticmethod
@@ -422,6 +638,11 @@ class DecisionAI:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
                 persona_prompt = ""
                 persona_contexts = []
+
+            # 🔧 修复：移除 persona_contexts 末尾连续的 "user" 消息，防止与 prompt 形成连续 user 消息
+            # persona_contexts 来自人格 begin_dialogs，若末尾为 "user" 则与 prompt 连续，部分 LLM 会返回空响应
+            while persona_contexts and persona_contexts[-1].get("role") == "user":
+                persona_contexts.pop()
 
             # 调用AI
             async def _call_ai():

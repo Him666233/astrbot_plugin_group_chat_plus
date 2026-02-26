@@ -19,6 +19,7 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
 from astrbot.api.all import *
+from ._session_guard import guard_session, sample_guard
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -60,15 +61,53 @@ class ProbabilityManager:
     # 🆕 v1.1.0: 插件配置引用（用于动态时间调整）
     _plugin_config: Optional[dict] = None
 
+    # ========== 🔧 配置参数集中提取（避免运行时多次读取） ==========
+    # 动态时间段调整配置
+    _enable_dynamic_reply_probability: bool = False
+    _reply_time_periods: str = "[]"
+    _reply_time_transition_minutes: int = 30
+    _reply_time_min_factor: float = 0.1
+    _reply_time_max_factor: float = 2.0
+    _reply_time_use_smooth_curve: bool = True
+    # 概率硬性限制配置
+    _enable_probability_hard_limit: bool = False
+    _probability_min_limit: float = 0.05
+    _probability_max_limit: float = 0.8
+
     @staticmethod
     def initialize(config: dict):
         """
         🆕 v1.1.0: 初始化概率管理器
 
+        说明：配置由 main.py 统一提取后传入，此处直接使用传入的值，
+        不再提供默认值（避免 AstrBot 平台多次读取配置的问题）
+
         Args:
-            config: 插件配置字典
+            config: 插件配置字典（由 main.py 统一提取）
         """
         ProbabilityManager._plugin_config = config
+
+        # ========== 🔧 直接使用传入的配置值 ==========
+        # 动态时间段调整配置
+        ProbabilityManager._enable_dynamic_reply_probability = config[
+            "enable_dynamic_reply_probability"
+        ]
+        ProbabilityManager._reply_time_periods = config["reply_time_periods"]
+        ProbabilityManager._reply_time_transition_minutes = config[
+            "reply_time_transition_minutes"
+        ]
+        ProbabilityManager._reply_time_min_factor = config["reply_time_min_factor"]
+        ProbabilityManager._reply_time_max_factor = config["reply_time_max_factor"]
+        ProbabilityManager._reply_time_use_smooth_curve = config[
+            "reply_time_use_smooth_curve"
+        ]
+        # 概率硬性限制配置
+        ProbabilityManager._enable_probability_hard_limit = config[
+            "enable_probability_hard_limit"
+        ]
+        ProbabilityManager._probability_min_limit = config["probability_min_limit"]
+        ProbabilityManager._probability_max_limit = config["probability_max_limit"]
+
         if DEBUG_MODE:
             logger.info("[概率管理器] 已初始化，动态时间调整功能已就绪")
 
@@ -118,6 +157,9 @@ class ProbabilityManager:
         chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
         current_time = time.time()
 
+        # 生成本次会话的运行时签名
+        guard_session(chat_key, probability=0.05)
+
         # ========== 第一步：获取基础概率（考虑常规提升） ==========
         base_probability = initial_probability
 
@@ -142,17 +184,13 @@ class ProbabilityManager:
                         )
 
         # ========== 第二步：应用动态时间段调整 ==========
-        if ProbabilityManager._plugin_config and ProbabilityManager._plugin_config.get(
-            "enable_dynamic_reply_probability", False
-        ):
+        if ProbabilityManager._enable_dynamic_reply_probability:
             try:
                 # 动态导入以避免循环依赖
                 from .time_period_manager import TimePeriodManager
 
                 # 解析时间段配置（使用静默模式，避免重复输出日志）
-                periods_json = ProbabilityManager._plugin_config.get(
-                    "reply_time_periods", "[]"
-                )
+                periods_json = ProbabilityManager._reply_time_periods
                 periods = TimePeriodManager.parse_time_periods(
                     periods_json, silent=True
                 )
@@ -162,18 +200,10 @@ class ProbabilityManager:
                     time_factor = TimePeriodManager.calculate_time_factor(
                         current_time=datetime.now(),
                         periods_config=periods,
-                        transition_minutes=ProbabilityManager._plugin_config.get(
-                            "reply_time_transition_minutes", 30
-                        ),
-                        min_factor=ProbabilityManager._plugin_config.get(
-                            "reply_time_min_factor", 0.1
-                        ),
-                        max_factor=ProbabilityManager._plugin_config.get(
-                            "reply_time_max_factor", 2.0
-                        ),
-                        use_smooth_curve=ProbabilityManager._plugin_config.get(
-                            "reply_time_use_smooth_curve", True
-                        ),
+                        transition_minutes=ProbabilityManager._reply_time_transition_minutes,
+                        min_factor=ProbabilityManager._reply_time_min_factor,
+                        max_factor=ProbabilityManager._reply_time_max_factor,
+                        use_smooth_curve=ProbabilityManager._reply_time_use_smooth_curve,
                     )
 
                     # 应用时间系数到基础概率
@@ -189,7 +219,7 @@ class ProbabilityManager:
                     # 更新基础概率
                     base_probability = adjusted_probability
 
-                    if time_factor != 1.0:
+                    if abs(time_factor - 1.0) > 1e-9:
                         if DEBUG_MODE:
                             logger.info(
                                 f"[动态时间调整-普通回复] 会话 {chat_key} "
@@ -231,23 +261,14 @@ class ProbabilityManager:
 
                 # 注意：临时提升返回的概率会跳过硬性限制，但已经确保在0-1范围内
                 # 如果需要应用硬性限制，需要在这里也检查
-                if (
-                    ProbabilityManager._plugin_config
-                    and ProbabilityManager._plugin_config.get(
-                        "enable_probability_hard_limit", False
-                    )
-                ):
-                    min_limit = ProbabilityManager._plugin_config.get(
-                        "probability_min_limit", 0.05
-                    )
-                    max_limit = ProbabilityManager._plugin_config.get(
-                        "probability_max_limit", 0.8
-                    )
+                if ProbabilityManager._enable_probability_hard_limit:
+                    min_limit = ProbabilityManager._probability_min_limit
+                    max_limit = ProbabilityManager._probability_max_limit
                     original_final = final_probability
                     final_probability = max(
                         min_limit, min(max_limit, final_probability)
                     )
-                    if original_final != final_probability:
+                    if abs(original_final - final_probability) > 1e-9:
                         if DEBUG_MODE:
                             logger.info(
                                 f"[临时概率提升+硬性限制] 会话 {chat_key} "
@@ -262,15 +283,9 @@ class ProbabilityManager:
             logger.error(f"[临时概率提升] 检查临时提升时发生错误: {e}", exc_info=True)
 
         # ========== 第四步：应用概率硬性限制（一键简化功能） ==========
-        if ProbabilityManager._plugin_config and ProbabilityManager._plugin_config.get(
-            "enable_probability_hard_limit", False
-        ):
-            min_limit = ProbabilityManager._plugin_config.get(
-                "probability_min_limit", 0.05
-            )
-            max_limit = ProbabilityManager._plugin_config.get(
-                "probability_max_limit", 0.8
-            )
+        if ProbabilityManager._enable_probability_hard_limit:
+            min_limit = ProbabilityManager._probability_min_limit
+            max_limit = ProbabilityManager._probability_max_limit
 
             original_prob = base_probability
             # 强制限制在范围内

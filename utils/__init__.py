@@ -31,6 +31,27 @@ from .time_period_manager import TimePeriodManager
 # v1.1.2 新增功能
 from .ai_response_filter import AIResponseFilter
 
+# v1.2.0 新增功能 - 拟人增强模式
+from .humanize_mode import HumanizeModeManager
+
+# v1.2.0 新增功能 - 注意力冷却机制
+from .cooldown_manager import CooldownManager
+
+# v1.2.0 新增功能 - 平台 LTM 辅助（获取平台图片描述）
+from .platform_ltm_helper import PlatformLTMHelper
+
+# v1.2.0 新增功能 - 消息缓存管理器
+from .message_cache_manager import MessageCacheManager
+
+# v1.2.0 新增功能 - 表情包检测器
+from .emoji_detector import EmojiDetector, EMOJI_MARKER
+
+# v1.2.0 新增功能 - 图片描述缓存
+from .image_description_cache import ImageDescriptionCache
+
+# v1.2.0 新增功能 - 转发消息解析器
+from .forward_message_parser import ForwardMessageParser
+
 # 全局调试日志开关（供各模块统一读取）
 DEBUG_MODE: bool = False
 
@@ -66,6 +87,21 @@ __all__ = [
     "TimePeriodManager",
     # v1.1.2 开始的新增
     "AIResponseFilter",
+    # v1.2.0 开始的新增 - 拟人增强模式
+    "HumanizeModeManager",
+    # v1.2.0 开始的新增 - 注意力冷却机制
+    "CooldownManager",
+    # v1.2.0 开始的新增 - 平台 LTM 辅助
+    "PlatformLTMHelper",
+    # v1.2.0 开始的新增 - 消息缓存管理器
+    "MessageCacheManager",
+    # v1.2.0 开始的新增 - 表情包检测器
+    "EmojiDetector",
+    "EMOJI_MARKER",
+    # v1.2.0 开始的新增 - 图片描述缓存
+    "ImageDescriptionCache",
+    # v1.2.0 开始的新增 - 转发消息解析器
+    "ForwardMessageParser",
     # 全局调试
     "DEBUG_MODE",
     "set_debug_mode",
