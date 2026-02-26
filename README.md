@@ -137,7 +137,7 @@
 
 ### 依赖要求
 
-- **必需**: AstrBot >= v4.0.0
+- **必需**: AstrBot >= v4.11.0
 - **必需**: `pypinyin >= 0.44.0`
 - **推荐**: `astrbot_plugin_livingmemory` 或 `strbot_plugin_play_sy` (记忆系统)
 
