@@ -93,7 +93,7 @@
 - **动态概率系统** — 回复后概率提升促进连续对话，时段概率模拟作息节奏
 - **注意力机制** — 多用户同时追踪(0-1连续值)，指数衰减，情绪检测，注意力溢出
 - **智能缓存** — "缓存+转正"机制，未回复消息保留上下文，下次回复时自动合并
-- **记忆系统** — 支持 LivingMemory（推荐，混合检索+人格隔离）和 Legacy 双模式
+- **记忆系统** — 支持 LivingMemory（混合检索+人格隔离）和 Legacy （稳定，推荐）双模式
 
 ### 社交行为
 
@@ -190,7 +190,7 @@
   "emoji_decay_min_probability": 0.1,
 
   "enable_memory_injection": true,
-  "memory_plugin_mode": "auto",
+  "memory_plugin_mode": "legacy",
   "livingmemory_version": "v1",
   "livingmemory_top_k": 5,
   "memory_insertion_timing": "pre_decision",
@@ -408,23 +408,6 @@
 - 适配新版 AstrBot (>= v4.11.0)
 - 适配 LivingMemory v1/v2 自动检测
 - 完全向下兼容 v1.1.x 配置
-
----
-
-### v1.1.2 (2025-11-29)
-
-**核心功能更新：关键词智能模式 + 智能自适应主动对话**
-
-- **关键词智能模式** — 触发关键词时可选择保留AI判断，拒绝机械式回复
-- **完整指令字符串检测** — 支持 `new`、`help` 等全字符串匹配
-- **智能自适应主动对话** — 互动评分系统，越聊越开心，冷场自动收敛
-- **注意力机制增强** — 智能衰减、情感检测、注意力保护阈值
-- **戳一戳功能增强** — 智能概率增值、群组独立控制
-- **LivingMemory记忆插件适配** — 混合检索、会话隔离、人格隔离
-- **AI响应过滤器** — 自动过滤思考模型(o1/DeepSeek-R1等)的思考链
-- **消息上下文获取重构** — 统一发送者信息，优化缓存策略
-- **吐槽系统优化** — 累积失败独立追踪，自然衰减机制
-- **防误判机制** — 严格状态追踪，避免主动对话成功/失败误判
 
 ---
 
@@ -1511,8 +1494,8 @@
 
 > 本插件支持两种记忆插件，优秀的记忆系统让AI的判断和回复更加智能，特此感谢：
 
-- **推荐：** [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) — 作者：lxfight's Astrbot Plugins 组织及众多贡献者
-- **传统：** [strbot_plugin_play_sy](https://github.com/kjqwer/strbot_plugin_play_sy) — 作者：kjqwdw
+- **智能：** [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) — 作者：lxfight's Astrbot Plugins 组织及众多贡献者
+- **传统(推荐)：** [strbot_plugin_play_sy](https://github.com/kjqwer/strbot_plugin_play_sy) — 作者：kjqwdw
 
 ### 其他
 
