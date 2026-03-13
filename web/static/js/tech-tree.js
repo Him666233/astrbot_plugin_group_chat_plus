@@ -1418,6 +1418,54 @@ const TechTree = {
         canvas.addEventListener('mousedown', onPointerDown);
         document.addEventListener('mousemove', onPointerMove);
         document.addEventListener('mouseup', onPointerUp);
+
+        // ── Touch support for mobile / tablet ──
+        canvas.addEventListener('touchstart', (e) => {
+            // Single finger touch only; multi-touch reserved for pinch-zoom etc.
+            if (e.touches.length !== 1) return;
+            // Don't drag on interactive elements
+            if (e.target.closest('.flow-node, .config-panel, .flow-breadcrumb, button, input, select, textarea, .prompt-floater')) return;
+            const t = e.touches[0];
+            this._isDragging = true;
+            dragStartX = t.clientX;
+            dragStartY = t.clientY;
+            dragStartPanX = this._panX;
+            dragStartPanY = this._panY;
+            this._viewport.style.transition = 'none';
+            // Track cumulative movement to distinguish tap vs drag
+            this._touchMoved = 0;
+        }, { passive: true });
+
+        document.addEventListener('touchmove', (e) => {
+            if (!this._isDragging) return;
+            if (e.touches.length !== 1) return;
+            const t = e.touches[0];
+            const dx = t.clientX - dragStartX;
+            const dy = t.clientY - dragStartY;
+            this._touchMoved = Math.abs(dx) + Math.abs(dy);
+            // Once clearly dragging, prevent page scroll
+            if (this._touchMoved > 8) {
+                e.preventDefault();
+            }
+            this._panX = dragStartPanX + dx;
+            this._panY = dragStartPanY + dy;
+            const tx = this._baseTranslateX + this._panX;
+            const ty = this._baseTranslateY + this._panY;
+            const s = this._baseScale;
+            this._viewport.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+        }, { passive: false });
+
+        document.addEventListener('touchend', () => {
+            if (!this._isDragging) return;
+            this._isDragging = false;
+            this._viewport.style.transition = '';
+        });
+
+        document.addEventListener('touchcancel', () => {
+            if (!this._isDragging) return;
+            this._isDragging = false;
+            this._viewport.style.transition = '';
+        });
     },
 
     _bindGlobalEvents() {

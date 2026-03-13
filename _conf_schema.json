@@ -332,7 +332,7 @@
         "hint": "【v1.2.0新增·仅对带图片的消息生效】概率筛选失败后，带图片的消息在缓存前等待的延迟时间（毫秒）。这个延迟让平台有时间处理图片并生成描述。普通文字消息不受此延迟影响。设置0则不延迟。默认50毫秒。建议500-1000毫秒",
         "default": 500
     },
-    "_emoji_filter_section_header": {
+    "__emoji_filter_section_header": {
         "description": "═══════════════ 🎭 表情包过滤设置（仅QQ平台） ═══════════════",
         "type": "string",
         "hint": "【⚠️ 平台限制：仅支持QQ平台】以下是表情包（贴纸/Sticker）过滤相关的配置。开启后可识别QQ平台标记的表情包（通过OneBot协议的sub_type字段），降低表情包触发AI回复的概率，并为通过筛选的表情包添加标记让AI正确理解。支持的QQ适配器：NapCat、Lagrange、aiocqhttp等OneBot协议实现。其他平台（如Discord、Telegram等）不支持此功能，开启后会自动跳过检测",

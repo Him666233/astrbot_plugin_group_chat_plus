@@ -14,6 +14,7 @@
     position: relative;
     z-index: 1;
     cursor: grab;
+    touch-action: none;
 }
 #tech-tree-canvas:active {
     cursor: grabbing;
@@ -415,6 +416,7 @@
     transform: translateX(100%);
     transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94), visibility 0s linear 0.3s;
     pointer-events: none;
+    touch-action: auto;
     visibility: hidden;
     will-change: transform;
     overflow: hidden;
