@@ -1,0 +1,272 @@
+/* ========== Config Panel (Right Slide-out) ========== */
+/* Base layout is now in tech-tree.css (position:absolute + transform slide) */
+
+.config-panel-header {
+    padding: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--glass-border);
+    flex-shrink: 0;
+}
+.config-panel-header h3 {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+#config-panel-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 16px;
+}
+
+/* ========== Config Field ========== */
+.config-field {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+.config-field:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+}
+
+/* Override global red focus within config panel */
+#config-panel-body input:focus,
+#config-panel-body textarea:focus,
+#config-panel-body select:focus {
+    border-color: var(--glass-border-hover);
+    outline: none;
+}
+.config-field-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+/* ---- 可折叠文本通用样式 ---- */
+.config-field-hint,
+.config-field-default {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+.config-field-hint { margin-bottom: 8px; }
+.config-field-default { margin-top: 4px; }
+
+/* 需要折叠的长文本（JS 添加 .collapsible） */
+.config-field-hint.collapsible,
+.config-field-default.collapsible {
+    max-height: 5.6em;  /* 约4行 */
+    overflow: hidden;
+    cursor: pointer;
+    transition: max-height 0.3s ease;
+    position: relative;
+}
+/* 折叠态底部渐隐效果 */
+.config-field-hint.collapsible::before,
+.config-field-default.collapsible::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 1.8em;
+    background: linear-gradient(to bottom, transparent, var(--bg-secondary));
+    pointer-events: none;
+    z-index: 1;
+}
+/* 展开态 */
+.config-field-hint.collapsible.expanded,
+.config-field-default.collapsible.expanded {
+    overflow: hidden; /* JS 精确控制 max-height，CSS 只负责 overflow */
+}
+.config-field-hint.collapsible.expanded::after,
+.config-field-default.collapsible.expanded::after {
+    content: none;
+}
+.config-field-hint.collapsible.expanded::before,
+.config-field-default.collapsible.expanded::before {
+    content: none;
+}
+/* 折叠/展开 toggle 按钮（JS 插入到元素后） */
+.collapse-toggle {
+    display: block;
+    text-align: right;
+    font-size: 10px;
+    color: var(--accent-red);
+    cursor: pointer;
+    user-select: none;
+    margin-top: 2px;
+}
+.config-field.disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.dep-hint {
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    background: rgba(255, 170, 0, 0.08);
+    border: 1px solid rgba(255, 170, 0, 0.15);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+.config-field .dep-hint {
+    margin-bottom: 8px;
+}
+
+/* ========== Toggle Switch ========== */
+.toggle-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.toggle {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    flex-shrink: 0;
+}
+.toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.toggle-slider {
+    position: absolute;
+    inset: 0;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 11px;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+.toggle-slider::before {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 2px;
+    top: 2px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: all var(--transition);
+}
+.toggle input:checked + .toggle-slider {
+    background: var(--accent-red);
+    border-color: var(--accent-red);
+}
+.toggle input:checked + .toggle-slider::before {
+    transform: translateX(18px);
+    background: #fff;
+}
+
+/* ========== List Editor ========== */
+.list-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.list-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.list-item input {
+    flex: 1;
+}
+.list-item .btn-icon {
+    color: var(--accent-red);
+    font-size: 14px;
+}
+.list-add-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+}
+.list-add-row input {
+    flex: 1;
+}
+
+/* ========== Number Input ========== */
+.number-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.number-input-wrap input[type="number"] {
+    width: 120px;
+}
+
+/* ========== Modified Indicator ========== */
+.config-field.modified .config-field-label::after {
+    content: " (已修改)";
+    color: var(--accent-orange);
+    font-weight: 400;
+    font-size: 11px;
+}
+
+/* ========== Select Dropdown ========== */
+.config-select {
+    width: 100%;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23555555' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+}
+
+/* ========== Security Readonly Banner ========== */
+.security-readonly-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: rgba(255, 160, 0, 0.08);
+    border: 1px solid rgba(255, 160, 0, 0.35);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+.security-readonly-banner-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.security-readonly-banner-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.security-readonly-banner-text strong {
+    color: var(--text-primary);
+}
+
+/* ========== Readonly Config Field ========== */
+.config-field-readonly {
+    background: rgba(255, 160, 0, 0.04);
+    border-radius: 6px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 160, 0, 0.2) !important;
+}
+.config-field-readonly .config-field-label {
+    color: var(--text-secondary);
+}
+.config-field-readonly-value {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: monospace;
+    background: var(--glass-bg);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin: 6px 0 4px;
+    word-break: break-all;
+}
+.config-field-readonly-note {
+    font-size: 11px;
+    color: rgba(255, 160, 0, 0.75);
+    margin-top: 4px;
+}

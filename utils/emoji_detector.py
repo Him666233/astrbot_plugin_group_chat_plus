@@ -15,7 +15,7 @@
 4. 通过 toDict() 获取完整数据检查
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 """
 
 from typing import List, Optional
@@ -26,6 +26,12 @@ DEBUG_MODE: bool = False
 
 # 表情包标记常量
 EMOJI_MARKER = "[表情包图片]"
+# 表情包内联提示（附加在标记后，帮助多模态AI正确理解图片类型）
+EMOJI_INLINE_HINT = (
+    "（系统提示：用户发送的图片是一张表情包/贴纸，不是普通照片或截图。"
+    "你可以看懂图片来理解其传达的情绪和幽默感，"
+    '但请像真人一样自然回应——不要描述或复述图片内容，不要说"你发了个表情包"。）'
+)
 
 
 class EmojiDetector:
@@ -226,10 +232,10 @@ class EmojiDetector:
             添加标记后的消息文本
         """
         if not message_text:
-            return EMOJI_MARKER
+            return f"{EMOJI_MARKER}{EMOJI_INLINE_HINT}"
 
         # 如果已经有标记了，不重复添加
         if EMOJI_MARKER in message_text:
             return message_text
 
-        return f"{EMOJI_MARKER}{message_text}"
+        return f"{EMOJI_MARKER}{EMOJI_INLINE_HINT} {message_text}"

@@ -1,0 +1,675 @@
+/* ========== Glass Morphism Tech Tree — Modern Dark ========== */
+
+/* ===== Viewport & Canvas ===== */
+#tech-tree-wrapper {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    overflow: clip;
+    position: relative;
+}
+#tech-tree-canvas {
+    flex: 1;
+    overflow: clip;
+    position: relative;
+    z-index: 1;
+    cursor: grab;
+}
+#tech-tree-canvas:active {
+    cursor: grabbing;
+}
+
+#flow-viewport {
+    position: relative;
+    min-width: 100%;
+    min-height: 100%;
+    transition: transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    transform-origin: 0 0;
+}
+
+/* ===== Layers ===== */
+.flow-layer-svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    overflow: visible;
+}
+.flow-layer-div {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+}
+
+/* Layer specific transitions */
+#flow-svg-level0, #flow-nodes-level0 {
+    transition: opacity 0.5s ease;
+}
+
+/* Main pipeline connection paths */
+.conn-path {
+    fill: none;
+    stroke: var(--accent-red);
+    stroke-width: 2;
+    opacity: 0.65;
+    filter: url(#line-glow);
+}
+
+/* Cross-pipeline reference links */
+.cross-link-path {
+    fill: none;
+    stroke: var(--accent-orange);
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+    opacity: 0.4;
+    filter: url(#line-glow);
+}
+.cross-link-label-bg {
+    fill: var(--bg-primary);
+    fill-opacity: 0.95;
+    rx: 8;
+    ry: 8;
+    stroke: var(--accent-orange);
+    stroke-width: 0.5;
+    stroke-opacity: 0.3;
+}
+.cross-link-label {
+    font-size: 11px;
+    fill: var(--accent-orange);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif;
+    font-weight: 600;
+    opacity: 0.9;
+}
+
+/* Step connection paths */
+.step-conn-path {
+    fill: none;
+    stroke: var(--accent-red);
+    stroke-width: 2.5;
+    opacity: 0.75;
+    filter: url(#step-line-glow);
+    animation: line-draw 0.5s ease both;
+}
+@keyframes line-draw {
+    from { opacity: 0; }
+    to { opacity: 0.75; }
+}
+
+/* Arrow marker */
+.conn-arrow {
+    fill: var(--accent-red);
+    opacity: 0.6;
+}
+
+
+/* ===== Pipeline Labels ===== */
+.pipeline-title {
+    position: absolute;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    pointer-events: none;
+    transition: opacity 0.5s ease;
+}
+.pipeline-title-icon {
+    margin-right: 5px;
+    font-size: 15px;
+}
+.pipeline-title-sub {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+    letter-spacing: 0;
+    margin-top: 3px;
+    opacity: 0.7;
+}
+
+/* ===== Stage Nodes (Level 0 — Glass Cards) ===== */
+.flow-node {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+    pointer-events: auto;
+    z-index: 1;
+}
+
+.flow-node--stage {
+    transform: translate(-50%, -50%);
+    transition: opacity 0.5s ease;
+}
+
+.stage-card {
+    width: 100px;
+    height: 88px;
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    position: relative;
+    transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    flex-shrink: 0;
+    overflow: hidden;
+}
+
+.stage-card-icon {
+    font-size: 26px;
+    line-height: 1;
+    filter: drop-shadow(0 0 6px rgba(255,255,255,0.1));
+}
+
+.stage-card-name {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.2;
+    text-align: center;
+    max-width: 88px;
+    opacity: 0.9;
+}
+
+.stage-card-status {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    border-radius: 0 0 14px 14px;
+    background: var(--accent-gray);
+    opacity: 0.4;
+    transition: all 0.3s;
+}
+
+/* Hover States */
+.flow-node--stage:hover .stage-card {
+    background: var(--glass-bg-hover);
+    border-color: var(--glass-border-hover);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3), 0 0 20px var(--accent-glow);
+}
+
+.flow-node--enabled .stage-card {
+    border-color: rgba(34,197,94,0.2);
+}
+.flow-node--enabled .stage-card-status {
+    background: var(--accent-green);
+    opacity: 0.7;
+    box-shadow: 0 0 8px rgba(34,197,94,0.3);
+}
+.flow-node--partial .stage-card {
+    border-color: rgba(232,168,56,0.15);
+}
+.flow-node--partial .stage-card-status {
+    background: var(--accent-orange);
+    opacity: 0.6;
+}
+.flow-node--disabled .stage-card {
+    opacity: 0.25;
+}
+.flow-node--disabled {
+    cursor: default;
+}
+
+
+/* ===== Step Nodes (Level 1 — Glass Squares) ===== */
+.flow-node--step {
+    transform: translate(-50%, -50%);
+    animation: step-appear 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.step-card {
+    width: 60px;
+    height: 60px;
+    background: var(--glass-bg-active);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    position: relative;
+    transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    flex-shrink: 0;
+}
+
+.flow-node--step:hover .step-card {
+    background: var(--glass-bg-hover);
+    border-color: rgba(224,32,32,0.25);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+}
+.flow-node--step.active .step-card {
+    background: var(--glass-bg-active);
+    border-color: rgba(224,32,32,0.4);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+}
+
+.flow-node--step.step-on .step-card {
+    border-color: rgba(34,197,94,0.25);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.step-status-dot {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--bg-primary);
+}
+.step-status-dot.on {
+    background: var(--accent-green);
+    box-shadow: 0 0 6px rgba(34,197,94,0.5);
+}
+.step-status-dot.off {
+    background: var(--accent-gray);
+}
+
+.step-label {
+    margin-top: 6px;
+    text-align: center;
+    pointer-events: none;
+}
+.step-label-name {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    max-width: 90px;
+    line-height: 1.3;
+}
+.step-label-gear {
+    font-size: 8px;
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.flow-node--step:hover .step-label-gear {
+    opacity: 1;
+}
+
+.flow-node--step.internal .step-card {
+    border-style: dashed;
+    opacity: 0.7;
+}
+.flow-node--step.internal { cursor: pointer; }
+.flow-node--step.internal:hover .step-card {
+    border-color: rgba(224, 32, 32, 0.4);
+    box-shadow: 0 4px 16px rgba(224, 32, 32, 0.1);
+}
+
+.flow-node--step.disabled-step .step-card {
+    opacity: 0.7;
+}
+.flow-node--step.disabled-step { cursor: pointer; }
+.flow-node--step.disabled-step:hover .step-card {
+    border-color: rgba(224, 32, 32, 0.4);
+    box-shadow: 0 4px 16px rgba(224, 32, 32, 0.1);
+}
+
+@keyframes step-appear {
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* ===== Step node background glow (Vignette to mask level 0) ===== */
+.step-bg-glow {
+    display: none;
+}
+
+
+/* ===== Particle Animation ===== */
+.particle-core {
+    filter: url(#particle-glow);
+}
+.particle-trail {
+    filter: url(#particle-glow);
+}
+
+/* Node pulse when particle passes through an enabled node */
+@keyframes node-pulse-green {
+    0% { box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 0 0 0 rgba(34,197,94,0.5); }
+    50% { box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 0 12px 8px rgba(34,197,94,0.2); }
+    100% { box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 0 0 16px rgba(34,197,94,0); }
+}
+@keyframes node-pulse-orange {
+    0% { box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 0 0 0 rgba(232,168,56,0.5); }
+    50% { box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 0 12px 8px rgba(232,168,56,0.2); }
+    100% { box-shadow: 0 4px 16px rgba(0,0,0,0.2), 0 0 0 16px rgba(232,168,56,0); }
+}
+.stage-card.node-pulsing-green,
+.step-card.node-pulsing-green {
+    animation: node-pulse-green 0.7s ease-out !important;
+}
+.stage-card.node-pulsing-orange,
+.step-card.node-pulsing-orange {
+    animation: node-pulse-orange 0.7s ease-out !important;
+}
+
+
+/* ===== Breadcrumb Navigation ===== */
+.flow-breadcrumb {
+    padding: 10px 20px;
+    background: var(--bg-secondary);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--glass-border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    z-index: 10;
+}
+.flow-breadcrumb.hidden {
+    display: none;
+}
+.breadcrumb-segment {
+    font-size: 13px;
+    color: var(--accent-red);
+    cursor: pointer;
+    transition: opacity 0.2s;
+    opacity: 0.8;
+}
+.breadcrumb-segment:hover { opacity: 0.6; }
+.breadcrumb-separator {
+    font-size: 12px;
+    color: var(--text-muted);
+    user-select: none;
+    opacity: 0.5;
+}
+.breadcrumb-current {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    opacity: 0.9;
+}
+
+
+/* ===== Config Panel — smooth slide, NO bounce ===== */
+.config-panel {
+    width: var(--panel-width);
+    min-width: var(--panel-width);
+    max-width: var(--panel-width);
+    background: var(--bg-secondary);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-left: 1px solid var(--glass-border);
+    display: flex !important;
+    flex-direction: column;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    z-index: 100;
+    transform: translateX(100%);
+    transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94), visibility 0s linear 0.3s;
+    pointer-events: none;
+    visibility: hidden;
+    will-change: transform;
+    overflow: hidden;
+}
+.config-panel.visible {
+    transform: translateX(0);
+    pointer-events: auto;
+    visibility: visible;
+    transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94), visibility 0s linear 0s;
+}
+
+.config-panel-header {
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--glass-border);
+    flex-shrink: 0;
+}
+.config-panel-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#config-panel-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 14px;
+}
+
+/* ===== Tooltip ===== */
+.flow-tooltip {
+    position: fixed;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    max-width: 220px;
+    pointer-events: none;
+    z-index: 200;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.2s, transform 0.2s;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.flow-tooltip.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+.flow-tooltip-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 3px;
+}
+.flow-tooltip-desc {
+    font-size: 10px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+/* ===== Prompt Preview & Floater ===== */
+.prompt-preview {
+    margin: 4px 0 8px;
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.prompt-preview-toggle {
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    background: var(--bg-input);
+    user-select: none;
+    transition: background .15s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.prompt-preview-toggle:hover { background: var(--bg-hover); }
+.prompt-toggle-icon {
+    display: inline-block;
+    width: 12px;
+    font-size: 10px;
+    transition: transform .15s;
+}
+.prompt-preview-body.hidden { display: none; }
+.prompt-preview-tip {
+    padding: 6px 10px 2px;
+    font-size: 10px;
+    color: var(--accent-red);
+}
+.prompt-preview-content {
+    margin: 0;
+    padding: 6px 10px 10px;
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+}
+.prompt-float-btn {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 10px;
+    color: var(--accent-red);
+    background: transparent;
+    border: 1px solid rgba(224,32,32,0.3);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all .2s;
+    line-height: 1.4;
+}
+.prompt-float-btn:hover {
+    background: var(--accent-red);
+    color: #fff;
+}
+.prompt-floater {
+    position: fixed;
+    z-index: 9999;
+    min-width: 360px;
+    max-width: 560px;
+    background: var(--bg-card);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    resize: both;
+    animation: floater-in .2s ease;
+}
+@keyframes floater-in {
+    from { opacity: 0; transform: scale(0.97); }
+    to   { opacity: 1; transform: none; }
+}
+.prompt-floater-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--glass-bg);
+    border-bottom: 1px solid var(--glass-border);
+    cursor: move;
+    user-select: none;
+    flex-shrink: 0;
+}
+.prompt-floater-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.prompt-floater-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: all .15s;
+    flex-shrink: 0;
+}
+.prompt-floater-close:hover {
+    background: var(--accent-red);
+    color: #fff;
+}
+.prompt-floater-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    min-height: 120px;
+    max-height: 50vh;
+}
+.prompt-floater-tip {
+    font-size: 11px;
+    color: var(--accent-red);
+    margin-bottom: 8px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+.prompt-floater-content {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ===== 移动端：配置面板改为底部抽屉 ===== */
+@media (max-width: 767px) {
+    .config-panel {
+        position: fixed;
+        top: auto !important;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100% !important;
+        min-width: unset !important;
+        max-width: unset !important;
+        height: 72vh;
+        max-height: 72vh;
+        border-left: none;
+        border-top: 1px solid var(--glass-border);
+        border-radius: 16px 16px 0 0;
+        /* 覆盖原有的 translateX 动画，改用 translateY */
+        transform: translateY(100%) !important;
+        transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                    visibility 0s linear 0.3s !important;
+        z-index: 998;
+    }
+    .config-panel.visible {
+        transform: translateY(0) !important;
+        transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                    visibility 0s linear 0s !important;
+    }
+    /* 顶部拖动条指示器 */
+    .config-panel-header {
+        position: relative;
+        padding-top: 22px;
+    }
+    .config-panel-header::before {
+        content: '';
+        display: block;
+        width: 36px;
+        height: 4px;
+        background: var(--border-color);
+        border-radius: 2px;
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+    }
+
+    /* 浮动提示框在移动端全宽 */
+    .prompt-floater {
+        min-width: unset;
+        max-width: calc(100vw - 24px);
+        width: calc(100vw - 24px);
+        resize: none;
+        left: 12px !important;
+        right: 12px !important;
+    }
+}

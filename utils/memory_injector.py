@@ -23,7 +23,7 @@
 - 每次调用都会实时获取当前人格ID，支持动态人格切换
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 """
 
 from typing import Optional
@@ -103,6 +103,20 @@ class MemoryInjector:
                     plugin_instance, "_initialization_complete", False
                 )
                 memory_engine = getattr(plugin_instance, "memory_engine", None)
+
+                # 自动降级检测：v1属性不存在时尝试v2路径（应对插件升级场景）
+                if not memory_engine:
+                    initializer = getattr(plugin_instance, "initializer", None)
+                    if initializer:
+                        is_initialized = getattr(
+                            initializer, "is_initialized", False
+                        ) or getattr(initializer, "_initialization_complete", False)
+                        memory_engine = getattr(initializer, "memory_engine", None)
+                        if memory_engine and DEBUG_MODE:
+                            logger.info(
+                                "[LivingMemory-v1] 自动降级为v2路径（检测到initializer架构）"
+                            )
+
                 return plugin_instance, is_initialized, memory_engine
 
         except Exception as e:

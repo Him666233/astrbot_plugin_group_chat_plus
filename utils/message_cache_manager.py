@@ -3,7 +3,7 @@
 负责统一管理待决策消息的缓存、读取、合并和转正保存
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 """
 
 import time
@@ -235,10 +235,16 @@ class MessageCacheManager:
         if history_messages is None:
             history_messages = []
 
-        # 获取缓存消息
-        cached_messages = self.get_cached_messages(
-            chat_id, exclude_current=exclude_current
-        )
+        # 获取缓存消息（仅普通缓存，排除窗口缓冲消息）
+        try:
+            cached_messages = self.get_regular_cached_messages(
+                chat_id, exclude_current=exclude_current
+            )
+        except Exception:
+            # 降级：使用所有缓存消息（老行为）
+            cached_messages = self.get_cached_messages(
+                chat_id, exclude_current=exclude_current
+            )
 
         if not cached_messages:
             return history_messages, 0, 0
@@ -397,13 +403,19 @@ class MessageCacheManager:
                 logger.info(f"  [缓存管理器] 主动对话正在处理，跳过缓存转正")
             return []
 
-        # 过滤要转正的消息
+        # 过滤要转正的消息（Phase-1：仅处理普通缓存，跳过窗口缓冲消息）
         raw_cached = []
         skipped_processing = 0
+        skipped_window_buffered = 0
 
         for msg in self.pending_messages_cache[chat_id]:
             msg_id = msg.get("message_id")
             msg_timestamp = msg.get("timestamp", 0)
+
+            # 跳过窗口缓冲消息（Phase-2 单独保存）
+            if msg.get("window_buffered", False):
+                skipped_window_buffered += 1
+                continue
 
             # 排除当前消息
             if current_msg_id and msg_id == current_msg_id:
@@ -423,6 +435,11 @@ class MessageCacheManager:
                 continue
 
             raw_cached.append(msg)
+
+        if self.debug_mode and skipped_window_buffered > 0:
+            logger.info(
+                f"  [缓存管理器] Phase-1 跳过 {skipped_window_buffered} 条窗口缓冲消息（待Phase-2保存）"
+            )
 
         if skipped_processing > 0:
             logger.info(
@@ -524,11 +541,16 @@ class MessageCacheManager:
 
         original_count = len(self.pending_messages_cache[chat_id])
 
-        # 保留：时间戳晚于当前消息的 或 正在处理中的消息
+        # 保留：时间戳晚于当前消息的 或 正在处理中的消息 或 窗口缓冲消息
         new_cache = []
         for msg in self.pending_messages_cache[chat_id]:
             msg_id = msg.get("message_id")
             msg_timestamp = msg.get("timestamp", 0)
+
+            # 保留窗口缓冲消息（Phase-1 不清除，等 Phase-2 处理）
+            if msg.get("window_buffered", False):
+                new_cache.append(msg)
+                continue
 
             # 保留正在处理中的消息（排除当前消息）
             if msg_id and msg_id in processing_msg_ids and msg_id != current_msg_id:
@@ -565,3 +587,206 @@ class MessageCacheManager:
     def has_cache(self, chat_id: str) -> bool:
         """检查是否有缓存消息"""
         return self.get_cache_count(chat_id) > 0
+
+    def get_regular_cached_messages(
+        self,
+        chat_id: str,
+        exclude_current: bool = True,
+    ) -> List[dict]:
+        """
+        获取普通缓存消息（排除窗口缓冲消息，用于合并到历史上下文）
+
+        Args:
+            chat_id: 会话ID
+            exclude_current: 是否排除最后一条（当前消息）
+
+        Returns:
+            过滤后的普通缓存消息列表（不含 window_buffered=True 的消息）
+        """
+        if chat_id not in self.pending_messages_cache:
+            return []
+
+        cached_messages = self.pending_messages_cache[chat_id]
+
+        # 如果排除当前消息且至少有2条消息
+        if exclude_current and len(cached_messages) > 1:
+            cached_messages = cached_messages[:-1]
+        elif exclude_current:
+            return []
+
+        # 过滤掉窗口缓冲消息
+        regular_messages = [
+            msg for msg in cached_messages if not msg.get("window_buffered", False)
+        ]
+
+        # 过滤过期消息
+        filtered_messages = ProactiveChatManager.filter_expired_cached_messages(
+            regular_messages
+        )
+
+        return filtered_messages or []
+
+    def get_window_buffered_messages(
+        self,
+        chat_id: str,
+    ) -> List[dict]:
+        """
+        获取窗口缓冲消息（用于拼接到当前消息下方的追加区域）
+
+        Args:
+            chat_id: 会话ID
+
+        Returns:
+            窗口缓冲消息列表（window_buffered=True 的消息），按时间排序
+        """
+        if chat_id not in self.pending_messages_cache:
+            return []
+
+        window_msgs = [
+            msg
+            for msg in self.pending_messages_cache[chat_id]
+            if msg.get("window_buffered", False)
+        ]
+
+        # 按时间排序
+        window_msgs.sort(
+            key=lambda m: m.get("message_timestamp") or m.get("timestamp", 0)
+        )
+
+        return window_msgs
+
+    def prepare_window_buffered_for_save(
+        self,
+        chat_id: str,
+        processing_msg_ids: Optional[Set[str]] = None,
+    ) -> List[dict]:
+        """
+        准备窗口缓冲消息的转正数据（Phase-2 保存，在AI回复之后）
+
+        Args:
+            chat_id: 会话ID
+            processing_msg_ids: 正在处理中的消息ID集合
+
+        Returns:
+            待转正的窗口缓冲消息列表（已添加元数据）
+        """
+        if processing_msg_ids is None:
+            processing_msg_ids = set()
+
+        window_msgs = self.get_window_buffered_messages(chat_id)
+        if not window_msgs:
+            return []
+
+        logger.info(
+            f"  [缓存管理器] Phase-2: 发现 {len(window_msgs)} 条窗口缓冲消息待转正"
+        )
+
+        cached_messages_to_convert = []
+        for cached_msg in window_msgs:
+            if not isinstance(cached_msg, dict) or "content" not in cached_msg:
+                continue
+
+            msg_id = cached_msg.get("message_id")
+            # 跳过正在处理中的消息
+            if msg_id and msg_id in processing_msg_ids:
+                continue
+
+            raw_content = cached_msg["content"]
+
+            # 确定触发方式
+            trigger_type = None
+            if cached_msg.get("has_trigger_keyword"):
+                trigger_type = "keyword"
+            elif cached_msg.get("is_at_message"):
+                trigger_type = "at"
+            else:
+                trigger_type = "ai_decision"
+
+            # 使用缓存中保存的发送者信息添加元数据
+            msg_content = MessageProcessor.add_metadata_from_cache(
+                raw_content,
+                cached_msg.get("sender_id", "unknown"),
+                cached_msg.get("sender_name", "未知用户"),
+                cached_msg.get("message_timestamp") or cached_msg.get("timestamp"),
+                self.include_timestamp,
+                self.include_sender_info,
+                cached_msg.get("mention_info"),
+                trigger_type,
+                cached_msg.get("poke_info"),
+            )
+
+            # 清理系统提示
+            msg_content = MessageCleaner.clean_message(msg_content)
+
+            # 保存图片URL
+            cached_image_urls = cached_msg.get("image_urls", [])
+
+            convert_entry = {
+                "role": cached_msg.get("role", "user"),
+                "content": msg_content,
+            }
+
+            if cached_image_urls:
+                convert_entry["image_urls"] = cached_image_urls
+
+            cached_messages_to_convert.append(convert_entry)
+
+            if self.debug_mode:
+                sender_info = f"{cached_msg.get('sender_name')}(ID: {cached_msg.get('sender_id')})"
+                logger.info(
+                    f"  [缓存管理器] Phase-2 转正消息（发送者: {sender_info}）: {msg_content[:100]}..."
+                )
+
+        return cached_messages_to_convert
+
+    def clear_window_buffered_cache(
+        self,
+        chat_id: str,
+        saved_msg_ids: Optional[Set[str]] = None,
+    ) -> Tuple[int, int]:
+        """
+        清理已保存的窗口缓冲消息（Phase-2 完成后调用）
+
+        Args:
+            chat_id: 会话ID
+            saved_msg_ids: 已保存的消息ID集合（仅清除这些消息）。
+                          为 None 时清除所有窗口缓冲消息。
+
+        Returns:
+            (cleared_count, remaining_count)
+        """
+        if chat_id not in self.pending_messages_cache:
+            return 0, 0
+
+        original_count = len(self.pending_messages_cache[chat_id])
+
+        if saved_msg_ids is not None:
+            # 仅清除已保存的窗口缓冲消息
+            self.pending_messages_cache[chat_id] = [
+                msg
+                for msg in self.pending_messages_cache[chat_id]
+                if not (
+                    msg.get("window_buffered", False)
+                    and msg.get("message_id") in saved_msg_ids
+                )
+            ]
+        else:
+            # 清除所有窗口缓冲消息
+            self.pending_messages_cache[chat_id] = [
+                msg
+                for msg in self.pending_messages_cache[chat_id]
+                if not msg.get("window_buffered", False)
+            ]
+
+        remaining_count = len(self.pending_messages_cache[chat_id])
+        cleared_count = original_count - remaining_count
+
+        if remaining_count == 0 and chat_id in self.pending_messages_cache:
+            del self.pending_messages_cache[chat_id]
+
+        if cleared_count > 0:
+            logger.info(
+                f"  [缓存管理器] Phase-2: 已清理 {cleared_count} 条窗口缓冲消息"
+            )
+
+        return cleared_count, remaining_count

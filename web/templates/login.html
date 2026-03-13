@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Group Chat Plus - 登录</title>
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/login.css">
+    <meta name="robots" content="noindex, nofollow">
+    <script>
+        (function() {
+            var theme = localStorage.getItem('gcp_theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+</head>
+<body>
+
+    <!-- 登录页 -->
+    <div id="page-login" class="page">
+        <div class="login-container">
+            <img src="/api/logo" alt="Logo" class="login-logo">
+            <h1 class="login-title">Group Chat Plus</h1>
+            <p class="login-subtitle">配置面板</p>
+            <div class="login-form">
+                <input type="password" id="login-password" placeholder="请输入密码"
+                       autocomplete="current-password" maxlength="128">
+                <button id="btn-login" class="btn btn-primary">登录</button>
+                <p class="login-hint">首次启动的初始密码请查看 AstrBot 日志</p>
+            </div>
+            <div id="login-error" class="error-msg"></div>
+        </div>
+        <div class="open-source-notice">
+            <p>本插件完全免费开源，原作者 (Him666233) 不会在任何渠道付费销售。</p>
+            <p>
+                GitHub:
+                <a href="https://github.com/Him666233/astrbot_plugin_group_chat_plus"
+                   target="_blank" rel="noopener noreferrer">Him666233/astrbot_plugin_group_chat_plus</a>
+                · 交流群: QQ 1021544792
+            </p>
+            <p class="open-source-warn">如果你是通过付费或非官方渠道获取的本插件，该副本可能被植入恶意代码，请立即卸载并从官方仓库重新获取。</p>
+        </div>
+    </div>
+
+    <!-- 强制改密页（首次登录） -->
+    <div id="page-password-change" class="page hidden">
+        <div class="login-container">
+            <img src="/api/logo" alt="Logo" class="login-logo">
+            <h2>首次登录，请修改密码</h2>
+            <div class="login-form">
+                <input type="password" id="old-password" placeholder="当前密码"
+                       autocomplete="current-password" maxlength="128">
+                <input type="password" id="new-password" placeholder="新密码"
+                       autocomplete="new-password" maxlength="128">
+                <input type="password" id="confirm-password" placeholder="确认新密码"
+                       autocomplete="new-password" maxlength="128">
+                <p class="login-hint" style="text-align:left;margin:0 0 4px;">
+                    密码要求：6 ~ 128 位，支持任意可打印字符（字母、数字、符号均可）。<br>
+                    建议使用包含大小写字母、数字和符号的强密码，避免使用生日、连续数字等易猜内容。
+                </p>
+                <button id="btn-change-pw" class="btn btn-primary">修改密码</button>
+            </div>
+            <div id="pw-change-error" class="error-msg"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/utils.js"></script>
+    <script src="/static/js/api.js"></script>
+    <script>
+    // 最小化登录逻辑 - 不依赖完整 app.js
+    (function() {
+        'use strict';
+
+        // 工具函数
+        function showError(id, msg) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = msg;
+            el.classList.add('show');
+            // 触发抖动动画（重新播放）
+            el.classList.remove('shake');
+            void el.offsetWidth; // 强制 reflow 以重新触发动画
+            el.classList.add('shake');
+        }
+        function hideError(id) {
+            var el = document.getElementById(id);
+            if (el) { el.classList.remove('show'); el.classList.remove('shake'); }
+        }
+        function showPage(name) {
+            document.querySelectorAll('.page').forEach(function(p) {
+                p.classList.add('hidden');
+            });
+            var page = document.getElementById('page-' + name);
+            if (page) page.classList.remove('hidden');
+        }
+
+        // 检查是否已登录（有效 token 则直接跳转面板）
+        async function checkExistingSession() {
+            var token = Api.getToken ? Api.getToken() : localStorage.getItem('gcp_token');
+            if (!token) return;
+            try {
+                var res = await Api.request('GET', '/api/auth/verify');
+                if (res && res.ok) {
+                    window.location.href = '/panel';
+                } else {
+                    if (Api.clearToken) Api.clearToken();
+                    else localStorage.removeItem('gcp_token');
+                }
+            } catch(e) {
+                // token 无效，停留在登录页
+            }
+        }
+
+        async function doLogin() {
+            var input = document.getElementById('login-password');
+            var pw = input ? input.value.trim() : '';
+            if (!pw) { showError('login-error', '请输入密码'); return; }
+            var btn = document.getElementById('btn-login');
+            if (btn && btn.disabled) return;
+            if (btn) { btn.disabled = true; btn.textContent = '登录中...'; }
+            try {
+                var res = await Api.login(pw);
+
+                if (res.locked) {
+                    showError('login-error', '密码错误次数过多，请等待 ' + res.wait_seconds + ' 秒后再试');
+                    return;
+                }
+                if (!res.ok) {
+                    showError('login-error', res.msg || '密码错误');
+                    return;
+                }
+
+                Api.setToken(res.token);
+                if (input) input.value = '';
+                hideError('login-error');
+
+                if (!res.password_changed) {
+                    showPage('password-change');
+                } else {
+                    // 登录成功，跳转到面板页
+                    window.location.href = '/panel';
+                }
+            } catch(e) {
+                showError('login-error', '网络错误，请重试');
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '登录'; }
+            }
+        }
+
+        async function doChangePassword() {
+            var oldPw = (document.getElementById('old-password') || {}).value.trim() || '';
+            var newPw = (document.getElementById('new-password') || {}).value.trim() || '';
+            var confirmPw = (document.getElementById('confirm-password') || {}).value.trim() || '';
+
+            if (!oldPw || !newPw) { showError('pw-change-error', '请填写所有字段'); return; }
+            if (newPw.length < 6) { showError('pw-change-error', '新密码至少 6 位'); return; }
+            if (newPw.length > 128) { showError('pw-change-error', '新密码不能超过 128 位'); return; }
+            if (newPw !== confirmPw) { showError('pw-change-error', '两次密码不一致'); return; }
+
+            var btn = document.getElementById('btn-change-pw');
+            if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
+
+            try {
+                var res = await Api.changePassword(oldPw, newPw);
+                if (!res.ok) { showError('pw-change-error', res.msg || '修改失败'); return; }
+
+                Api.setToken(res.token);
+                hideError('pw-change-error');
+                window.location.href = '/panel';
+            } catch(e) {
+                showError('pw-change-error', '网络错误，请重试');
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '修改密码'; }
+            }
+        }
+
+        // 绑定事件
+        document.addEventListener('DOMContentLoaded', function() {
+            var btnLogin = document.getElementById('btn-login');
+            if (btnLogin) btnLogin.addEventListener('click', doLogin);
+
+            var pwInput = document.getElementById('login-password');
+            if (pwInput) pwInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') doLogin();
+            });
+
+            var btnChangePw = document.getElementById('btn-change-pw');
+            if (btnChangePw) btnChangePw.addEventListener('click', doChangePassword);
+
+            var confirmPw = document.getElementById('confirm-password');
+            if (confirmPw) confirmPw.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') doChangePassword();
+            });
+
+            // 检查是否已登录
+            checkExistingSession();
+        });
+    })();
+    </script>
+</body>
+</html>

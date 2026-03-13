@@ -8,7 +8,7 @@
 - 自动微调概率参数
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 参考: MaiBot frequency_control.py (简化实现)
 
 v1.2.0 更新：
@@ -160,9 +160,7 @@ class FrequencyAdjuster:
             "过于频繁" / "过少" / "正常" / None(分析失败)
         """
         try:
-            # 使用与 DecisionAI 相同风格的分隔线，在提示词中包裹时间提示块，方便 LLM 识别结构
-            separator = "=" * 60
-            # time_context 用于承载“当前时间与活跃度提示”这一大段文本
+            # time_context 用于承载”当前时间与活跃度提示”这一大段文本
             # 当未启用动态时间段功能时保持为空字符串，不影响原有频率判断逻辑
             time_context = ""
 
@@ -280,15 +278,11 @@ class FrequencyAdjuster:
                         # time_context 最终是一整块可读性较强的文本，会被直接插入到下面构造的 prompt 中，
                         # 用于告诉 LLM 当前所处时间段和推荐的活跃度。
                         time_context = (
-                            f"\n\n{separator}\n"
-                            f"🕐 【当前时间与活跃度提示】\n"
-                            f"{separator}\n"
+                            f"\n\n[系统信息-时间与活跃度]\n"
                             f"当前时间: {current_time_str} ({current_weekday})\n"
                             f"用户配置的时间段: {current_period_name or '默认时段'}\n"
                             f"活跃度系数: {current_factor:.2f} ({factor_desc})\n"
                             f"建议: {activity_suggestion}\n"
-                            f"\n⚠️ 在判断发言频率时，请根据上述活跃度设置，思考当前Bot是否说得太多或太少。\n"
-                            f"{separator}\n"
                         )
                 except Exception as e:
                     # 时间段配置解析或计算失败时，不影响频率分析主流程，只在调试模式下输出日志

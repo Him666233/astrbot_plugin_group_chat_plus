@@ -4,6 +4,14 @@
 # 拼音转换（用于打字错误生成器）
 pypinyin>=0.44.0
 
+# Web 管理面板依赖（HTTP 服务器）
+# 注意：aiohttp 是 AstrBot 平台本身的核心依赖，通过 pip/源码部署时会由 AstrBot 自动安装，
+# 因此本文件中不重复声明。
+# 但若使用 AstrBot 新版打包启动器（exe/独立包）部署，平台依赖可能未完整暴露，
+# 若启动时出现 "ModuleNotFoundError: No module named 'aiohttp'" 报错，
+# 请手动执行：pip install aiohttp>=3.8.0
+# aiohttp>=3.8.0
+
 # 测试依赖
 pytest>=7.0.0
 hypothesis>=6.0.0

@@ -10,7 +10,7 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 """
 
 from typing import List, Dict, Any, Optional
@@ -21,6 +21,9 @@ import os
 import json
 from datetime import datetime, timezone
 from ._session_guard import guard_session
+
+# 导入群聊 ContextManager 的历史截止时间戳机制（共享同一份持久化数据）
+from ...utils.context_manager import ContextManager as _GroupContextManager
 
 # 导入 MessageCleaner（延迟导入以避免循环依赖）
 from typing import TYPE_CHECKING
@@ -866,6 +869,22 @@ class ContextManager:
                             if msg and msg.message_str:  # 只添加有内容的消息
                                 history.append(msg)
 
+                        # 🔧 修复：按历史截止时间戳过滤，丢弃插件重置之前的旧消息
+                        cutoff_ts = _GroupContextManager.get_history_cutoff(chat_id)
+                        if cutoff_ts > 0 and history:
+                            before_count = len(history)
+                            history = [
+                                m
+                                for m in history
+                                if (getattr(m, "timestamp", 0) or 0) >= cutoff_ts
+                            ]
+                            filtered = before_count - len(history)
+                            if filtered > 0:
+                                logger.info(
+                                    f"[上下文管理器-私信] 历史截止过滤: 丢弃 {filtered} 条旧消息 "
+                                    f"(cutoff={cutoff_ts}, chat_id={chat_id})"
+                                )
+
                         if len(history) > 0:
                             official_success = True
                             logger.info(
@@ -1076,6 +1095,22 @@ class ContextManager:
                             )
                             if msg and msg.message_str:
                                 history.append(msg)
+
+                        # 🔧 修复：按历史截止时间戳过滤，丢弃插件重置之前的旧消息
+                        cutoff_ts = _GroupContextManager.get_history_cutoff(chat_id)
+                        if cutoff_ts > 0 and history:
+                            before_count = len(history)
+                            history = [
+                                m
+                                for m in history
+                                if (getattr(m, "timestamp", 0) or 0) >= cutoff_ts
+                            ]
+                            filtered = before_count - len(history)
+                            if filtered > 0:
+                                logger.info(
+                                    f"[上下文管理器-私信] 历史截止过滤: 丢弃 {filtered} 条旧消息 "
+                                    f"(cutoff={cutoff_ts}, chat_id={chat_id})"
+                                )
 
                         if len(history) > 0:
                             official_success = True

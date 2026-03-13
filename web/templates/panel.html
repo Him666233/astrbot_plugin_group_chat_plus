@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Group Chat Plus - 配置面板</title>
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="/panel/static/css/main.css">
+    <link rel="stylesheet" href="/panel/static/css/tech-tree.css">
+    <link rel="stylesheet" href="/panel/static/css/config-panel.css">
+    <link rel="stylesheet" href="/panel/static/css/charts.css">
+    <meta name="robots" content="noindex, nofollow">
+    <script>
+        (function() {
+            var theme = localStorage.getItem('gcp_theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+</head>
+<body>
+
+    <!-- 主界面 -->
+    <div id="page-main" class="page hidden">
+
+        <!-- 移动端：侧边栏遮罩 -->
+        <div id="sidebar-overlay"></div>
+
+        <!-- 移动端：顶部栏 -->
+        <div id="mobile-topbar">
+            <button id="btn-mobile-menu" class="btn-icon" aria-label="打开菜单">☰</button>
+            <span id="mobile-topbar-title">配置流程图</span>
+        </div>
+
+        <!-- 侧边栏 -->
+        <nav id="sidebar">
+            <div class="sidebar-header">
+                <img src="/api/logo" alt="Logo" class="sidebar-logo">
+                <span class="sidebar-title">GCP 面板</span>
+            </div>
+            <ul class="nav-list">
+                <li class="nav-item active" data-view="tech-tree">
+                    <span class="nav-icon">🌳</span> 配置流程图
+                </li>
+                <li class="nav-item" data-view="charts">
+                    <span class="nav-icon">📊</span> 数据可视化
+                </li>
+                <li class="nav-item" data-view="sessions">
+                    <span class="nav-icon">💬</span> 会话管理
+                </li>
+                <li class="nav-item" data-view="commands">
+                    <span class="nav-icon">⚡</span> 指令执行
+                </li>
+                <li class="nav-item" data-view="access-log">
+                    <span class="nav-icon">📋</span> 访问日志
+                </li>
+                <li class="nav-item" data-view="settings">
+                    <span class="nav-icon">⚙️</span> Web 核心设置
+                </li>
+                <li class="nav-item" data-view="files">
+                    <span class="nav-icon">📁</span> 文件管理
+                </li>
+            </ul>
+            <div class="sidebar-footer">
+                <div class="sidebar-notice">
+                    <span>免费开源插件 · </span>
+                    <a href="https://github.com/Him666233/astrbot_plugin_group_chat_plus"
+                       target="_blank" rel="noopener noreferrer">GitHub</a>
+                    <span> · QQ群 1021544792</span>
+                </div>
+                <button id="btn-theme-toggle" class="btn btn-sm">🌙 切换主题</button>
+                <button id="btn-feedback" class="btn btn-sm">🐛 反馈BUG</button>
+                <button id="btn-logout" class="btn btn-sm">退出登录</button>
+            </div>
+        </nav>
+
+        <!-- 内容区 -->
+        <main id="content">
+            <!-- 科技树视图 -->
+            <div id="view-tech-tree" class="view active">
+                <div class="view-header">
+                    <h2>消息处理流程图</h2>
+                    <div class="view-actions">
+                        <button id="btn-save-config" class="btn btn-primary btn-sm hidden">
+                            💾 保存并重启插件
+                        </button>
+                        <button id="btn-reload" class="btn btn-sm">🔄 重启插件</button>
+                    </div>
+                </div>
+                <div id="flow-breadcrumb" class="flow-breadcrumb hidden"></div>
+                <div id="tech-tree-wrapper">
+                    <div id="tech-tree-canvas"></div>
+                    <div id="config-panel" class="config-panel">
+                        <div class="config-panel-header">
+                            <h3 id="config-panel-title">配置项</h3>
+                            <button id="btn-close-panel" class="btn-icon">✕</button>
+                        </div>
+                        <div id="config-panel-body"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 数据可视化视图 -->
+            <div id="view-charts" class="view hidden">
+                <div class="view-header">
+                    <h2>数据可视化</h2>
+                    <select id="chart-session-select" class="select-sm">
+                        <option value="">选择会话...</option>
+                    </select>
+                </div>
+                <div id="charts-grid"></div>
+            </div>
+
+            <!-- 会话管理视图 -->
+            <div id="view-sessions" class="view hidden">
+                <div class="view-header">
+                    <h2>会话管理</h2>
+                </div>
+                <div id="session-list-container"></div>
+                <div id="session-detail" class="hidden"></div>
+            </div>
+
+            <!-- 指令执行视图 -->
+            <div id="view-commands" class="view hidden">
+                <div class="view-header">
+                    <h2>指令执行</h2>
+                </div>
+                <div id="commands-container"></div>
+            </div>
+
+            <!-- 访问日志视图 -->
+            <div id="view-access-log" class="view hidden">
+                <div class="view-header">
+                    <h2>访问日志</h2>
+                </div>
+                <div id="access-log-container"></div>
+            </div>
+
+            <!-- 面板设置视图 -->
+            <div id="view-settings" class="view hidden">
+                <div class="view-header">
+                    <h2>Web 核心设置</h2>
+                </div>
+                <div id="settings-container"></div>
+            </div>
+
+            <!-- 文件管理视图 -->
+            <div id="view-files" class="view hidden">
+                <div class="view-header">
+                    <h2>文件管理</h2>
+                </div>
+                <div id="files-container"></div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Toast 通知 -->
+    <div id="toast-container"></div>
+
+    <!-- JS（面板专用，由服务器 /panel/static/ 路由提供，需认证） -->
+    <script src="/panel/static/js/utils.js"></script>
+    <script src="/panel/static/js/api.js"></script>
+    <script src="/panel/static/js/flow-data.js"></script>
+    <script src="/panel/static/js/prompt-data.js"></script>
+    <script src="/panel/static/js/tech-tree.js"></script>
+    <script src="/panel/static/js/config-editor.js"></script>
+    <script src="/panel/static/js/charts.js"></script>
+    <script src="/panel/static/js/session-mgr.js"></script>
+    <script src="/panel/static/js/app.js"></script>
+
+    <!-- 移动端侧边栏抽屉控制 -->
+    <script>
+    (function() {
+        var sidebar = document.getElementById('sidebar');
+        var overlay = document.getElementById('sidebar-overlay');
+        var menuBtn = document.getElementById('btn-mobile-menu');
+        if (!sidebar || !overlay || !menuBtn) return;
+
+        function openSidebar() {
+            sidebar.classList.add('sidebar-open');
+            overlay.classList.add('visible');
+        }
+        function closeSidebar() {
+            sidebar.classList.remove('sidebar-open');
+            overlay.classList.remove('visible');
+        }
+
+        menuBtn.addEventListener('click', openSidebar);
+        overlay.addEventListener('click', closeSidebar);
+
+        // 点击导航项后关闭抽屉，并更新顶部栏标题
+        sidebar.addEventListener('click', function(e) {
+            var item = e.target.closest('.nav-item');
+            if (!item) return;
+            if (window.innerWidth < 768) {
+                closeSidebar();
+                var titleEl = document.getElementById('mobile-topbar-title');
+                if (titleEl) {
+                    var icon = item.querySelector('.nav-icon');
+                    var text = item.textContent.trim();
+                    if (icon) text = text.replace(icon.textContent, '').trim();
+                    titleEl.textContent = text;
+                }
+            }
+        });
+    })();
+    </script>
+</body>
+</html>

@@ -3,7 +3,7 @@
 导出所有工具类供私信主模块使用
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 """
 
 from .private_chat_message_processor import MessageProcessor

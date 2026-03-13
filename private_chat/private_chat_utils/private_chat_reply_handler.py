@@ -3,7 +3,7 @@
 负责调用AI生成回复
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 
 v1.2.0 更新：
 - 改用 event.request_llm() 替代 provider.text_chat()，支持其他插件的钩子注入
@@ -31,6 +31,8 @@ PLUGIN_CUSTOM_PROMPT = "_group_chat_plus_prompt"
 PLUGIN_IMAGE_URLS = "_group_chat_plus_image_urls"
 # 🔧 存储插件自身的工具集（ToolSet），用于在 on_llm_request 钩子中恢复
 PLUGIN_FUNC_TOOL = "_group_chat_plus_func_tool"
+# 🔧 存储当前用户消息原文（短字符串），用于向量检索类插件（如 livingmemory）的记忆召回
+PLUGIN_CURRENT_MESSAGE = "_group_chat_plus_current_message"
 
 
 class ReplyHandler:
@@ -103,7 +105,7 @@ class ReplyHandler:
 - 【@指向说明】：发给别人的消息，不要直接回答被@者的问题，可自然补充信息或分享观点
 - [戳一戳提示]："有人在戳你"可俏皮回应，"但不是戳你的"不要表现像被戳的人
 - [戳过对方提示]：你刚戳过对方，供参考理解上下文，禁止提及
-- [表情包图片]：理解为情绪表达，自然回应，不要描述内容或说"你发了表情包"
+- [表情包图片]：该消息附带的图片是表情包/贴纸，不是普通照片。你可以看懂图片来理解其传达的情绪和幽默感，但回应时像真人一样自然——有时共鸣、有时吐槽、有时忽略，不要描述或复述图片内容（如"图上画了..."），也不要说"你发了表情包"
 - [系统提示]中若出现「请你像真人一样判断这个情况」：
   ✅ 这是空@场景——真正用脑子判断！看清楚那几条消息是谁发的、说了什么，再看看@你的这个人之前有没有提过相关的事
   ✅ 如果判断对方只是随便叫一声、或者你不确定ta想要什么：直接自然地回一句「？」或「怎么了」就好，**不要强行接那几条消息**
@@ -448,13 +450,17 @@ class ReplyHandler:
             event.set_extra(PLUGIN_CUSTOM_CONTEXTS, contexts)
             # 存储插件自定义的系统提示词
             event.set_extra(PLUGIN_CUSTOM_SYSTEM_PROMPT, system_prompt)
-            # 存储插件自定义的 prompt
+            # 存储插件自定义的完整 prompt（含历史上下文），供 on_llm_request 钩子恢复使用
             event.set_extra(PLUGIN_CUSTOM_PROMPT, full_prompt)
             # 存储图片 URL 列表
             event.set_extra(PLUGIN_IMAGE_URLS, image_urls)
             # 🔧 存储插件自身的工具集（ToolSet），用于在 on_llm_request 钩子中恢复
             # 新版 AstrBot 的 build_main_agent 会注入框架工具（shell/cron等），需要用插件的工具集替换
             event.set_extra(PLUGIN_FUNC_TOOL, plugin_tool_set)
+
+            # 🔧 提取当前用户消息原文（不含历史上下文），作为向量检索类插件的召回查询词
+            current_message_for_retrieval = event.get_message_str() or ""
+            event.set_extra(PLUGIN_CURRENT_MESSAGE, current_message_for_retrieval)
 
             if DEBUG_MODE:
                 logger.info(
@@ -464,15 +470,18 @@ class ReplyHandler:
                 logger.info(f"  - system_prompt 长度: {len(system_prompt)}")
                 logger.info(f"  - full_prompt 长度: {len(full_prompt)}")
                 logger.info(f"  - image_urls 数量: {len(image_urls)}")
+                logger.info(
+                    f"  - 向量检索用短消息长度: {len(current_message_for_retrieval)}"
+                )
 
             # 🆕 v1.2.0: 使用 event.request_llm() 发起请求
             # 这会触发平台的 on_llm_request 钩子，让其他插件能注入提示词
-            # main.py 的 on_llm_request 钩子会检测标记并处理上下文冲突
+            # main.py 的 on_llm_request 钩子（priority=-1）会检测标记并把 req.prompt 换回完整 full_prompt
             # 🔧 兼容说明：func_tool_manager 在旧版 AstrBot (<=4.13) 中生效，
             # 在新版 (>=4.14) 中被静默忽略。保留此参数以确保旧版兼容。
             # 新版的工具注入问题由 on_llm_request 钩子中恢复 plugin_tool_set 来解决。
             return event.request_llm(
-                prompt=full_prompt,
+                prompt=current_message_for_retrieval,
                 func_tool_manager=func_tools_mgr,
                 session_id=event.session_id,
                 image_urls=image_urls,

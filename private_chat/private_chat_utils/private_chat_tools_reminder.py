@@ -3,10 +3,10 @@
 负责提取和提醒AI当前可用的工具
 
 作者: Him666233
-版本: v1.1.2
+版本: v1.2.1
 """
 
-from typing import List, Dict
+from typing import List, Dict, Optional
 from astrbot.api.all import *
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
@@ -118,7 +118,69 @@ class ToolsReminder:
         return "\n".join(formatted_parts)
 
     @staticmethod
-    def inject_tools_to_message(original_message: str, context: Context) -> str:
+    async def get_persona_tool_names(
+        context: Context, unified_msg_origin: str, platform_name: str = ""
+    ) -> Optional[List[str]]:
+        """
+        获取当前会话人格允许使用的工具名称列表
+
+        Returns:
+            工具名称列表，None表示使用所有工具（人格未限制或旧版不支持）
+        """
+        try:
+            if not hasattr(context, "persona_manager") or not hasattr(
+                context, "conversation_manager"
+            ):
+                if DEBUG_MODE:
+                    logger.info("当前AstrBot版本不支持人格工具过滤,使用全部工具")
+                return None
+
+            persona_mgr = context.persona_manager
+            conv_mgr = context.conversation_manager
+
+            if not persona_mgr or not conv_mgr:
+                return None
+
+            curr_cid = await conv_mgr.get_curr_conversation_id(unified_msg_origin)
+            if not curr_cid:
+                return None
+
+            conv = await conv_mgr.get_conversation(unified_msg_origin, curr_cid)
+            if not conv:
+                return None
+
+            conversation_persona_id = getattr(conv, "persona_id", None)
+
+            persona_id, persona, _, _ = await persona_mgr.resolve_selected_persona(
+                umo=unified_msg_origin,
+                conversation_persona_id=conversation_persona_id,
+                platform_name=platform_name,
+            )
+
+            if not persona:
+                return None
+
+            persona_tools = persona.get("tools", None)
+
+            if persona_tools is None:
+                if DEBUG_MODE:
+                    logger.info(f"人格 {persona_id} 未限制工具,使用全部工具")
+                return None
+
+            if DEBUG_MODE:
+                logger.info(f"人格 {persona_id} 限制工具列表: {persona_tools}")
+            return persona_tools
+
+        except Exception as e:
+            logger.warning(f"获取人格工具列表失败,回退到全部工具: {e}")
+            return None
+
+    @staticmethod
+    def inject_tools_to_message(
+        original_message: str,
+        context: Context,
+        allowed_tool_names: Optional[List[str]] = None,
+    ) -> str:
         """
         将工具信息注入到消息
 
@@ -132,6 +194,12 @@ class ToolsReminder:
         try:
             # 获取工具列表
             tools = ToolsReminder.get_available_tools(context)
+
+            # 按人格配置过滤工具
+            if allowed_tool_names is not None:
+                tools = [t for t in tools if t["name"] in allowed_tool_names]
+                if DEBUG_MODE:
+                    logger.info(f"按人格过滤后剩余 {len(tools)} 个工具")
 
             if not tools:
                 if DEBUG_MODE:

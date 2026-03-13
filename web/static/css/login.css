@@ -1,0 +1,168 @@
+/* ========== Login Page — Cyberpunk ========== */
+#page-login, #page-password-change {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background:
+        linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+    position: relative;
+}
+
+/* Circuit board grid texture */
+#page-login::before, #page-password-change::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+        repeating-linear-gradient(0deg, transparent, transparent 59px, rgba(224,32,32,0.04) 59px, rgba(224,32,32,0.04) 60px),
+        repeating-linear-gradient(90deg, transparent, transparent 59px, rgba(224,32,32,0.04) 59px, rgba(224,32,32,0.04) 60px);
+    pointer-events: none;
+}
+
+/* ========== Login Error Message Animation ========== */
+.login-container .error-msg {
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+    margin-top: 0;
+    padding: 0 14px;
+    background: rgba(224, 32, 32, 0.1);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--accent-red);
+    text-align: center;
+    transition: max-height 0.4s ease, opacity 0.4s ease,
+                padding 0.4s ease, margin-top 0.4s ease,
+                border-color 0.4s ease;
+}
+.login-container .error-msg.show {
+    max-height: 120px;
+    opacity: 1;
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-color: rgba(224, 32, 32, 0.3);
+}
+.login-container .error-msg.shake {
+    animation: error-shake 0.45s ease;
+}
+@keyframes error-shake {
+    0%, 100% { transform: translateX(0); }
+    15% { transform: translateX(-8px); }
+    30% { transform: translateX(6px); }
+    45% { transform: translateX(-5px); }
+    60% { transform: translateX(3px); }
+    75% { transform: translateX(-2px); }
+}
+
+.login-container {
+    text-align: center;
+    padding: 40px;
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 0 40px rgba(224,32,32,0.08), var(--shadow);
+    width: 360px;
+    max-width: 90vw;
+    position: relative;
+    z-index: 1;
+}
+
+.login-logo {
+    width: 80px;
+    height: 80px;
+    border-radius: 16px;
+    margin-bottom: 16px;
+}
+
+.login-title {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+}
+
+.login-subtitle {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.login-form input {
+    text-align: center;
+}
+
+.login-form input:focus {
+    border-color: var(--accent-red);
+    box-shadow: 0 0 8px rgba(224,32,32,0.2);
+}
+
+.login-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+/* 开源声明 - 登录页 */
+.open-source-notice {
+    margin-top: 24px;
+    padding: 14px 18px;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 360px;
+    opacity: 0.7;
+    transition: opacity 0.3s;
+    position: relative;
+    z-index: 1;
+}
+
+.open-source-notice:hover {
+    opacity: 1;
+}
+
+.open-source-notice p {
+    margin: 0;
+}
+
+.open-source-notice a {
+    color: var(--accent-red);
+    text-decoration: none;
+}
+
+.open-source-notice a:hover {
+    text-decoration: underline;
+}
+
+.open-source-warn {
+    margin-top: 6px !important;
+    color: var(--accent-orange);
+    opacity: 0.8;
+    font-size: 10px;
+}
+
+/* ===== 移动端登录页适配 ===== */
+@media (max-width: 480px) {
+    .login-container {
+        padding: 28px 20px;
+        border-radius: 8px;
+    }
+    .login-logo {
+        width: 64px;
+        height: 64px;
+    }
+    .login-title { font-size: 18px; }
+    .open-source-notice {
+        max-width: 92vw;
+        padding: 12px;
+        font-size: 10px;
+    }
+}

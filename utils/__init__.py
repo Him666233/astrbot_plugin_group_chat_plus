@@ -3,7 +3,7 @@
 导出所有工具类供主插件使用
 
 作者: Him666233
-版本: v1.1.2
+版本: v1.2.1
 """
 
 from .probability_manager import ProbabilityManager
@@ -51,6 +51,15 @@ from .image_description_cache import ImageDescriptionCache
 
 # v1.2.0 新增功能 - 转发消息解析器
 from .forward_message_parser import ForwardMessageParser
+
+# 新增功能 - 新成员入群消息解析器
+from .welcome_message_parser import WelcomeMessageParser
+
+# v1.2.1 新增功能 - 回复密度管理器
+from .reply_density_manager import ReplyDensityManager
+
+# v1.2.1 新增功能 - 消息质量预判器
+from .message_quality_scorer import MessageQualityScorer
 
 # 全局调试日志开关（供各模块统一读取）
 DEBUG_MODE: bool = False
@@ -102,6 +111,12 @@ __all__ = [
     "ImageDescriptionCache",
     # v1.2.0 开始的新增 - 转发消息解析器
     "ForwardMessageParser",
+    # 新增 - 新成员入群消息解析器
+    "WelcomeMessageParser",
+    # v1.2.1 开始的新增 - 回复密度管理器
+    "ReplyDensityManager",
+    # v1.2.1 开始的新增 - 消息质量预判器
+    "MessageQualityScorer",
     # 全局调试
     "DEBUG_MODE",
     "set_debug_mode",

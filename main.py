@@ -31,7 +31,17 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
+
+v1.2.1 更新内容：
+- 🆕 Web管理面板 - 全新可视化管理界面，支持JWT认证、访问日志、统计图表、IP安全管理
+- 🆕 回复密度限制 - 限制短时间内回复次数，避免刷屏，支持软限制与AI提示
+- 🆕 消息质量预判 - 根据消息质量（疑问句加权/水聊降权）动态调整回复概率
+- 🆕 欢迎消息解析 - 支持解析群成员入群欢迎消息，可选概率跳过或完整处理
+- 🆕 主动对话AI判断 - 主动发起对话前用AI判断当前时机是否合适
+- 🆕 忽略@全体成员 - 支持过滤@all消息避免无效触发
+- 🆕 历史截止时间戳 - 执行插件清除指令(gcp_reset/gcp_reset_here)后记录截止时间戳，读取platform_message_history时自动过滤截止点之前的旧消息（解决AstrBot /reset不清platform_message_history的问题）
+- 🆕 多工具调用兼容 - 支持AI在单次推理中调用多个工具/多轮工具调用，按实际执行顺序将文本与工具调用记录交错保存到对话历史
 
 v1.2.0 更新内容：
 - 🆕 群聊等待窗口 - 普通消息通过概率筛选后，bot短暂等待（可配置）同一用户后续消息
@@ -122,6 +132,9 @@ from .utils import (
     EmojiDetector,  # 🆕 v1.2.0: 表情包检测器
     EMOJI_MARKER,  # 🆕 v1.2.0: 表情包标记常量
     ForwardMessageParser,  # 🆕 v1.2.0: 转发消息解析器
+    WelcomeMessageParser,  # 🆕 新成员入群消息解析器
+    ReplyDensityManager,  # 🆕 v1.2.1: 回复密度管理器
+    MessageQualityScorer,  # 🆕 v1.2.1: 消息质量预判器
 )
 from .utils.image_description_cache import (
     ImageDescriptionCache,
@@ -135,7 +148,7 @@ from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
     "chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "v1.2.0",
+    "v1.2.1",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -253,6 +266,21 @@ class ChatPlus(Star):
                 "📦 嵌套转发解析已配置为禁用（0），转发内容中的嵌套转发将用占位符替代"
             )
         self.forward_max_nesting_depth = _forward_nesting
+
+        # === 🆕 新成员入群消息解析配置 ===
+        # 入群消息解析：开启后可将新成员入群的空消息解析为系统提示
+        # 支持平台：aiocqhttp (OneBot v11) - 其他平台自动跳过
+        self.enable_welcome_message_parsing = config.get(
+            "enable_welcome_message_parsing", False
+        )
+        # 入群消息处理模式：
+        # normal - 像普通消息一样处理（经过概率+读空气筛选）
+        # skip_probability - 跳过概率筛选，保留读空气判断
+        # skip_all - 跳过概率和读空气筛选，强制处理
+        # parse_only - 仅解析为系统提示文本，不做任何特殊处理（不进入AI流程）
+        self.welcome_message_mode = config.get(
+            "welcome_message_mode", "skip_probability"
+        )
 
         # === 📦 自定义存储限制配置 ===
         CUSTOM_STORAGE_HARD_LIMIT = 10000  # 系统硬上限
@@ -420,6 +448,29 @@ class ChatPlus(Star):
             0.0, min(0.5, _gww_attention_decay)
         )  # 等待窗口每条额外消息的注意力修正衰减值
 
+        # ⏳ 窗口期内@消息合并配置
+        self.group_wait_window_merge_at_messages = config.get(
+            "group_wait_window_merge_at_messages", False
+        )
+        _gww_merge_at_list_mode_raw = config.get(
+            "group_wait_window_merge_at_list_mode", "whitelist"
+        )
+        if _gww_merge_at_list_mode_raw not in ("whitelist", "blacklist"):
+            logger.warning(
+                f"⚠️ group_wait_window_merge_at_list_mode 配置值 "
+                f"'{_gww_merge_at_list_mode_raw}' 无效，使用默认值 'whitelist'"
+            )
+            _gww_merge_at_list_mode_raw = "whitelist"
+        self.group_wait_window_merge_at_list_mode = _gww_merge_at_list_mode_raw
+        _gww_merge_at_user_list_raw = config.get(
+            "group_wait_window_merge_at_user_list", []
+        )
+        if not isinstance(_gww_merge_at_user_list_raw, list):
+            _gww_merge_at_user_list_raw = []
+        self.group_wait_window_merge_at_user_list = set(
+            str(uid) for uid in _gww_merge_at_user_list_raw if uid
+        )
+
         # === 图片处理配置 ===
         self.enable_image_processing = config.get(
             "enable_image_processing", False
@@ -490,13 +541,16 @@ class ChatPlus(Star):
             "livingmemory_top_k", 5
         )  # LivingMemory召回数量
         self.livingmemory_version = config.get(
-            "livingmemory_version", "v1"
-        )  # LivingMemory插件版本（v1旧版/v2新版）
+            "livingmemory_version", "v2"
+        )  # LivingMemory插件版本（v1旧版1.x/v2新版2.x+）
 
         # === 工具提醒配置 ===
         self.enable_tools_reminder = config.get(
             "enable_tools_reminder", False
         )  # 启用工具提醒
+        self.tools_reminder_persona_filter = config.get(
+            "tools_reminder_persona_filter", False
+        )  # 工具提醒按人格过滤
 
         # === 关键词配置 ===
         self.trigger_keywords = config.get("trigger_keywords", [])  # 触发关键词列表
@@ -899,6 +953,16 @@ class ChatPlus(Star):
         self.enable_proactive_at_conversion = config.get(
             "enable_proactive_at_conversion", False
         )  # 🆕 v1.2.0: 启用主动对话@转换功能
+        # === 主动对话AI预判断配置 ===
+        self.enable_proactive_ai_judge = config.get(
+            "enable_proactive_ai_judge", False
+        )  # 启用主动对话AI预判断
+        self.proactive_ai_judge_prompt = config.get(
+            "proactive_ai_judge_prompt", ""
+        )  # 主动对话AI预判断提示词
+        self.proactive_ai_judge_timeout = config.get(
+            "proactive_ai_judge_timeout", 15
+        )  # 主动对话AI预判断超时时间
         self.proactive_silence_threshold = config.get(
             "proactive_silence_threshold", 600
         )  # 沉默阈值
@@ -1090,7 +1154,43 @@ class ChatPlus(Star):
             "probability_max_limit", 0.8
         )  # 概率最大值限制
 
-        # === AI回复内容过滤配置 ===
+        # === 🆕 v1.2.1: 回复密度限制配置 ===
+        self.enable_reply_density_limit = config.get(
+            "enable_reply_density_limit", True
+        )  # 启用回复密度限制
+        self.reply_density_window_seconds = config.get(
+            "reply_density_window_seconds", 300
+        )  # 密度检测窗口（秒）
+        self.reply_density_max_replies = config.get(
+            "reply_density_max_replies", 5
+        )  # 窗口内最大回复次数
+        self.reply_density_soft_limit_ratio = config.get(
+            "reply_density_soft_limit_ratio", 0.6
+        )  # 软限比例（开始衰减的比例）
+        self.reply_density_ai_hint = config.get(
+            "reply_density_ai_hint", True
+        )  # 向决策AI注入密度提示
+
+        # === 🆕 v1.2.1: 消息质量预判配置 ===
+        self.enable_message_quality_scoring = config.get(
+            "enable_message_quality_scoring", True
+        )  # 启用消息质量预判
+        self.message_quality_question_boost = config.get(
+            "message_quality_question_boost", 0.15
+        )  # 疑问句概率提升
+        self.message_quality_water_reduce = config.get(
+            "message_quality_water_reduce", 0.10
+        )  # 水消息概率降低
+        # 词列表（完全由配置驱动，schema 里有默认值）
+        _water_words_raw = config.get("message_quality_water_words", [])
+        self.message_quality_water_words = (
+            list(_water_words_raw) if isinstance(_water_words_raw, list) else []
+        )  # 水消息词（整句完整匹配）
+        _question_words_raw = config.get("message_quality_question_words", [])
+        self.message_quality_question_words = (
+            list(_question_words_raw) if isinstance(_question_words_raw, list) else []
+        )  # 疑问词（包含匹配）
+
         self.enable_output_content_filter = config.get(
             "enable_output_content_filter", False
         )  # 启用输出内容过滤
@@ -1195,6 +1295,13 @@ class ChatPlus(Star):
         self.private_gcp_clear_image_cache_filter_list = config.get(
             "private_gcp_clear_image_cache_filter_list", []
         )  # 私信清除缓存指令用户ID名单
+
+        # === Web 配置面板 ===
+        self.enable_web_panel = config.get("enable_web_panel", False)
+        self.web_panel_port = config.get("web_panel_port", 1451)
+        self.web_panel_host = config.get("web_panel_host", "0.0.0.0")
+        self.web_panel_reset_password = config.get("web_panel_reset_password", False)
+        self._web_server = None  # Web 面板服务器实例
 
         # ========== 配置参数集中提取区块结束 ==========
 
@@ -1332,6 +1439,26 @@ class ChatPlus(Star):
             HumanizeModeManager.initialize(humanize_config)
             logger.info("🎭 拟人增强模式已启用")
 
+        # 🆕 v1.2.1: 初始化回复密度管理器
+        density_config = {
+            "enable_reply_density_limit": self.enable_reply_density_limit,
+            "reply_density_window_seconds": self.reply_density_window_seconds,
+            "reply_density_max_replies": self.reply_density_max_replies,
+            "reply_density_soft_limit_ratio": self.reply_density_soft_limit_ratio,
+            "reply_density_ai_hint": self.reply_density_ai_hint,
+        }
+        ReplyDensityManager.initialize(density_config)
+
+        # 🆕 v1.2.1: 初始化消息质量预判器
+        quality_config = {
+            "enable_message_quality_scoring": self.enable_message_quality_scoring,
+            "message_quality_question_boost": self.message_quality_question_boost,
+            "message_quality_water_reduce": self.message_quality_water_reduce,
+            "message_quality_water_words": self.message_quality_water_words,
+            "message_quality_question_words": self.message_quality_question_words,
+        }
+        MessageQualityScorer.initialize(quality_config)
+
         # 🆕 v1.2.0: 初始化消息缓存管理器（统一管理所有缓存操作）
         # 替代原来的 self.pending_messages_cache = {} 字典
         self.cache_manager = MessageCacheManager(
@@ -1397,6 +1524,15 @@ class ChatPlus(Star):
         # 最多保留最近5条回复，超过30分钟的自动清理
         self.recent_replies_cache = {}
         self.raw_reply_cache = {}
+
+        # 🔧 多轮工具调用支持：累积AI回复文本
+        # 当AI先说话再调用工具再说话时，需要累积所有回复文本，
+        # 等agent真正完成后再统一保存，避免只保存第一段话
+        # 格式: {message_id: [原始文本1, 原始文本2, ...]}
+        self._pending_bot_replies: dict[str, list[str]] = {}
+        # agent完成标志：on_llm_response 设置，after_message_sent 消费
+        # 格式: set of message_ids
+        self._agent_done_flags: set[str] = set()
 
         # 🔧 重复消息拦截标记（用于 after_message_sent 判断是否跳过AI消息保存）
         # 格式: {message_id: True}
@@ -1601,7 +1737,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - v1.2.0")
+        logger.info("群聊增强插件已加载 - v1.2.1")
         logger.info(
             f"🔘 群聊功能总开关: {'✓ 已启用' if self.enable_group_chat else '✗ 已禁用'}"
         )
@@ -1761,6 +1897,23 @@ class ChatPlus(Star):
             if self.proactive_enabled and self.proactive_enable_quiet_time:
                 logger.info(f"  - ⚠️ 注意: '禁用时段'优先级高于动态调整")
 
+        # 🆕 v1.2.1 新功能状态
+        logger.info("\n【🆕 v1.2.1 新增功能】")
+        logger.info(
+            f"回复密度限制: {'✓ 已启用' if self.enable_reply_density_limit else '✗ 已禁用'}"
+        )
+        if self.enable_reply_density_limit:
+            logger.info(f"  - 窗口时长: {self.reply_density_window_seconds}秒")
+            logger.info(f"  - 最大回复: {self.reply_density_max_replies}次")
+            logger.info(f"  - 软限比例: {self.reply_density_soft_limit_ratio}")
+            logger.info(f"  - AI密度提示: {'✓' if self.reply_density_ai_hint else '✗'}")
+        logger.info(
+            f"消息质量预判: {'✓ 已启用' if self.enable_message_quality_scoring else '✗ 已禁用'}"
+        )
+        if self.enable_message_quality_scoring:
+            logger.info(f"  - 疑问句提升: +{self.message_quality_question_boost:.2f}")
+            logger.info(f"  - 水消息降低: -{self.message_quality_water_reduce:.2f}")
+
         logger.info("=" * 50)
 
         if self.debug_mode:
@@ -1781,6 +1934,7 @@ class ChatPlus(Star):
             logger.info(f"  - 启用图片处理: {self.enable_image_processing}")
             logger.info(f"  - 启用记忆植入: {self.enable_memory_injection}")
             logger.info(f"  - 启用工具提醒: {self.enable_tools_reminder}")
+            logger.info(f"  - 工具提醒按人格过滤: {self.tools_reminder_persona_filter}")
 
         # ========== 🆕 v1.2.0 AI回复内容过滤器初始化 ==========
         self.content_filter = ContentFilterManager(
@@ -1890,6 +2044,7 @@ class ChatPlus(Star):
             "livingmemory_version": self.livingmemory_version,
             # 工具提醒配置
             "enable_tools_reminder": self.enable_tools_reminder,
+            "tools_reminder_persona_filter": self.tools_reminder_persona_filter,
             # 📦 消息缓存配置（用于主动对话读取缓存时过滤过期消息）
             "pending_cache_max_count": self.pending_cache_max_count,
             "pending_cache_ttl_seconds": self.pending_cache_ttl_seconds,
@@ -1905,6 +2060,11 @@ class ChatPlus(Star):
             "save_content_filter_rules": self.save_content_filter_rules,
             # 🆕 v1.2.0: 主动对话@转换配置
             "enable_proactive_at_conversion": self.enable_proactive_at_conversion,
+            # 🆕 主动对话AI预判断配置
+            "enable_proactive_ai_judge": self.enable_proactive_ai_judge,
+            "proactive_ai_judge_prompt": self.proactive_ai_judge_prompt,
+            "proactive_ai_judge_timeout": self.proactive_ai_judge_timeout,
+            "decision_ai_provider_id": self.decision_ai_provider_id,
         }
 
     def _emit_session_metadata(self):
@@ -1951,6 +2111,27 @@ class ChatPlus(Star):
         elif not self.enable_group_chat and self.proactive_enabled:
             logger.info("⏸️ [主动对话] 群聊功能总开关已关闭，跳过启动主动对话后台任务")
 
+        # 🌐 启动 Web 配置面板
+        if self.enable_web_panel:
+            try:
+                from .web.server import WebPanelServer
+
+                self._web_server = WebPanelServer(
+                    self, host=self.web_panel_host, port=self.web_panel_port
+                )
+
+                # 检测密码重置标志
+                if self.web_panel_reset_password:
+                    self._web_server.auth_mgr.reset_to_default()
+                    self.config["web_panel_reset_password"] = False
+                    self.config.save_config()
+                    logger.info("🌐 Web 面板密码已重置，新密码已输出到日志")
+
+                await self._web_server.start()
+            except Exception as e:
+                logger.error(f"🌐 Web 配置面板启动失败: {e}", exc_info=True)
+                self._web_server = None
+
     async def terminate(self):
         """
         🆕 v1.1.0: 插件禁用/重载时调用
@@ -1965,6 +2146,13 @@ class ChatPlus(Star):
                 logger.error(f"[主动对话] 停止后台任务失败: {e}", exc_info=True)
         if hasattr(self, "session"):
             await self.session.close()
+
+        # 🌐 停止 Web 配置面板
+        if hasattr(self, "_web_server") and self._web_server:
+            try:
+                await self._web_server.stop()
+            except Exception as e:
+                logger.error(f"🌐 Web 配置面板停止失败: {e}", exc_info=True)
 
     @filter.on_platform_loaded()
     async def on_platform_loaded(self):
@@ -2259,6 +2447,36 @@ class ChatPlus(Star):
                 # 用户在黑名单中，本插件直接跳过处理
                 return
 
+            # 【🆕 新成员入群消息解析】在黑名单检查之后、转发消息解析之前
+            # 将新成员入群的空消息解析为系统提示，避免AI误判为空消息
+            if self.enable_welcome_message_parsing:
+                try:
+                    _welcome_parsed = await WelcomeMessageParser.try_parse_and_replace(
+                        event,
+                        include_sender_info=self.include_sender_info,
+                        include_timestamp=self.include_timestamp,
+                        debug_mode=self.debug_mode,
+                    )
+                    if _welcome_parsed:
+                        if self.debug_mode:
+                            logger.info("[入群解析] 群聊：已成功解析新成员入群事件")
+                        if self.welcome_message_mode == "parse_only":
+                            # 仅解析，不进入AI流程，直接返回
+                            if self.debug_mode:
+                                logger.info(
+                                    "[入群解析] 模式为 parse_only，跳过后续处理"
+                                )
+                            return
+                        # 标记此事件为入群消息，供后续概率/决策流程使用
+                        event.set_extra("is_welcome_message", True)
+                        event.set_extra(
+                            "welcome_message_mode", self.welcome_message_mode
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[入群解析] 群聊：解析入群事件时出错（已跳过，不影响后续处理）: {e}"
+                    )
+
             # 【🆕 转发消息解析】在指令检查和去重之后，将转发消息转换为纯文本
             # 指令消息已提前丢弃，避免不必要的 API 调用
             if self.enable_forward_message_parsing:
@@ -2347,15 +2565,7 @@ class ChatPlus(Star):
 
     @filter.command("gcp_reset")
     async def gcp_reset(self, event: AstrMessageEvent):
-        """
-        检测并处理“插件重置指令”，重启AstrBot。
-
-        触发条件：
-        - 仅群聊有效（私聊直接忽略）
-        - 插件对该群处于启用状态
-        - 白名单检查通过（`plugin_gcp_reset_allowed_user_ids` 为空=允许所有用户）
-
-        """
+        """全局重置插件：清空所有会话的插件缓存与数据文件，设置历史截止点（忽略重置前的平台聊天记录），然后重启 AstrBot。不会删除平台官方的对话历史。"""
         try:
             # 群聊处理开关未启用则直接忽略
             if not self.enable_group_chat:
@@ -2374,7 +2584,7 @@ class ChatPlus(Star):
             components = event.message_obj.message
             if not components:
                 return
-            # 必须是“纯文本”消息，防止图片/引用等组件混入而误触
+            # 必须是"纯文本"消息，防止图片/引用等组件混入而误触
             if not all(isinstance(c, Plain) for c in components):
                 return
             # 白名单：为空=允许所有用户；否则仅允许列表内用户
@@ -2383,7 +2593,7 @@ class ChatPlus(Star):
             sender_id = str(event.get_sender_id())
             allowed = allow_all or (str(sender_id) in {str(x) for x in whitelist})
             if not allowed:
-                # 不在白名单：按“已处理”返回，防止本条消息继续触发本插件的其他逻辑
+                # 不在白名单：按"已处理"返回，防止本条消息继续触发本插件的其他逻辑
                 logger.info(
                     "【会话重置】用户 %s 未在白名单中，重置指令被忽略",
                     sender_id,
@@ -2398,8 +2608,15 @@ class ChatPlus(Star):
                     chat_id = event.get_group_id()
                     session_str = f"{platform_name}:GroupMessage:{chat_id}"
                     notice = (
-                        "【Group Chat Plus】插件重置指令处理结果：成功\n"
-                        "已清空本插件缓存即将重启AstrBot。此提示不计入对话历史。"
+                        "【Group Chat Plus】插件全局重置：成功\n"
+                        "\n"
+                        "已执行以下操作：\n"
+                        "1. 清空所有会话的插件缓存（待处理消息、回复记录、情绪/注意力/概率等状态）\n"
+                        "2. 删除插件本地数据文件（自定义聊天记录、注意力/主动对话/冷却持久化文件）\n"
+                        "3. 设置历史截止点（插件将忽略重置前的平台聊天记录，避免旧消息被重新读入AI上下文）\n"
+                        "\n"
+                        "注意：本操作不会删除平台官方的对话历史和聊天记录，如需清除请使用平台的 /reset 指令。\n"
+                        "即将重启 AstrBot..."
                     )
                     yield event.plain_result(f"{notice}")
                     logger.info(f"{session_str}: {notice}")
@@ -2425,8 +2642,8 @@ class ChatPlus(Star):
                     chat_id = event.get_group_id()
                     session_str = f"{platform_name}:GroupMessage:{chat_id}"
                     notice = (
-                        "【Group Chat Plus】插件重置指令处理结果：失败\n"
-                        "原因：执行重置时发生内部错误，请查看日志。此提示不计入对话历史。"
+                        "【Group Chat Plus】插件全局重置：失败\n"
+                        "执行重置时发生内部错误，请查看日志。"
                     )
                     yield event.plain_result(f"{notice}")
                     logger.info(f"{session_str}: {notice}")
@@ -2438,11 +2655,7 @@ class ChatPlus(Star):
 
     @filter.command("gcp_reset_here")
     async def gcp_reset_here(self, event: AstrMessageEvent):
-        """
-        检测并处理“会话级重置”指令，重启AstrBot：仅重置当前会话的本插件运行态与本地缓存。
-        不影响 AstrBot 官方对话系统的历史，也不影响其他群或会话。
-
-        """
+        """重置当前会话：清空本会话的插件缓存与上下文文件，设置历史截止点（忽略重置前的平台聊天记录），然后重启 AstrBot。不影响其他会话，不会删除平台官方的对话历史。"""
         try:
             # 群聊处理开关未启用则直接忽略
             if not self.enable_group_chat:
@@ -2462,7 +2675,7 @@ class ChatPlus(Star):
             # 空消息（极少见）直接忽略
             if not components:
                 return
-            # 必须是“纯文本”消息（仅 Plain 组件），防止图片/引用等造成误触
+            # 必须是"纯文本"消息（仅 Plain 组件），防止图片/引用等造成误触
             if not all(isinstance(c, Plain) for c in components):
                 return
             # 白名单判定：空列表=允许所有用户；否则仅允许列表内用户
@@ -2470,7 +2683,7 @@ class ChatPlus(Star):
             allow_all = not whitelist or len(whitelist) == 0
             sender_id = str(event.get_sender_id())
             allowed = allow_all or (str(sender_id) in {str(x) for x in whitelist})
-            # 若不被允许，按“已处理”返回，阻止该消息继续触发本插件其它逻辑
+            # 若不被允许，按"已处理"返回，阻止该消息继续触发本插件其它逻辑
             if not allowed:
                 logger.info(
                     "【会话重置】用户 %s 未在白名单中，重置指令被忽略",
@@ -2486,8 +2699,15 @@ class ChatPlus(Star):
                     chat_id = event.get_group_id()
                     session_str = f"{platform_name}:GroupMessage:{chat_id}"
                     notice = (
-                        "【Group Chat Plus】会话重置指令处理结果：成功\n"
-                        "已清理当前会话的本插件缓存与运行态（不影响官方对话历史）,即将重启AstrBot。此提示不计入对话历史。"
+                        "【Group Chat Plus】当前会话重置：成功\n"
+                        "\n"
+                        "已执行以下操作：\n"
+                        "1. 清空本会话的插件缓存（待处理消息、回复记录、情绪/注意力/概率等状态）\n"
+                        "2. 删除本会话的插件上下文文件\n"
+                        "3. 设置历史截止点（插件将忽略重置前的平台聊天记录，避免旧消息被重新读入AI上下文）\n"
+                        "\n"
+                        "注意：本操作不会删除平台官方的对话历史和聊天记录，如需清除请使用平台的 /reset 指令。\n"
+                        "即将重启 AstrBot..."
                     )
                     yield event.plain_result(f"{notice}")
                     logger.info(f"{session_str}: {notice}")
@@ -2513,8 +2733,8 @@ class ChatPlus(Star):
                     chat_id = event.get_group_id()
                     session_str = f"{platform_name}:GroupMessage:{chat_id}"
                     notice = (
-                        "【Group Chat Plus】会话重置指令处理结果：失败\n"
-                        "原因：执行重置时发生内部错误，请查看日志。此提示不计入对话历史。"
+                        "【Group Chat Plus】当前会话重置：失败\n"
+                        "执行重置时发生内部错误，请查看日志。"
                     )
                     yield event.plain_result(f"{notice}")
                     logger.info(f"{session_str}: {notice}")
@@ -2663,7 +2883,7 @@ class ChatPlus(Star):
 
     async def _reset_session_data(self, event: AstrMessageEvent) -> None:
         """
-        清理“当前会话”的本插件缓存与派生状态，不触碰 AstrBot 官方对话历史。
+        清理"当前会话"的本插件缓存与派生状态，不触碰 AstrBot 官方对话历史。
 
         主要包含：
         - 清空与该会话相关的内存缓存（待转存消息、处理中标记、去重缓存、戳一戳追踪等）
@@ -2733,7 +2953,7 @@ class ChatPlus(Star):
             except Exception:
                 logger.warning("【会话重置】清空最近回复缓存失败", exc_info=True)
             try:
-                # “回复后戳一戳”追踪记录（限定该会话）
+                # "回复后戳一戳"追踪记录（限定该会话）
                 k = str(chat_id)
                 if (
                     isinstance(getattr(self, "poke_trace_records", None), dict)
@@ -2924,6 +3144,13 @@ class ChatPlus(Star):
                     logger.warning("【会话重置】无法确定上下文文件路径，跳过删除")
             except Exception:
                 logger.warning("【会话重置】处理上下文文件失败", exc_info=True)
+            # —— 设置历史截止时间戳 ——
+            # 记录当前时间为截止点，后续从平台读取历史时丢弃此时间之前的消息
+            try:
+                ContextManager.set_history_cutoff(chat_id)
+                logger.info("【会话重置】已设置历史截止时间戳 chat_id=%s", chat_id)
+            except Exception:
+                logger.warning("【会话重置】设置历史截止时间戳失败", exc_info=True)
             try:
                 # 将注意力变更落盘，确保重置后的状态被保存
                 if hasattr(AttentionManager, "_save_to_disk"):
@@ -2955,6 +3182,25 @@ class ChatPlus(Star):
         """
         try:
             logger.info("【插件重置】开始: 清理全局缓存并热重载")
+            # 🔧 修复：在清空内存数据之前，先收集所有已知 chat_id
+            # 用于后续设置历史截止时间戳，防止平台旧消息被重新读入
+            _all_chat_ids_for_cutoff = set()
+            try:
+                _all_chat_ids_for_cutoff.update(self.pending_messages_cache.keys())
+                _all_chat_ids_for_cutoff.update(
+                    getattr(AttentionManager, "_attention_map", {}).keys()
+                )
+                _all_chat_ids_for_cutoff.update(
+                    getattr(ProbabilityManager, "_probability_status", {}).keys()
+                )
+                _all_chat_ids_for_cutoff.update(
+                    getattr(ProactiveChatManager, "_chat_states", {}).keys()
+                )
+                _all_chat_ids_for_cutoff.update(
+                    ContextManager._history_cutoff_timestamps.keys()
+                )
+            except Exception:
+                pass
             try:
                 # 待转正的消息缓存（主动回复模式产生）
                 pending_total = sum(
@@ -2998,6 +3244,8 @@ class ChatPlus(Star):
                 replies_total = sum(len(v) for v in self.recent_replies_cache.values())
                 self.recent_replies_cache.clear()
                 self.raw_reply_cache.clear()
+                self._pending_bot_replies.clear()
+                self._agent_done_flags.clear()
 
                 logger.info(
                     "【插件重置】已清空最近回复缓存 清理会话=%s, 清理条目=%s",
@@ -3175,6 +3423,19 @@ class ChatPlus(Star):
                             cooldown_file,
                             exc_info=True,
                         )
+                # 🔧 修复：全局重置时，为所有已知会话设置历史截止时间戳
+                # 防止平台 message_history_manager 中的旧消息被重新读入上下文
+                try:
+                    for cid in _all_chat_ids_for_cutoff:
+                        if cid:
+                            ContextManager.set_history_cutoff(cid)
+                    if _all_chat_ids_for_cutoff:
+                        logger.info(
+                            "【插件重置】已为 %d 个会话设置历史截止时间戳",
+                            len(_all_chat_ids_for_cutoff),
+                        )
+                except Exception:
+                    logger.warning("【插件重置】设置历史截止时间戳失败", exc_info=True)
             except Exception:
                 pass
         except Exception as e:
@@ -3335,12 +3596,32 @@ class ChatPlus(Star):
                         "【步骤5】戳机器人消息，戳的是机器人，配置允许跳过概率判断。跳过概率筛选，保留读空气判断"
                     )
 
-        # @消息、触发关键词消息、或符合条件的戳一戳消息跳过概率判断
+        # 🆕 检查是否应该跳过概率判断（新成员入群消息的特殊处理）
+        skip_probability_for_welcome = False
+        is_welcome_message = (
+            event.get_extra("is_welcome_message")
+            if hasattr(event, "get_extra")
+            else False
+        )
+        welcome_mode = (
+            event.get_extra("welcome_message_mode")
+            if hasattr(event, "get_extra")
+            else "normal"
+        )
+        if is_welcome_message and welcome_mode in ("skip_probability", "skip_all"):
+            skip_probability_for_welcome = True
+            if self.debug_mode:
+                logger.info(
+                    f"【步骤5】新成员入群消息，模式={welcome_mode}，跳过概率筛选"
+                )
+
+        # @消息、触发关键词消息、符合条件的戳一戳消息、或入群消息跳过概率判断
         # v1.1.2: 关键词智能模式下，关键词也会跳过概率判断
         if (
             not is_at_message
             and not has_trigger_keyword
             and not skip_probability_for_poke
+            and not skip_probability_for_welcome
         ):
             # 概率判断
             if self.debug_mode:
@@ -3383,6 +3664,12 @@ class ChatPlus(Star):
             if skip_probability_for_poke:
                 if self.debug_mode:
                     logger.info("【步骤5】戳机器人消息,跳过概率判断,必定处理")
+
+            if skip_probability_for_welcome:
+                if self.debug_mode:
+                    logger.info(
+                        f"【步骤5】新成员入群消息,跳过概率判断,模式={welcome_mode}"
+                    )
 
         return True
 
@@ -3660,6 +3947,20 @@ class ChatPlus(Star):
                     if self.debug_mode:
                         logger.warning(f"[对话疲劳] 获取疲劳信息失败: {e}")
 
+            # 🆕 v1.2.1: 获取回复密度提示文本
+            reply_density_hint = ""
+            if self.enable_reply_density_limit and self.reply_density_ai_hint:
+                try:
+                    density_chat_key = ProbabilityManager.get_chat_key(
+                        platform_name, is_private, chat_id
+                    )
+                    reply_density_hint = await ReplyDensityManager.get_ai_hint_text(
+                        density_chat_key
+                    )
+                except Exception as e:
+                    if self.debug_mode:
+                        logger.warning(f"[回复密度] 获取AI提示失败: {e}")
+
             should_reply = await DecisionAI.should_reply(
                 self.context,
                 event,
@@ -3682,6 +3983,8 @@ class ChatPlus(Star):
                 original_message_text=original_message_text,
                 # 🆕 v1.2.0: 传递对话疲劳信息
                 conversation_fatigue_info=conversation_fatigue_info,
+                # 🆕 v1.2.1: 传递回复密度提示
+                reply_density_hint=reply_density_hint,
             )
             # 🐛 修复：不要在这里删除缓存！
             # pre_decision 模式下，缓存的上下文（已植入记忆）需要在生成回复时使用
@@ -4046,8 +4349,13 @@ class ChatPlus(Star):
         if is_empty_at and chat_id in self.pending_messages_cache:
             cache_list = self.pending_messages_cache[chat_id]
             if cache_list:
+                # 过滤掉窗口缓冲消息（window_buffered=True），避免与 window_buffered_messages
+                # 区域重复展示；窗口消息会在当前消息下方单独展示，无需在摘要中再出现
+                non_window_cache = [
+                    m for m in cache_list if not m.get("window_buffered", False)
+                ]
                 # 最多取最近3条非空缓存消息
-                recent_cached = cache_list[-3:]
+                recent_cached = non_window_cache[-3:]
 
                 # 检查最近缓存消息与当前消息的时间差
                 current_ts = time.time()
@@ -4476,6 +4784,20 @@ class ChatPlus(Star):
                                             nickname=sender_name,
                                         )
                                     hist_msgs.append(m)
+                            # 🔧 修复：按历史截止时间戳过滤，丢弃插件重置之前的旧消息
+                            _cutoff_ts = ContextManager.get_history_cutoff(chat_id)
+                            if _cutoff_ts > 0 and hist_msgs:
+                                _before = len(hist_msgs)
+                                hist_msgs = [
+                                    _m
+                                    for _m in hist_msgs
+                                    if (getattr(_m, "timestamp", 0) or 0) >= _cutoff_ts
+                                ]
+                                _filtered = _before - len(hist_msgs)
+                                if _filtered > 0:
+                                    logger.info(
+                                        f"  官方历史截止过滤: 丢弃 {_filtered} 条旧消息"
+                                    )
                             if hist_msgs:
                                 if history_messages:
                                     existing_contents = set()
@@ -4574,6 +4896,11 @@ class ChatPlus(Star):
                 f"  最终历史消息: {len(history_messages) if history_messages else 0} 条"
             )
 
+        # 获取窗口缓冲消息（独立于历史上下文，拼接到当前消息下方）
+        window_buffered_msgs = self.cache_manager.get_window_buffered_messages(chat_id)
+        if self.debug_mode and window_buffered_msgs:
+            logger.info(f"  [窗口缓冲] 发现 {len(window_buffered_msgs)} 条窗口缓冲消息")
+
         # 格式化上下文
         bot_id = event.get_self_id()
         formatted_context = await ContextManager.format_context_for_ai(
@@ -4582,6 +4909,7 @@ class ChatPlus(Star):
             bot_id,
             include_timestamp=self.include_timestamp,
             include_sender_info=self.include_sender_info,
+            window_buffered_messages=window_buffered_msgs,
         )
 
         if self.debug_mode:
@@ -4724,9 +5052,27 @@ class ChatPlus(Star):
             if self.debug_mode:
                 logger.info("【步骤12】注入工具信息")
 
+            # 按人格过滤工具
+            allowed_tool_names = None
+            if self.tools_reminder_persona_filter:
+                try:
+                    umo = event.unified_msg_origin
+                    allowed_tool_names = await ToolsReminder.get_persona_tool_names(
+                        self.context, umo, platform_name
+                    )
+                    if self.debug_mode:
+                        if allowed_tool_names is not None:
+                            logger.info(
+                                f"  人格工具过滤: 允许 {len(allowed_tool_names)} 个工具"
+                            )
+                        else:
+                            logger.info("  人格未限制工具,使用全部工具")
+                except Exception as e:
+                    logger.warning(f"人格工具过滤失败,使用全部工具: {e}")
+
             old_len = len(final_message)
             final_message = ToolsReminder.inject_tools_to_message(
-                final_message, self.context
+                final_message, self.context, allowed_tool_names
             )
             if self.debug_mode:
                 logger.info(
@@ -4824,17 +5170,23 @@ class ChatPlus(Star):
             # 优先使用传入的缓存副本
             last_cached = current_message_cache
 
-            # 如果没有缓存副本，尝试从共享缓存读取（向后兼容）
+            # 如果没有缓存副本，尝试从共享缓存按message_id精确匹配（向后兼容）
             if not last_cached:
-                if (
-                    chat_id in self.pending_messages_cache
-                    and len(self.pending_messages_cache[chat_id]) > 0
-                ):
-                    last_cached = self.pending_messages_cache[chat_id][-1]
-                    if self.debug_mode:
-                        logger.info(
-                            "⚠️ [并发警告] 使用共享缓存（可能已被清空），建议检查并发逻辑"
-                        )
+                msg_id_for_lookup = self._get_message_id(event)
+                if chat_id in self.pending_messages_cache:
+                    for cached_msg in reversed(self.pending_messages_cache[chat_id]):
+                        if (
+                            isinstance(cached_msg, dict)
+                            and cached_msg.get("message_id") == msg_id_for_lookup
+                        ):
+                            last_cached = cached_msg
+                            if self.debug_mode:
+                                logger.info(
+                                    "⚠️ [并发警告] 从共享缓存按message_id精确匹配获取消息"
+                                )
+                            break
+                if not last_cached and self.debug_mode:
+                    logger.info("⚠️ [并发警告] 共享缓存中未找到匹配消息，将从event提取")
             elif self.debug_mode:
                 logger.info("🔒 [并发保护] 使用缓存副本，避免竞争")
 
@@ -5048,6 +5400,26 @@ class ChatPlus(Star):
 
             yield reply_result
 
+            # 🔧 安全兜底：agent完整流程结束后，检查是否有未保存的累积回复
+            # 正常情况下，on_llm_response 设置 _agent_done_flags，after_message_sent 完成保存。
+            # 但极少数边界情况下（如工具直接发送结果给用户，agent跳过on_agent_done），
+            # on_llm_response 不会触发，累积的回复就不会被保存。此处作为安全网兜底。
+            message_id = self._get_message_id(event)
+            if (
+                message_id in self._pending_bot_replies
+                and self._pending_bot_replies[message_id]
+            ):
+                logger.warning(
+                    f"[安全兜底] 检测到 {len(self._pending_bot_replies[message_id])} 段未保存的累积回复"
+                    f"（on_llm_response可能未触发），执行兜底保存"
+                )
+                try:
+                    await self._finalize_bot_reply_save(event, message_id)
+                except Exception as fallback_err:
+                    logger.error(
+                        f"[安全兜底] 兜底保存失败: {fallback_err}", exc_info=True
+                    )
+
             if self.debug_mode:
                 logger.info("【步骤13.9】回复已通过yield发送")
         else:
@@ -5100,6 +5472,17 @@ class ChatPlus(Star):
             ProactiveChatManager.record_bot_reply(chat_key, is_proactive=False)
             if self.debug_mode:
                 logger.info(f"[主动对话] 已记录AI回复（普通回复）")
+
+        # 🆕 v1.2.1: 记录回复到密度管理器
+        if self.enable_reply_density_limit:
+            try:
+                density_chat_key = ProbabilityManager.get_chat_key(
+                    platform_name, is_private, chat_id
+                )
+                await ReplyDensityManager.record_reply(density_chat_key)
+            except Exception as e:
+                if self.debug_mode:
+                    logger.warning(f"[回复密度] 记录回复失败: {e}")
 
         # 调整概率 / 记录注意力（二选一）
         attention_enabled = self.enable_attention_mechanism
@@ -5203,6 +5586,15 @@ class ChatPlus(Star):
                                     self.pending_messages_cache[chat_id]
                                 )
                             )
+                            # 过滤掉窗口缓冲消息（频率分析只关注普通缓存）
+                            cached_messages_raw = [
+                                msg
+                                for msg in cached_messages_raw
+                                if not (
+                                    isinstance(msg, dict)
+                                    and msg.get("window_buffered", False)
+                                )
+                            ]
                             for cached_msg in cached_messages_raw:
                                 if isinstance(cached_msg, dict):
                                     try:
@@ -5602,6 +5994,25 @@ class ChatPlus(Star):
     # ⏳ v1.2.0: 群聊等待窗口 - 辅助方法
     # =========================================================================
 
+    def _should_merge_at_for_user(self, sender_id: str) -> bool:
+        """判断该用户的@消息是否应被合并到窗口（而非触发即时回复）。
+
+        仅使用初始化时读取的实例变量，不再次读取配置。
+
+        Returns:
+            True = 该用户的@消息应被合并缓存
+            False = 走原有 force_complete 逻辑
+        """
+        if not self.group_wait_window_merge_at_messages:
+            return False
+        user_list = self.group_wait_window_merge_at_user_list
+        if not user_list:
+            return True  # 名单为空 = 对所有人生效
+        if self.group_wait_window_merge_at_list_mode == "whitelist":
+            return sender_id in user_list
+        else:  # blacklist
+            return sender_id not in user_list
+
     async def _maybe_intercept_for_wait_window(
         self,
         event: AstrMessageEvent,
@@ -5635,17 +6046,75 @@ class ChatPlus(Star):
 
         # 有活跃窗口 —— 处理 @消息特殊情况
         if is_at_message:
-            # @消息代表用户明确想与 bot 对话，立即结束等待
-            async with self._group_wait_window_lock:
-                w = self._group_wait_windows.get(window_key)
-                if w:
-                    w["force_complete"] = True
-            if self.debug_mode:
-                logger.info(
-                    f"[等待窗口] 用户{sender_id}在窗口期内发送@消息，"
-                    f"立即结束等待，@消息走正常回复流程"
-                )
-            return False  # 不拦截，让 @消息正常处理
+            # 判断是否为@机器人（而非@他人）
+            bot_id = str(event.get_self_id())
+            is_at_bot = any(
+                isinstance(c, At) and str(c.qq) == bot_id for c in event.get_messages()
+            )
+
+            # 检查是否应将此@消息合并到窗口
+            if is_at_bot and self._should_merge_at_for_user(sender_id):
+                # 🆕 合并模式：剥离@组件，作为普通消息缓存到窗口
+                # 1. 从消息链中移除指向bot的At组件
+                original_chain = event.get_messages()
+                filtered_chain = [
+                    c
+                    for c in original_chain
+                    if not (isinstance(c, At) and str(c.qq) == bot_id)
+                ]
+                event.message_obj.message = filtered_chain
+                # 2. 重建 message_str（移除@文本）
+                new_text_parts = []
+                for c in filtered_chain:
+                    if isinstance(c, Plain):
+                        new_text_parts.append(c.text)
+                event.message_str = "".join(new_text_parts).strip()
+                # 3. 关闭 at 标记，防止后续插件/平台当作@消息处理
+                event.is_at_or_wake_command = False
+
+                # 4. 判断剥离后是否有实际内容（文字或图片）
+                remaining_text = event.message_str
+                has_remaining_image = PlatformLTMHelper.has_image_in_message(event)
+                if not remaining_text and not has_remaining_image:
+                    # 纯空@消息（无文字、无图片）：不缓存，但更新窗口计数
+                    # event 已被修改（At移除、is_at_or_wake_command=False）
+                    # 后续插件看到的是空的非@消息，不会触发回复
+                    async with self._group_wait_window_lock:
+                        w = self._group_wait_windows.get(window_key)
+                        if w:
+                            w["extra_count"] += 1
+                            w["deadline"] = (
+                                time.time() + self.group_wait_window_timeout_ms / 1000.0
+                            )
+                    if self.debug_mode:
+                        logger.info(
+                            f"[等待窗口] 用户{sender_id}在窗口期内发送空@消息，"
+                            f"已剥离@组件，不缓存但更新窗口计数"
+                        )
+                    return True  # 拦截，我们插件不再处理
+                # 有内容（文字和/或图片）：fall through 到下方普通消息缓存分支
+                if self.debug_mode:
+                    _content_desc = []
+                    if remaining_text:
+                        _content_desc.append(f"文字: {remaining_text[:60]}...")
+                    if has_remaining_image:
+                        _content_desc.append("图片")
+                    logger.info(
+                        f"[等待窗口] 用户{sender_id}在窗口期内发送@消息，"
+                        f"已剥离@组件，作为普通消息缓存 ({', '.join(_content_desc)})"
+                    )
+            else:
+                # 原有逻辑：@他人 / 未开启合并 / 不在名单内 → force_complete
+                async with self._group_wait_window_lock:
+                    w = self._group_wait_windows.get(window_key)
+                    if w:
+                        w["force_complete"] = True
+                if self.debug_mode:
+                    logger.info(
+                        f"[等待窗口] 用户{sender_id}在窗口期内发送@消息，"
+                        f"立即结束等待，@消息走正常回复流程"
+                    )
+                return False  # 不拦截，让 @消息正常处理
 
         # 戳一戳也不拦截
         if poke_info_for_probability is not None:
@@ -5754,6 +6223,7 @@ class ChatPlus(Star):
                     "poke_info": None,
                     "probability_filtered": False,
                     "wait_window_intercepted": True,  # 标记为等待窗口拦截的消息
+                    "window_buffered": True,  # 标记为窗口缓冲消息，用于上下文分离
                     "image_urls": [],
                 }
                 self.cache_manager.add_to_cache(
@@ -5862,7 +6332,7 @@ class ChatPlus(Star):
                             logger.info(
                                 f"[等待窗口] 用户{user_id}：令牌失效（旧={my_token}，当前={w.get('token')}），旧循环退出"
                             )
-                            return 0  # 直接 return，跳过 finally 的清理（令牌失效，不计数）
+                        return 0  # 直接 return，跳过 finally 的清理（令牌失效，不计数）
                     if w.get("force_complete"):
                         logger.info(
                             f"[等待窗口] 用户{user_id}：收到@消息信号，提前结束等待"
@@ -6371,17 +6841,34 @@ class ChatPlus(Star):
             logger.warning(f"[并发保护] 保存缓存副本失败: {e}")
 
         # 步骤7: AI决策判断（第二道核心过滤）
-        # 🆕 v1.2.0: 传递匹配到的触发关键词
-        # 🆕 v1.2.0: 传递原始消息文本用于关键词检测
-        should_reply = await self._check_ai_decision(
-            event,
-            formatted_context,
-            is_at_message,
-            has_trigger_keyword,
-            merged_image_urls,
-            matched_trigger_keyword=matched_trigger_keyword,
-            original_message_text=original_message_text,
+        # 🆕 新成员入群消息 skip_all 模式：跳过AI决策，强制处理
+        _welcome_skip_all = (
+            (
+                event.get_extra("is_welcome_message")
+                and event.get_extra("welcome_message_mode") == "skip_all"
+            )
+            if hasattr(event, "get_extra")
+            else False
         )
+
+        if _welcome_skip_all:
+            should_reply = True
+            if self.debug_mode:
+                logger.info(
+                    "【步骤7】新成员入群消息(skip_all模式)，跳过AI决策，强制处理"
+                )
+        else:
+            # 🆕 v1.2.0: 传递匹配到的触发关键词
+            # 🆕 v1.2.0: 传递原始消息文本用于关键词检测
+            should_reply = await self._check_ai_decision(
+                event,
+                formatted_context,
+                is_at_message,
+                has_trigger_keyword,
+                merged_image_urls,
+                matched_trigger_keyword=matched_trigger_keyword,
+                original_message_text=original_message_text,
+            )
 
         if not should_reply:
             # 🆕 v1.2.0: AI决策判定不通过时，才将消息添加到缓存
@@ -6523,6 +7010,14 @@ class ChatPlus(Star):
             if self.debug_mode:
                 logger.info(f"[主动对话] 读空气AI判定确认回复，已重置主动对话计时器")
 
+            # 🆕 v1.2.1: 记录回复到密度管理器（主动对话确认回复）
+            if self.enable_reply_density_limit:
+                try:
+                    await ReplyDensityManager.record_reply(chat_key)
+                except Exception as e:
+                    if self.debug_mode:
+                        logger.warning(f"[回复密度] 记录回复失败: {e}")
+
         # 🆕 v1.2.0: 冷却解除检测 (Requirements 2.1, 2.2)
         # 当AI决定回复时，尝试解除用户的冷却状态
         if should_reply and self.cooldown_enabled:
@@ -6641,6 +7136,9 @@ class ChatPlus(Star):
                     bot_id,
                     include_timestamp=self.include_timestamp,
                     include_sender_info=self.include_sender_info,
+                    window_buffered_messages=self.cache_manager.get_window_buffered_messages(
+                        chat_id
+                    ),
                 )
                 emoji_marker_applied = True
                 if self.debug_mode:
@@ -6697,6 +7195,7 @@ class ChatPlus(Star):
             PLUGIN_CUSTOM_PROMPT,
             PLUGIN_IMAGE_URLS,
             PLUGIN_FUNC_TOOL,
+            PLUGIN_CURRENT_MESSAGE,
         )
 
         # 检查是否是来自本插件的请求
@@ -6762,6 +7261,10 @@ class ChatPlus(Star):
         # 平台 LTM 的 on_req_llm 方法会修改 req.contexts 和 req.system_prompt
         # 我们需要恢复插件自己的设置
         req.contexts = plugin_contexts
+        # 🔧 把 req.prompt 从短消息（当前用户消息原文，用于向量检索类插件的召回）
+        #    换回完整的 full_prompt（含历史上下文+系统指令），供 AI 推理使用。
+        #    其他插件（如 livingmemory，priority=0）已先执行，拿到的是短消息，
+        #    向量检索正常工作，不会触发 token 超限截断警告。
         req.prompt = plugin_prompt
         req.image_urls = plugin_image_urls
 
@@ -6779,6 +7282,26 @@ class ChatPlus(Star):
             req.system_prompt = f"{plugin_system_prompt}\n{other_plugin_additions}"
         else:
             req.system_prompt = plugin_system_prompt
+
+        # 🔧 修复：注入 Skills 提示词，避免插件接管 LLM 请求后丢失技能识别
+        # 原因：插件通过 event.request_llm() 创建的 ProviderRequest 没有 conversation 对象，
+        # 导致框架的 _ensure_persona_and_skills() 跳过执行，Skills 提示词不会被注入。
+        # 这里手动加载活跃的 Skills 并追加到 system_prompt 中。
+        try:
+            from astrbot.core.skills.skill_manager import (
+                SkillManager,
+                build_skills_prompt,
+            )
+
+            skill_manager = SkillManager()
+            skills = skill_manager.list_skills(active_only=True)
+            if skills:
+                skills_prompt = build_skills_prompt(skills)
+                req.system_prompt += f"\n{skills_prompt}\n"
+                if self.debug_mode:
+                    logger.info(f"  ✅ 已注入 Skills 提示词，技能数量: {len(skills)}")
+        except Exception as e:
+            logger.warning(f"⚠️ 注入 Skills 提示词时出错（不影响主流程）: {e}")
 
         if self.debug_mode:
             logger.info(f"  ✅ 已恢复插件自定义上下文:")
@@ -6799,11 +7322,66 @@ class ChatPlus(Star):
             event.set_extra(PLUGIN_CUSTOM_PROMPT, None)
             event.set_extra(PLUGIN_IMAGE_URLS, None)
             event.set_extra(PLUGIN_FUNC_TOOL, None)
+            event.set_extra(PLUGIN_CURRENT_MESSAGE, None)
             # 简化日志：非debug模式下也显示，方便监控安全机制
             logger.info("[安全] 已清理LLM请求上下文缓存")
         except Exception as e:
             # 清理失败不影响主流程，仅记录警告
             logger.warning(f"⚠️ 清理event.extra字段时发生错误: {e}")
+
+    @filter.on_llm_response(priority=-1)
+    async def on_llm_response(self, event: AstrMessageEvent, response):
+        """
+        🔧 多轮工具调用修复：agent完成信号
+
+        当agent真正完成时（所有工具调用结束，不再有后续LLM调用），
+        AstrBot框架触发此钩子（在on_agent_done中调用）。
+
+        此钩子在最后一次 after_message_sent 之前触发，
+        用于设置标志，告知 after_message_sent 可以最终保存所有累积的回复。
+
+        对于agent最终没有文本输出的情况（如工具直接返回结果），
+        此处还负责将之前累积的中间文本保存到历史。
+        """
+        try:
+            message_id = self._get_message_id(event)
+
+            # 仅处理由本插件触发的消息
+            if message_id not in self.processing_sessions:
+                return
+
+            # 设置agent完成标志
+            self._agent_done_flags.add(message_id)
+
+            if self.debug_mode:
+                pending_count = len(self._pending_bot_replies.get(message_id, []))
+                logger.info(
+                    f"[on_llm_response] agent已完成，message_id={message_id[:30]}...，"
+                    f"已累积 {pending_count} 段回复文本"
+                )
+
+            # 🔧 边界情况处理：如果agent完成但最终response没有文本
+            # （例如工具直接发送结果），而之前有累积的中间文本，
+            # 需要在此处触发保存，因为不会再有 after_message_sent 调用
+            has_final_text = bool(
+                response
+                and (
+                    getattr(response, "completion_text", None)
+                    or getattr(response, "result_chain", None)
+                )
+            )
+            pending_texts = self._pending_bot_replies.get(message_id, [])
+
+            if not has_final_text and pending_texts:
+                # agent完成，但没有最终文本输出，且有之前累积的中间文本
+                # 需要在此保存，因为不会再有 after_message_sent
+                logger.info(
+                    f"[on_llm_response] agent完成但无最终文本，保存 {len(pending_texts)} 段累积文本"
+                )
+                await self._finalize_bot_reply_save(event, message_id)
+
+        except Exception as e:
+            logger.error(f"[on_llm_response] 处理失败: {e}", exc_info=True)
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
@@ -6844,6 +7422,11 @@ class ChatPlus(Star):
                 return
 
             self.raw_reply_cache[message_id] = reply_text
+
+            # 🔧 多轮工具调用支持：累积原始回复文本
+            if message_id not in self._pending_bot_replies:
+                self._pending_bot_replies[message_id] = []
+            self._pending_bot_replies[message_id].append(reply_text)
 
             # 🆕 v1.2.0: 应用输出内容过滤（独立于保存过滤）
             filtered_reply_text = reply_text
@@ -6925,7 +7508,47 @@ class ChatPlus(Star):
                             logger.info(
                                 f"[装饰阶段] 已标记消息为重复拦截: {message_id[:30]}...（将跳过AI消息保存，但保存用户消息）"
                             )
+
+                        # 🔧 修复：重复拦截后 after_message_sent 不会被框架调用
+                        # 因此需要在此处直接保存用户消息和缓存消息到官方对话系统
+                        # 否则这些消息永远不会被保存，导致上下文逐渐脱节
+                        try:
+                            await self._save_user_messages_on_duplicate_block(
+                                event, message_id, chat_id
+                            )
+                        except Exception as save_err:
+                            logger.warning(
+                                f"[装饰阶段] 重复拦截后保存用户消息失败: {save_err}"
+                            )
+
                         return
+
+            # 🔧 修复竞态条件：通过重复检测后，立即写入 recent_replies_cache
+            # 原来的逻辑是在 after_message_sent 中才写入，但此时消息已经发送
+            # 如果两条消息并发处理，都在 after_message_sent 之前到达此处，
+            # 两条都会通过重复检测，导致重复发送
+            # 现在在检测通过后立即写入，防止并发消息通过相同检测
+            if self.enable_duplicate_filter and reply_text:
+                try:
+                    if chat_id not in self.recent_replies_cache:
+                        self.recent_replies_cache[chat_id] = []
+                    self.recent_replies_cache[chat_id].append(
+                        {
+                            "content": reply_text,  # 使用原始内容（未添加错字）
+                            "timestamp": time.time(),
+                        }
+                    )
+                    # 🔒 限制缓存大小
+                    max_cache_size = min(
+                        max(10, self.duplicate_filter_check_count * 2),
+                        self._DUPLICATE_CACHE_SIZE_LIMIT,
+                    )
+                    if len(self.recent_replies_cache[chat_id]) > max_cache_size:
+                        self.recent_replies_cache[chat_id] = self.recent_replies_cache[
+                            chat_id
+                        ][-max_cache_size:]
+                except Exception:
+                    pass  # 缓存写入失败不影响主流程
 
             # 🆕 v1.0.2: 应用错字模拟（在重复检测之后，对原始内容进行装饰性修改）
             if self.typo_enabled and self.typo_generator:
@@ -7025,8 +7648,24 @@ class ChatPlus(Star):
                         )
                     return
 
-                # 清除标记（无论成功与否，都要清除）
+                # 🔧 多轮工具调用支持：检查agent是否已完成
+                # on_llm_response 在 agent 真正完成时设置此标志
+                # 如果agent还未完成（工具调用中），回复文本已在 on_decorating_result 中累积，
+                # 此处暂不保存，等待后续的最终调用
+                is_agent_done = message_id in self._agent_done_flags
+
+                if not is_agent_done:
+                    # agent还在运行（多轮工具调用中），文本已在 on_decorating_result 累积
+                    pending_count = len(self._pending_bot_replies.get(message_id, []))
+                    logger.info(
+                        f"[消息发送后] agent尚未完成（多轮工具调用中），"
+                        f"已累积 {pending_count} 段回复，等待agent完成后统一保存"
+                    )
+                    return
+
+                # agent已完成，清除标记并进行最终保存
                 del self.processing_sessions[message_id]
+                self._agent_done_flags.discard(message_id)
 
             # 🔧 检查是否为重复消息拦截（跳过AI消息保存，但继续保存用户消息）
             is_duplicate_blocked = message_id in self._duplicate_blocked_messages
@@ -7069,16 +7708,35 @@ class ChatPlus(Star):
             bot_reply_to_save = None  # 🔧 初始化为None，重复拦截时不保存AI消息
 
             if is_llm_result and not is_duplicate_blocked:
-                displayed_bot_reply_text = "".join(
-                    [comp.text for comp in result_obj.chain if hasattr(comp, "text")]
-                )
-                if not displayed_bot_reply_text:
+                # 🔧 多轮工具调用支持：使用累积的所有回复文本，而不是仅当前一段
+                accumulated_texts = self._pending_bot_replies.pop(message_id, [])
+                # 清理 raw_reply_cache（不再需要）
+                if hasattr(self, "raw_reply_cache"):
+                    self.raw_reply_cache.pop(message_id, "")
+
+                if accumulated_texts:
+                    # 合并所有累积的原始文本
+                    original_bot_reply_text = "\n".join(accumulated_texts)
+                    displayed_bot_reply_text = original_bot_reply_text
+                    if len(accumulated_texts) > 1:
+                        logger.info(
+                            f"[消息发送后] 🔧 多轮工具调用：合并了 {len(accumulated_texts)} 段AI回复，"
+                            f"总长度: {len(original_bot_reply_text)} 字符"
+                        )
+                else:
+                    # 回退：从当前 event result 提取（兼容无累积的情况）
+                    displayed_bot_reply_text = "".join(
+                        [
+                            comp.text
+                            for comp in result_obj.chain
+                            if hasattr(comp, "text")
+                        ]
+                    )
+                    original_bot_reply_text = displayed_bot_reply_text
+
+                if not original_bot_reply_text:
                     logger.info(f"[消息发送后] 会话 {chat_id} 回复文本为空，跳过")
                     return
-                if hasattr(self, "raw_reply_cache"):
-                    original_bot_reply_text = self.raw_reply_cache.pop(message_id, "")
-                if not original_bot_reply_text:
-                    original_bot_reply_text = displayed_bot_reply_text
 
             # 🔧 只在非重复拦截时保存AI消息
             if is_llm_result and not is_duplicate_blocked:
@@ -7107,31 +7765,59 @@ class ChatPlus(Star):
                         f"[保存过滤] 已过滤AI回复，原长度: {len(original_bot_reply_text)}, 过滤后: {len(bot_reply_to_save)}"
                     )
 
+                # 🆕 构建交错排列的工具调用+文本回复（保留时间顺序）
+                # 不影响去重用的 original_bot_reply_text
+                interleaved_reply = self._build_interleaved_tool_reply(
+                    event, accumulated_texts
+                )
+                if interleaved_reply:
+                    # 对交错排列的内容应用保存过滤
+                    try:
+                        bot_reply_to_save = self.content_filter.process_for_save(
+                            interleaved_reply
+                        )
+                    except Exception:
+                        bot_reply_to_save = interleaved_reply
+                    logger.info(f"[工具调用] 已构建交错排列的工具调用记录到AI回复历史")
+
                 # 保存AI回复到自定义存储（使用过滤后的内容）
                 await ContextManager.save_bot_message(
                     event, bot_reply_to_save, self.context
                 )
 
                 # 记录到最近回复缓存（用于后续去重，使用原始内容，不含错字）
+                # 🔧 注意：on_decorating_result 中已经提前写入了缓存（修复竞态条件）
+                # 此处仅作为保险：如果 on_decorating_result 未写入（异常路径），这里补写
                 try:
-                    if chat_id not in self.recent_replies_cache:
-                        self.recent_replies_cache[chat_id] = []
-                    self.recent_replies_cache[chat_id].append(
-                        {
-                            "content": original_bot_reply_text,
-                            "timestamp": time.time(),
-                        }  # ← 使用原始内容
-                    )
-                    # 🔒 限制缓存大小（保留配置条数的2倍，最少10条，但不超过硬上限）
-                    max_cache_size = min(
-                        max(10, self.duplicate_filter_check_count * 2),
-                        self._DUPLICATE_CACHE_SIZE_LIMIT,
-                    )
-                    if len(self.recent_replies_cache[chat_id]) > max_cache_size:
-                        # 丢弃最旧的消息，保留最新的
-                        self.recent_replies_cache[chat_id] = self.recent_replies_cache[
-                            chat_id
-                        ][-max_cache_size:]
+                    # 检查是否已经在 on_decorating_result 中写入过（避免重复写入）
+                    already_cached = False
+                    if chat_id in self.recent_replies_cache:
+                        for recent in self.recent_replies_cache[chat_id][-3:]:
+                            if (
+                                recent.get("content", "")
+                                == original_bot_reply_text.strip()
+                            ):
+                                already_cached = True
+                                break
+                    if not already_cached:
+                        if chat_id not in self.recent_replies_cache:
+                            self.recent_replies_cache[chat_id] = []
+                        self.recent_replies_cache[chat_id].append(
+                            {
+                                "content": original_bot_reply_text,
+                                "timestamp": time.time(),
+                            }  # ← 使用原始内容
+                        )
+                        # 🔒 限制缓存大小（保留配置条数的2倍，最少10条，但不超过硬上限）
+                        max_cache_size = min(
+                            max(10, self.duplicate_filter_check_count * 2),
+                            self._DUPLICATE_CACHE_SIZE_LIMIT,
+                        )
+                        if len(self.recent_replies_cache[chat_id]) > max_cache_size:
+                            # 丢弃最旧的消息，保留最新的
+                            self.recent_replies_cache[chat_id] = (
+                                self.recent_replies_cache[chat_id][-max_cache_size:]
+                            )
                 except Exception:
                     pass
             elif is_duplicate_blocked:
@@ -7147,14 +7833,23 @@ class ChatPlus(Star):
             # 优先使用缓存快照（并发安全）
             last_cached = self._message_cache_snapshots.pop(message_id, None)
             if not last_cached:
-                # 回退到共享缓存（不应该发生，但作为保险）
-                if (
-                    chat_id in self.pending_messages_cache
-                    and len(self.pending_messages_cache[chat_id]) > 0
-                ):
-                    last_cached = self.pending_messages_cache[chat_id][-1]
+                # 🔧 修复：不再使用 pending_messages_cache[-1]（可能取到错误的消息）
+                # 改为按 message_id 精确匹配查找，避免消息追踪错误
+                if chat_id in self.pending_messages_cache:
+                    for cached_msg in reversed(self.pending_messages_cache[chat_id]):
+                        if (
+                            isinstance(cached_msg, dict)
+                            and cached_msg.get("message_id") == message_id
+                        ):
+                            last_cached = cached_msg
+                            logger.warning(
+                                "[消息发送后] ⚠️ 从共享缓存按message_id精确匹配获取消息"
+                            )
+                            break
+                if not last_cached:
+                    # 最终回退：从event提取（下方的 if not message_to_save 分支会处理）
                     logger.warning(
-                        "[消息发送后] ⚠️ 使用共享缓存获取当前消息（并发风险）"
+                        "[消息发送后] ⚠️ 缓存快照和共享缓存均未找到匹配消息，将从event提取"
                     )
 
             if (
@@ -7353,7 +8048,7 @@ class ChatPlus(Star):
             )
 
             if success:
-                logger.info(f"[消息发送后] ✅ 成功保存到官方对话系统")
+                logger.info(f"[消息发送后] ✅ Phase-1 成功保存到官方对话系统")
                 # 🆕 v1.2.0: 使用缓存管理器清理已保存的缓存消息
                 self.cache_manager.clear_saved_cache(
                     chat_id=chat_id,
@@ -7362,6 +8057,48 @@ class ChatPlus(Star):
                     processing_msg_ids=processing_msg_ids,
                     proactive_processing=proactive_processing,
                 )
+
+                # 🆕 Phase-2: 保存窗口缓冲消息（在AI回复之后）
+                try:
+                    window_buffered_to_convert = (
+                        self.cache_manager.prepare_window_buffered_for_save(
+                            chat_id=chat_id,
+                            processing_msg_ids=processing_msg_ids,
+                        )
+                    )
+                    if window_buffered_to_convert:
+                        logger.info(
+                            f"[消息发送后] Phase-2: 保存 {len(window_buffered_to_convert)} 条窗口缓冲消息"
+                        )
+                        # 收集待保存消息的ID，用于精确清除
+                        wb_saved_msg_ids = set()
+                        for wb_msg in self.cache_manager.get_window_buffered_messages(
+                            chat_id
+                        ):
+                            msg_id = wb_msg.get("message_id")
+                            if msg_id:
+                                wb_saved_msg_ids.add(msg_id)
+
+                        phase2_success = await ContextManager.save_to_official_conversation_with_cache(
+                            event,
+                            window_buffered_to_convert,
+                            None,  # 用户消息已在 Phase-1 保存
+                            None,  # AI回复已在 Phase-1 保存
+                            self.context,
+                        )
+                        if phase2_success:
+                            self.cache_manager.clear_window_buffered_cache(
+                                chat_id, saved_msg_ids=wb_saved_msg_ids
+                            )
+                            logger.info(f"[消息发送后] Phase-2: ✅ 窗口缓冲消息已转正")
+                        else:
+                            logger.warning(
+                                f"[消息发送后] Phase-2: ⚠️ 窗口缓冲消息转正失败（降级：留在缓存等下次转正）"
+                            )
+                except Exception as phase2_err:
+                    logger.warning(
+                        f"[消息发送后] Phase-2: ⚠️ 窗口缓冲消息处理异常（降级：留在缓存）: {phase2_err}"
+                    )
 
                 # 🔧 标记消息已保存（防止分段消息重复保存）
                 self._saved_messages[message_id] = time.time()
@@ -7403,6 +8140,144 @@ class ChatPlus(Star):
 
         except Exception as e:
             logger.error(f"[消息发送后] 保存AI回复时发生错误: {e}", exc_info=True)
+
+    async def _save_user_messages_on_duplicate_block(
+        self, event: AstrMessageEvent, message_id: str, chat_id: str
+    ):
+        """
+        🔧 重复拦截后保存用户消息到官方对话系统
+
+        当 on_decorating_result 检测到重复并清空 result 后，框架不会调用 after_message_sent。
+        此方法确保用户消息和缓存消息仍然被保存到官方对话系统，防止上下文脱节。
+
+        Args:
+            event: 消息事件
+            message_id: 消息唯一ID
+            chat_id: 聊天ID
+        """
+        try:
+            # 获取用户消息缓存快照
+            last_cached = self._message_cache_snapshots.pop(message_id, None)
+
+            if not last_cached:
+                if self.debug_mode:
+                    logger.info("[重复拦截-保存] 无缓存快照，跳过用户消息保存")
+                return
+
+            if not isinstance(last_cached, dict) or "content" not in last_cached:
+                return
+
+            # 获取处理后的消息内容
+            raw_content = last_cached["content"]
+
+            # 确定触发方式
+            trigger_type = None
+            if last_cached.get("has_trigger_keyword"):
+                trigger_type = "keyword"
+            elif last_cached.get("is_at_message"):
+                trigger_type = "at"
+            else:
+                trigger_type = "ai_decision"
+
+            message_to_save = MessageProcessor.add_metadata_from_cache(
+                raw_content,
+                last_cached.get("sender_id", event.get_sender_id()),
+                last_cached.get("sender_name", event.get_sender_name()),
+                last_cached.get("message_timestamp") or last_cached.get("timestamp"),
+                self.include_timestamp,
+                self.include_sender_info,
+                last_cached.get("mention_info"),
+                trigger_type,
+                last_cached.get("poke_info"),
+                last_cached.get("is_empty_at", False),
+            )
+
+            # 清理系统提示
+            message_to_save = MessageCleaner.clean_message(message_to_save)
+
+            if not message_to_save:
+                return
+
+            # 准备缓存消息转正
+            current_msg_timestamp = last_cached.get("timestamp")
+            current_msg_id = last_cached.get("message_id")
+
+            async with self.concurrent_lock:
+                processing_msg_ids = set(self.processing_sessions.keys())
+
+            proactive_processing = False
+            async with self.concurrent_lock:
+                proactive_processing = (
+                    hasattr(self, "proactive_processing_sessions")
+                    and chat_id in self.proactive_processing_sessions
+                )
+
+            cached_messages_to_convert = self.cache_manager.prepare_cache_for_save(
+                chat_id=chat_id,
+                current_msg_id=current_msg_id,
+                current_msg_timestamp=current_msg_timestamp,
+                processing_msg_ids=processing_msg_ids,
+                proactive_processing=proactive_processing,
+            )
+
+            # 保存到官方对话系统（不保存AI回复，只保存用户消息+缓存消息）
+            success = await ContextManager.save_to_official_conversation_with_cache(
+                event,
+                cached_messages_to_convert,
+                message_to_save,
+                None,  # bot_message=None，不保存AI回复
+                self.context,
+            )
+
+            if success:
+                logger.info(f"[重复拦截-保存] ✅ 用户消息已保存到官方对话系统")
+                self.cache_manager.clear_saved_cache(
+                    chat_id=chat_id,
+                    current_msg_id=current_msg_id,
+                    current_msg_timestamp=current_msg_timestamp,
+                    processing_msg_ids=processing_msg_ids,
+                    proactive_processing=proactive_processing,
+                )
+
+                # Phase-2: 保存窗口缓冲消息
+                try:
+                    window_buffered_to_convert = (
+                        self.cache_manager.prepare_window_buffered_for_save(
+                            chat_id=chat_id,
+                            processing_msg_ids=processing_msg_ids,
+                        )
+                    )
+                    if window_buffered_to_convert:
+                        wb_saved_msg_ids = set()
+                        for wb_msg in self.cache_manager.get_window_buffered_messages(
+                            chat_id
+                        ):
+                            msg_id = wb_msg.get("message_id")
+                            if msg_id:
+                                wb_saved_msg_ids.add(msg_id)
+
+                        phase2_success = await ContextManager.save_to_official_conversation_with_cache(
+                            event,
+                            window_buffered_to_convert,
+                            None,
+                            None,
+                            self.context,
+                        )
+                        if phase2_success:
+                            self.cache_manager.clear_window_buffered_cache(
+                                chat_id, saved_msg_ids=wb_saved_msg_ids
+                            )
+                except Exception as phase2_err:
+                    logger.warning(
+                        f"[重复拦截-保存] Phase-2 窗口缓冲消息处理异常: {phase2_err}"
+                    )
+            else:
+                logger.warning(f"[重复拦截-保存] ⚠️ 保存用户消息失败")
+
+        except Exception as e:
+            logger.warning(
+                f"[重复拦截-保存] 保存用户消息时发生错误: {e}", exc_info=True
+            )
 
     def _is_enabled(self, event: AstrMessageEvent) -> bool:
         """
@@ -7481,6 +8356,258 @@ class ChatPlus(Star):
                 )
             return False
 
+    def _build_interleaved_tool_reply(
+        self, event: AstrMessageEvent, pending_texts: list
+    ) -> str:
+        """构建交错排列的工具调用+文本回复，保留时间顺序。
+
+        根据 agent 循环的实际执行顺序，将 AI 的中间文本和工具调用记录交错排列：
+        - AI 先说话再调工具 → 文本在前，工具记录在后
+        - AI 直接调工具 → 工具记录在前
+        - 多轮交替调用 → 按实际顺序交错排列
+
+        利用 ToolCallsResult.tool_calls_info.content 判断每轮工具调用是否伴随文本，
+        与 _pending_bot_replies 中的文本按序对应。
+
+        Args:
+            event: 消息事件
+            pending_texts: _pending_bot_replies 中累积的文本列表（按时间顺序）
+
+        Returns:
+            交错排列的完整消息文本，无工具调用时返回空字符串
+        """
+        try:
+            req = event.get_extra("provider_request")
+            if not req or not getattr(req, "tool_calls_result", None):
+                return ""
+
+            tool_calls_list = req.tool_calls_result
+            # 兼容单个 ToolCallsResult 或列表
+            if not isinstance(tool_calls_list, list):
+                tool_calls_list = [tool_calls_list]
+
+            interleaved_parts = []
+            text_index = 0  # 追踪当前使用到 pending_texts 的哪个位置
+
+            for tcr in tool_calls_list:
+                tool_calls_info = getattr(tcr, "tool_calls_info", None)
+                tool_results = getattr(tcr, "tool_calls_result", []) or []
+
+                # 检查这一轮工具调用是否伴随 AI 的中间文本
+                # （通过 tool_calls_info.content 中是否有 TextPart 判断）
+                has_intermediate_text = False
+                if tool_calls_info and tool_calls_info.content:
+                    content_list = (
+                        tool_calls_info.content
+                        if isinstance(tool_calls_info.content, list)
+                        else []
+                    )
+                    for part in content_list:
+                        if hasattr(part, "text") and part.text and part.text.strip():
+                            has_intermediate_text = True
+                            break
+
+                # 如果这一轮有中间文本，取 pending_texts 中对应的（已处理过的）版本
+                if has_intermediate_text and text_index < len(pending_texts):
+                    interleaved_parts.append(pending_texts[text_index])
+                    text_index += 1
+
+                # 格式化这一轮的工具调用记录
+                tool_lines = []
+                if tool_calls_info and getattr(tool_calls_info, "tool_calls", None):
+                    for i, tc in enumerate(tool_calls_info.tool_calls):
+                        # 兼容 ToolCall 对象和 dict 两种格式
+                        if hasattr(tc, "function"):
+                            func_name = tc.function.name
+                            func_args = tc.function.arguments or ""
+                        elif isinstance(tc, dict):
+                            func = tc.get("function", {})
+                            func_name = func.get("name", "未知工具")
+                            func_args = func.get("arguments", "")
+                        else:
+                            continue
+
+                        # 截断过长参数
+                        if len(func_args) > 200:
+                            func_args = func_args[:200] + "..."
+
+                        # 获取对应工具结果
+                        result_preview = ""
+                        if i < len(tool_results):
+                            result_content = getattr(tool_results[i], "content", None)
+                            if isinstance(result_content, str):
+                                result_preview = result_content
+                            elif isinstance(result_content, list):
+                                texts = []
+                                for p in result_content:
+                                    if hasattr(p, "text"):
+                                        texts.append(p.text)
+                                    elif isinstance(p, dict) and "text" in p:
+                                        texts.append(p["text"])
+                                result_preview = " ".join(texts)
+                            elif result_content is not None:
+                                result_preview = str(result_content)
+
+                            # 截断过长结果
+                            if len(result_preview) > 500:
+                                result_preview = result_preview[:500] + "..."
+
+                        if result_preview:
+                            tool_lines.append(
+                                f"- {func_name}({func_args}) → {result_preview}"
+                            )
+                        else:
+                            tool_lines.append(f"- {func_name}({func_args}) → (无返回)")
+
+                if tool_lines:
+                    interleaved_parts.append(
+                        "[工具调用记录]\n" + "\n".join(tool_lines) + "\n[工具调用结束]"
+                    )
+
+            # 剩余的 pending_texts 是最后一轮工具调用之后 AI 的最终回复
+            while text_index < len(pending_texts):
+                interleaved_parts.append(pending_texts[text_index])
+                text_index += 1
+
+            if not interleaved_parts:
+                return ""
+
+            return "\n".join(interleaved_parts)
+
+        except Exception as e:
+            logger.warning(f"[工具调用交错] 构建失败: {e}", exc_info=True)
+            return ""
+
+    async def _finalize_bot_reply_save(self, event: AstrMessageEvent, message_id: str):
+        """
+        🔧 多轮工具调用支持：在agent完成但无最终文本时，保存之前累积的回复
+
+        当AI先说话再调用工具，但工具直接返回结果（agent完成时无最终文本输出），
+        需要在 on_llm_response 中调用此方法保存之前累积的所有中间回复文本。
+        """
+        try:
+            is_private = event.is_private_chat()
+            chat_id = event.get_group_id() if not is_private else event.get_sender_id()
+
+            accumulated_texts = self._pending_bot_replies.pop(message_id, [])
+            if not accumulated_texts:
+                return
+
+            original_bot_reply_text = "\n".join(accumulated_texts)
+            if not original_bot_reply_text.strip():
+                return
+
+            logger.info(
+                f"[_finalize_bot_reply_save] 保存 {len(accumulated_texts)} 段累积的AI回复，"
+                f"总长度: {len(original_bot_reply_text)} 字符"
+            )
+
+            # 应用保存内容过滤
+            bot_reply_to_save = original_bot_reply_text
+            try:
+                bot_reply_to_save = self.content_filter.process_for_save(
+                    original_bot_reply_text
+                )
+            except Exception:
+                logger.error("[保存过滤] 过滤时发生异常，将使用原始内容", exc_info=True)
+
+            # 🆕 构建交错排列的工具调用+文本回复
+            interleaved_reply = self._build_interleaved_tool_reply(
+                event, accumulated_texts
+            )
+            if interleaved_reply:
+                try:
+                    bot_reply_to_save = self.content_filter.process_for_save(
+                        interleaved_reply
+                    )
+                except Exception:
+                    bot_reply_to_save = interleaved_reply
+                logger.info(f"[工具调用] 兜底保存: 已构建交错排列的工具调用记录")
+
+            # 保存AI回复到自定义存储
+            await ContextManager.save_bot_message(
+                event, bot_reply_to_save, self.context
+            )
+
+            # 记录到最近回复缓存（用于去重）
+            try:
+                if chat_id not in self.recent_replies_cache:
+                    self.recent_replies_cache[chat_id] = []
+                self.recent_replies_cache[chat_id].append(
+                    {"content": original_bot_reply_text, "timestamp": time.time()}
+                )
+            except Exception:
+                pass
+
+            # 清理 raw_reply_cache
+            if hasattr(self, "raw_reply_cache"):
+                self.raw_reply_cache.pop(message_id, None)
+
+            # 清理session并保存用户消息到官方系统
+            async with self.concurrent_lock:
+                self.processing_sessions.pop(message_id, None)
+                self._agent_done_flags.discard(message_id)
+
+            # 获取用户消息
+            message_to_save = ""
+            last_cached = self._message_cache_snapshots.pop(message_id, None)
+            if (
+                last_cached
+                and isinstance(last_cached, dict)
+                and "content" in last_cached
+            ):
+                raw_content = last_cached["content"]
+                trigger_type = None
+                if last_cached.get("has_trigger_keyword"):
+                    trigger_type = "keyword"
+                elif last_cached.get("is_at_message"):
+                    trigger_type = "at"
+                else:
+                    trigger_type = "ai_decision"
+
+                message_to_save = MessageProcessor.add_metadata_from_cache(
+                    raw_content,
+                    last_cached.get("sender_id", event.get_sender_id()),
+                    last_cached.get("sender_name", event.get_sender_name()),
+                    last_cached.get("message_timestamp")
+                    or last_cached.get("timestamp"),
+                    self.include_timestamp,
+                    self.include_sender_info,
+                    last_cached.get("mention_info"),
+                    trigger_type,
+                    last_cached.get("poke_info"),
+                    last_cached.get("is_empty_at", False),
+                )
+                message_to_save = MessageCleaner.clean_message(message_to_save)
+
+            if not message_to_save:
+                processed = MessageCleaner.extract_raw_message_from_event(event)
+                if processed:
+                    message_to_save = MessageProcessor.add_metadata_to_message(
+                        event,
+                        processed,
+                        self.include_timestamp,
+                        self.include_sender_info,
+                        None,
+                        None,
+                        None,
+                    )
+                    message_to_save = MessageCleaner.clean_message(message_to_save)
+
+            if message_to_save:
+                await ContextManager.save_to_official_conversation_with_cache(
+                    event,
+                    [],
+                    message_to_save,
+                    bot_reply_to_save,
+                    self.context,
+                )
+
+            self._saved_messages[message_id] = time.time()
+
+        except Exception as e:
+            logger.error(f"[_finalize_bot_reply_save] 保存失败: {e}", exc_info=True)
+
     def _get_message_id(self, event: AstrMessageEvent) -> str:
         """
         生成消息的唯一标识符
@@ -7522,17 +8649,20 @@ class ChatPlus(Star):
                     result_id = f"{platform_name}_{platform_msg_id}"
 
             if not result_id:
-                # 回退方案：使用内容哈希（向后兼容，但可能有重复风险）
+                # 回退方案：使用确定性内容哈希（不含随机/时间因子）
+                # 🔧 修复：去掉 time_ns()，确保同一消息被平台重复推送时生成相同ID
+                # 这样 _seen_message_ids 的去重才能正确工作
                 sender_id = event.get_sender_id()
                 group_id = (
                     event.get_group_id() if not event.is_private_chat() else "private"
                 )
                 msg_content = event.get_message_str()[:100]  # 只取前100字符避免过长
 
-                # 🔧 添加时间戳（纳秒级），确保即使内容相同也不会冲突
-                timestamp_ns = time.time_ns()
+                # 🔧 使用秒级时间戳（取整到秒），允许同一秒内的重复推送被识别为同一消息
+                # 同时不同秒的相同内容消息仍然有不同的ID
+                timestamp_sec = int(time.time())
                 hash_input = (
-                    f"{sender_id}_{group_id}_{msg_content}_{timestamp_ns}".encode(
+                    f"{sender_id}_{group_id}_{msg_content}_{timestamp_sec}".encode(
                         "utf-8"
                     )
                 )
@@ -7546,8 +8676,8 @@ class ChatPlus(Star):
                 pass  # event对象不支持动态属性时忽略
             return result_id
         except Exception as e:
-            # 如果生成失败，返回一个基于时间的唯一ID
-            return f"fallback_{time.time_ns()}_{random.randint(1000, 9999)}"
+            # 如果生成失败，返回一个基于秒级时间戳的ID（同一秒内的重复推送会得到相同ID）
+            return f"fallback_{int(time.time())}_{str(e)[:20]}"
 
     def _normalize_bare(self, s: str) -> str:
         """
@@ -7555,7 +8685,7 @@ class ChatPlus(Star):
         - 去除所有空白
         - 转小写
         - 去掉开头的任意非字母数字字符（视为前缀符号，如 / ! # 等）
-        返回“裸指令/裸文本”以便与平台无关地比较。
+        返回"裸指令/裸文本"以便与平台无关地比较。
         """
         try:
             s2 = "".join(s.split()).lower()
@@ -8712,6 +9842,48 @@ class ChatPlus(Star):
                         f"  【表情包衰减】概率 {current_probability:.2f} "
                         f"已低于门槛 {self.emoji_decay_min_probability}，跳过衰减"
                     )
+
+        # 🆕 v1.2.1: 回复密度渐进式衰减
+        if self.enable_reply_density_limit:
+            try:
+                chat_key = ProbabilityManager.get_chat_key(
+                    platform_name, is_private, chat_id
+                )
+                density_factor = await ReplyDensityManager.get_probability_factor(
+                    chat_key
+                )
+                if density_factor < 1.0:
+                    old_probability = current_probability
+                    current_probability = current_probability * density_factor
+                    reply_count = await ReplyDensityManager.get_reply_count(chat_key)
+                    logger.info(
+                        f"  【回复密度】最近已回复{reply_count}次，"
+                        f"概率衰减: {old_probability:.2f} -> {current_probability:.2f} "
+                        f"(因子={density_factor:.2f})"
+                    )
+            except Exception as e:
+                if self.debug_mode:
+                    logger.warning(f"  【回复密度】检查失败，跳过: {e}")
+
+        # 🆕 v1.2.1: 消息质量预判
+        if self.enable_message_quality_scoring:
+            try:
+                message_text = MessageCleaner.extract_raw_message_from_event(event)
+                if message_text:
+                    quality_adjust, quality_reason = MessageQualityScorer.score_message(
+                        message_text
+                    )
+                    if abs(quality_adjust) > 1e-9:
+                        old_probability = current_probability
+                        current_probability = current_probability + quality_adjust
+                        logger.info(
+                            f"  【消息质量】{quality_reason}，"
+                            f"概率调整: {old_probability:.2f} -> {current_probability:.2f} "
+                            f"({'+' if quality_adjust > 0 else ''}{quality_adjust:.2f})"
+                        )
+            except Exception as e:
+                if self.debug_mode:
+                    logger.warning(f"  【消息质量】预判失败，跳过: {e}")
 
         # === 最终硬性边界限制 ===
         # 1. 应用用户配置的概率硬性限制（如果启用）

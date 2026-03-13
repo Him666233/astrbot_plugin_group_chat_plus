@@ -1,0 +1,219 @@
+/* ========== Charts Grid ========== */
+#charts-grid {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    gap: 20px;
+    align-content: start;
+}
+
+/* ========== Chart Card ========== */
+.chart-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+}
+.chart-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.chart-card-title {
+    font-size: 14px;
+    font-weight: 600;
+}
+.chart-card-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+}
+.chart-card-badge.live {
+    background: rgba(231,76,60,0.15);
+    color: var(--accent-red);
+}
+.chart-card-badge.persist {
+    background: var(--glass-bg-hover);
+    color: var(--text-secondary);
+}
+.chart-card-badge.disabled {
+    background: rgba(149,165,166,0.15);
+    color: var(--accent-gray);
+}
+
+/* ========== Chart Canvas ========== */
+.chart-canvas-wrap {
+    position: relative;
+    width: 100%;
+    height: 220px;
+}
+.chart-canvas-wrap canvas {
+    width: 100%;
+    height: 100%;
+}
+.chart-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* ========== Stats Row ========== */
+.stats-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+.stat-item {
+    flex: 1;
+    min-width: 80px;
+    background: var(--bg-card);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    text-align: center;
+}
+.stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* ========== Overview Cards ========== */
+.overview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+    padding: 0 24px;
+}
+.overview-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 16px;
+    text-align: center;
+}
+.overview-card .stat-value { font-size: 28px; }
+
+/* ========== Session List (session-mgr) ========== */
+#session-list-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 24px;
+}
+.session-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: background var(--transition);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.session-card:hover { background: var(--bg-hover); }
+.session-card-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.session-card-id {
+    font-size: 14px;
+    font-weight: 600;
+}
+.session-card-meta {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.session-card-actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* ========== Session Detail ========== */
+#session-detail {
+    padding: 16px 24px;
+}
+.chat-history-viewer {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 12px;
+    max-height: 400px;
+    overflow-y: auto;
+    margin-bottom: 12px;
+}
+.chat-msg {
+    padding: 6px 0;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border-color);
+}
+.chat-msg:last-child { border-bottom: none; }
+.chat-msg-role {
+    font-weight: 600;
+    color: var(--accent-red);
+    margin-right: 6px;
+}
+.chat-msg-content {
+    color: var(--text-secondary);
+}
+
+/* ========== Settings Container ========== */
+#settings-container {
+    flex: 1;
+    min-height: 0;
+}
+.settings-section {
+    margin-bottom: 24px;
+}
+.settings-section h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+/* ========== Confirm Dialog ========== */
+.confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.confirm-box {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 24px;
+    width: 360px;
+    max-width: 90vw;
+    text-align: center;
+}
+.confirm-box p {
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+.confirm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+}

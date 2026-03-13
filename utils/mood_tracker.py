@@ -9,7 +9,7 @@
 - v1.0.6更新：支持否定词检测，避免"不难过"被误判为"难过"
 
 作者: Him666233
-版本: v1.1.2
+版本: v1.2.1
 参考: MaiBot mood_manager.py (简化实现)
 """
 
@@ -370,7 +370,7 @@ class MoodTracker:
             return original_prompt
 
         # 在prompt开头注入情绪提示
-        mood_hint = f"[当前情绪状态: 你感到{current_mood}]\n"
+        mood_hint = f"[系统信息-情绪参考: {current_mood}（在你的人格基调上自然体现，不要偏离人格设定）]\n"
 
         # 如果原prompt已经包含情绪相关内容，不重复添加
         if "情绪" in original_prompt or "心情" in original_prompt:

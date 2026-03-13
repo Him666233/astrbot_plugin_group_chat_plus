@@ -10,7 +10,7 @@
 6. 失败处理和冷却机制
 
 作者: Him666233
-版本: v1.2.0
+版本: v1.2.1
 
 v1.2.0 更新：
 - 支持其他插件的 on_llm_request 钩子注入（如 emotionai）
@@ -157,6 +157,7 @@ class ProactiveChatManager:
     _livingmemory_version: str = "v1"
     # 工具提醒配置
     _enable_tools_reminder: bool = False
+    _tools_reminder_persona_filter: bool = False
     # 超时警告配置
     _proactive_generation_timeout_warning: int = 15
     # 📦 消息缓存配置（用于读取缓存时过滤过期消息）
@@ -314,6 +315,9 @@ class ProactiveChatManager:
         cls._livingmemory_version = config.get("livingmemory_version", "v1")
         # 工具提醒配置
         cls._enable_tools_reminder = config["enable_tools_reminder"]
+        cls._tools_reminder_persona_filter = config.get(
+            "tools_reminder_persona_filter", False
+        )
         # 超时警告配置
         cls._proactive_generation_timeout_warning = config[
             "proactive_generation_timeout_warning"
@@ -3199,7 +3203,7 @@ class ProactiveChatManager:
 - 可以回应最近缓存消息中的提问或话题（如果有的话）
 
 特殊标记说明：
-- 历史消息中的[表情包图片]标记表示那些图片是表情包/贴纸，不是普通照片。不要把它们当成需要描述的图片内容，也不要在发言中提及"表情包"标记本身。
+- 历史消息中的[表情包图片]标记表示那些图片是表情包/贴纸，不是普通照片。理解其传达的情绪即可，不要描述图片内容，也不要在发言中提及"表情包"标记本身。
 - 如果历史中出现"[转发消息]"，那是用户分享的合并转发消息，理解其内容即可，不要主动提起"之前那条转发消息"。
 
 记住：就像是你自己突然想到了什么，很自然地说出来，不要有任何关于"主动发起"的痕迹。
@@ -3639,6 +3643,49 @@ class ProactiveChatManager:
                                         f"[主动对话] 从官方对话系统获取到 {len(official_history)} 条历史记录"
                                     )
 
+                                # 🔧 修复：过滤掉人设预设对话（begin_dialogs）
+                                # conversation.history 存储了完整的 LLM 对话记录，
+                                # 开头部分包含人设的预设对话示例（begin_dialogs）。
+                                # 如果不过滤，这些预设对话会被当作真实历史消息，
+                                # 经过 format_context_for_ai() 后添加时间戳和发送者前缀，
+                                # 导致 AI 看到类似 "[时间] 用户(ID:user): <预设内容>" 的假历史。
+                                try:
+                                    persona_for_filter = await context.persona_manager.get_default_persona_v3(
+                                        unified_msg_origin
+                                    )
+                                    begin_dialogs_to_filter = persona_for_filter.get(
+                                        "_begin_dialogs_processed", []
+                                    )
+                                    if begin_dialogs_to_filter and len(
+                                        official_history
+                                    ) >= len(begin_dialogs_to_filter):
+                                        # 检查历史记录开头是否与 begin_dialogs 匹配
+                                        match = True
+                                        for i, bd in enumerate(begin_dialogs_to_filter):
+                                            hist_entry = official_history[i]
+                                            if (
+                                                not isinstance(hist_entry, dict)
+                                                or hist_entry.get("role")
+                                                != bd.get("role")
+                                                or hist_entry.get("content")
+                                                != bd.get("content")
+                                            ):
+                                                match = False
+                                                break
+                                        if match:
+                                            skip_count = len(begin_dialogs_to_filter)
+                                            official_history = official_history[
+                                                skip_count:
+                                            ]
+                                            logger.info(
+                                                f"[主动对话] 已过滤 {skip_count} 条人设预设对话（begin_dialogs）"
+                                            )
+                                except Exception as e:
+                                    if debug_mode:
+                                        logger.warning(
+                                            f"[主动对话] 过滤 begin_dialogs 失败: {e}，继续使用原始历史"
+                                        )
+
                                 # 🆕 优化：在转换前先截断，防止内存溢出
                                 # 硬上限保护：即使配置为-1，也限制最大500条
                                 HARD_LIMIT = 500
@@ -3722,6 +3769,30 @@ class ProactiveChatManager:
                                             )
 
                                         history_messages.append(msg_obj)
+
+                                # 🔧 修复：按历史截止时间戳过滤，丢弃插件重置之前的旧消息
+                                try:
+                                    from ...utils.context_manager import (
+                                        ContextManager as _GroupCM,
+                                    )
+
+                                    _cutoff_ts = _GroupCM.get_history_cutoff(chat_id)
+                                    if _cutoff_ts > 0 and history_messages:
+                                        _before = len(history_messages)
+                                        history_messages = [
+                                            _m
+                                            for _m in history_messages
+                                            if (getattr(_m, "timestamp", 0) or 0)
+                                            >= _cutoff_ts
+                                        ]
+                                        _filtered = _before - len(history_messages)
+                                        if _filtered > 0:
+                                            logger.info(
+                                                f"[主动对话-私信] 历史截止过滤: 丢弃 {_filtered} 条旧消息 "
+                                                f"(cutoff={_cutoff_ts}, chat_id={chat_id})"
+                                            )
+                                except Exception:
+                                    pass
 
                                 if debug_mode:
                                     logger.info(
