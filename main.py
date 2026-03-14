@@ -7268,14 +7268,25 @@ class ChatPlus(Star):
         req.prompt = plugin_prompt
         req.image_urls = plugin_image_urls
 
-        # 🔧 修复：用插件自身保存的工具集替换框架注入的工具
-        # 新版 AstrBot (>=4.14) 的 build_main_agent 会自动注入 shell/python/cron/send_message 等工具，
-        # 这些工具会导致 LLM 进入工具调用循环从而卡死。
-        # 旧版 AstrBot (<=4.13) 中 func_tool_manager 参数直接生效，不存在此问题。
-        # 这里统一恢复为插件保存的 ToolSet（由 reply_handler 中 get_full_tool_set() 获取），
-        # 确保两个版本行为一致：只保留插件注册的工具，移除框架自动注入的工具。
+        # 🔧 修复：将插件自身的工具集合并入框架已注入的工具集，而非整体替换。
+        # 背景：旧版 AstrBot (<=4.13) 中 func_tool_manager 参数直接生效，工具集由插件自行控制；
+        #       新版 (>=4.14) 的 build_main_agent 在 on_llm_request 触发前已依次注入：
+        #         1. 插件 @llm_tool 工具（via _plugin_tool_fix）
+        #         2. 框架内置工具（cron / send_message_to_user / computer_use 等）
+        #       因此到达本钩子时，req.func_tool 已包含全部工具，直接替换会丢失内置工具。
+        # 修复方案：以 req.func_tool（已含内置工具）为基础，将 plugin_tool_set 中
+        #           尚未注册的插件工具补充进去，确保两类工具均完整保留。
         plugin_tool_set = event.get_extra(PLUGIN_FUNC_TOOL)
-        req.func_tool = plugin_tool_set  # 可能是 ToolSet 或 None（获取失败时）
+        if plugin_tool_set is not None:
+            if req.func_tool is None:
+                req.func_tool = plugin_tool_set
+            else:
+                # Merge: add plugin tools not already present, preserving built-in tools.
+                existing_names = {t.name for t in req.func_tool.tools}
+                for tool in plugin_tool_set.tools:
+                    if tool.name not in existing_names:
+                        req.func_tool.add_tool(tool)
+        # If plugin_tool_set is None (retrieval failed), keep req.func_tool as-is.
 
         # 🔧 合并 system_prompt：插件基础 + 其他插件注入的内容
         if other_plugin_additions:
