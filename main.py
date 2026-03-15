@@ -158,6 +158,32 @@ class ChatPlus(Star):
     采用事件监听而非消息拦截，确保与其他插件兼容
     """
 
+    def _migrate_legacy_config_types(self) -> None:
+        """兼容旧版本配置类型，避免 WebUI 全量校验失败。"""
+        key = "_emoji_filter_section_header"
+        default_value = "--- 表情包过滤设置区 ---"
+        try:
+            current_value = self.config.get(key, default_value)
+        except Exception:
+            return
+
+        if not isinstance(current_value, bool):
+            return
+
+        try:
+            self.config[key] = default_value
+            self.config.save_config()
+            logger.warning(
+                "⚠️ 检测到旧版配置类型，已自动迁移: %s bool -> string",
+                key,
+            )
+        except Exception as exc:
+            logger.warning(
+                "⚠️ 旧版配置自动迁移失败，请手动修复 %s: %s",
+                key,
+                exc,
+            )
+
     def __init__(self, context: Context, config: AstrBotConfig):
         """
         初始化插件
@@ -169,6 +195,7 @@ class ChatPlus(Star):
         super().__init__(context)
         self.context = context
         self.config = config
+        self._migrate_legacy_config_types()
 
         # ========== 🔧 配置参数集中提取区块 ==========
         # 说明：为避免 AstrBot 平台多次读取配置可能导致的问题，
