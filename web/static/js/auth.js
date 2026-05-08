@@ -23,24 +23,18 @@ const Auth = {
         if (!pw) return this._showError('login-error', '请输入密码');
 
         const res = await Api.login(pw);
-
-        // 暴力破解锁定
         if (res.locked) {
-            return this._showError('login-error',
-                `密码错误次数过多，请等待 ${res.wait_seconds} 秒后再试`);
+            return this._showError('login-error', `密码错误次数过多，请等待 ${res.wait_seconds} 秒后再试`);
         }
-
         if (!res.ok) return this._showError('login-error', res.msg);
 
-        Api.setToken(res.token);
         document.getElementById('login-password').value = '';
         this._hideError('login-error');
 
         if (!res.password_changed) {
             App.showPage('password-change');
         } else {
-            App.showPage('main');
-            App._initMain();
+            window.location.href = '/panel';
         }
     },
 
@@ -56,11 +50,11 @@ const Auth = {
         const res = await Api.changePassword(oldPw, newPw);
         if (!res.ok) return this._showError('pw-change-error', res.msg);
 
-        Api.setToken(res.token);
         this._hideError('pw-change-error');
-        Utils.toast('密码修改成功', 'success');
-        App.showPage('main');
-        App._initMain();
+        Utils.alert(res.msg || '密码修改成功，请重新登录').then(() => {
+            Api.clearToken();
+            window.location.href = '/';
+        });
     },
 
     logout() {

@@ -1125,6 +1125,15 @@ class AttentionManager:
 
                     del chat_users[removed_user_id]
 
+                    try:
+                        await CooldownManager.on_attention_user_removed(
+                            chat_key, removed_user_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[注意力机制] 同步移除冷却状态失败: {removed_name}(ID:{removed_user_id}), error={e}"
+                        )
+
                     if DEBUG_MODE:
                         logger.info(
                             f"[注意力机制] 移除低优先级用户: {removed_name}(ID:{removed_user_id}), "
@@ -1166,6 +1175,7 @@ class AttentionManager:
         attention_duration: int,
         enabled: bool,
         poke_boost_reference: float = 0.0,
+        pending_probability_floor: Optional[float] = None,
     ) -> float:
         """
 
@@ -1218,6 +1228,7 @@ class AttentionManager:
             enabled: 是否启用注意力机制
 
             poke_boost_reference: 戳一戳概率增值参考值（0表示无戳一戳）
+            pending_probability_floor: 候选冷却期间的最低概率保护值
 
 
 
@@ -1288,6 +1299,22 @@ class AttentionManager:
         # 如果用户在冷却列表中，跳过注意力增加，直接返回原始概率
         try:
             if CooldownManager._initialized:
+                if await CooldownManager.is_in_pending_cooldown(
+                    chat_key, current_user_id
+                ):
+                    protected_probability = max(
+                        current_probability,
+                        pending_probability_floor
+                        if pending_probability_floor is not None
+                        else CooldownManager.PENDING_COOLDOWN_SAME_USER_PROBABILITY_FLOOR,
+                    )
+                    protected_probability = max(0.0, min(1.0, protected_probability))
+                    logger.info(
+                        f"[注意力-候选冷却] 用户 {current_user_name}(ID:{current_user_id}) "
+                        f"处于候选冷却中，应用最低概率保护: {current_probability:.2f} -> {protected_probability:.2f}"
+                    )
+                    return protected_probability
+
                 is_in_cooldown = await CooldownManager.is_in_cooldown(
                     chat_key, current_user_id
                 )
@@ -1973,10 +2000,12 @@ class AttentionManager:
         user_name: str,
         attention_decrease_step: float = 0.15,
         min_attention_threshold: float = 0.3,
+        trigger_message_id: str = "",
+        trigger_message_timestamp: float = 0,
     ) -> None:
         """
 
-        当AI读空气判断不回复时降低对该用户的注意力
+        在“确认未接上”场景下降低对该用户的注意力
 
 
 
@@ -2011,8 +2040,6 @@ class AttentionManager:
         chat_key = AttentionManager.get_chat_key(platform_name, is_private, chat_id)
 
         current_time = time.time()
-
-        old_attention = None  # 用于冷却机制检查
 
         async with AttentionManager._lock:
             # 初始化chat_key
@@ -2080,52 +2107,6 @@ class AttentionManager:
             # 自动保存数据
 
             await AttentionManager._auto_save_if_needed()
-
-        # Trigger cooldown mechanism (Requirements 1.1, 1.2)
-        # After decreasing attention, if attention is still above cooldown threshold, add user to cooldown list
-        # Note: This is outside the lock to avoid potential deadlock with CooldownManager's lock
-        if old_attention is None:
-            return  # 没有执行衰减操作，跳过冷却触发
-
-        try:
-            # Only trigger if CooldownManager is initialized (cooldown feature enabled)
-            if not CooldownManager._initialized:
-                logger.info(
-                    f"[注意力冷却] ⚠️ CooldownManager未初始化，跳过冷却触发 "
-                    f"(用户: {user_name}, 注意力: {old_attention:.2f})"
-                )
-                return
-
-            # Check if cooldown should be triggered (attention above cooldown threshold)
-            threshold = CooldownManager.COOLDOWN_TRIGGER_THRESHOLD
-            logger.info(
-                f"[注意力冷却] 检查冷却触发: {user_name}(ID:{user_id}), "
-                f"注意力={old_attention:.2f}, 阈值={threshold}"
-            )
-
-            if old_attention > threshold:
-                # Add user to cooldown list
-                added = await CooldownManager.add_to_cooldown(
-                    chat_key, user_id, user_name, reason="decision_ai_no_reply"
-                )
-                if added:
-                    logger.info(
-                        f"[注意力冷却] ❄️ {user_name}(ID:{user_id}) 已加入冷却列表, "
-                        f"原注意力: {old_attention:.2f}, 阈值: {threshold}"
-                    )
-                else:
-                    logger.info(
-                        f"[注意力冷却] {user_name}(ID:{user_id}) 已在冷却列表中，跳过添加"
-                    )
-            else:
-                logger.info(
-                    f"[注意力冷却] {user_name}(ID:{user_id}) 注意力 {old_attention:.2f} "
-                    f"未超过阈值 {threshold}，不触发冷却"
-                )
-        except ImportError as e:
-            logger.warning(f"[注意力冷却] CooldownManager导入失败: {e}")
-        except Exception as e:
-            logger.warning(f"[注意力冷却] 触发冷却时发生异常: {e}", exc_info=True)
 
     # ========== 🌊 注意力溢出机制相关方法 ==========
 

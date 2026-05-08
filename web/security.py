@@ -57,6 +57,8 @@ _BRUTE_FORCE_TIERS = [
 _LOG_FILE_MAX_SIZE = 1 * 1024 * 1024
 # 保留的历史日志文件数量
 _LOG_FILE_MAX_ROTATIONS = 2
+# 已登录认证请求默认速率阈值（次/分钟）
+_DEFAULT_AUTHENTICATED_RATE_LIMIT = 240
 
 # 可疑 User-Agent 特征（正则）
 _SUSPICIOUS_UA_PATTERNS = [
@@ -72,9 +74,9 @@ _ROBOTS_TXT = """\
 User-agent: *
 Disallow: /
 
-# This is a private administration panel.
-# All automated access, crawling and scraping is strictly prohibited.
-# This notice is a courtesy; unauthorized access may result in IP blocking.
+# 本站点是私有管理面板。
+# 严禁任何自动化抓取、扫描或爬取行为。
+# 该提示仅作访问声明，违规访问可能触发 IP 封锁。
 """
 
 # 扫描行为路径特征
@@ -108,8 +110,16 @@ class SecurityManager:
         self.anti_spider_ban_duration: int = config.get(
             "web_panel_anti_spider_ban_duration", 300
         )
+        self.authenticated_rate_limit: int = config.get(
+            "web_panel_authenticated_rate_limit",
+            max(_DEFAULT_AUTHENTICATED_RATE_LIMIT, self.anti_spider_rate_limit * 4),
+        )
         # 每 IP 请求计数（1分钟滑动窗口）: ip -> deque of timestamps
         self._request_timestamps: Dict[str, deque] = defaultdict(lambda: deque())
+        # 已登录请求计数（1分钟滑动窗口）: bucket -> deque of timestamps
+        self._authenticated_request_timestamps: Dict[str, deque] = defaultdict(
+            lambda: deque()
+        )
 
         # 访问日志 - 内存环形缓冲
         self.access_log: deque = deque(maxlen=10000)
@@ -254,6 +264,41 @@ class SecurityManager:
             if re.search(pat, path, re.I):
                 return True, f"扫描行为检测（路径特征）: {path}"
 
+        return False, ""
+
+    def check_authenticated_rate_limit(
+        self,
+        ip: str,
+        session_id: str,
+        path: str,
+        *,
+        is_heartbeat: bool = False,
+    ) -> Tuple[bool, str]:
+        """检查已登录请求的速率，心跳请求仅记录不触发封禁。"""
+        if not self.anti_spider_enabled:
+            return False, ""
+        if self._is_protected(ip):
+            return False, ""
+        if self.ip_mode == "whitelist" and ip in self.ip_list:
+            return False, ""
+        if not session_id:
+            return False, ""
+
+        now = time.time()
+        window = self._authenticated_request_timestamps[f"{session_id}:{ip}"]
+        cutoff = now - 60
+        while window and window[0] < cutoff:
+            window.popleft()
+        window.append(now)
+
+        if is_heartbeat:
+            return False, ""
+
+        if len(window) > self.authenticated_rate_limit:
+            return (
+                True,
+                f"已登录请求频率过高：{len(window)} 次/分钟（阈值 {self.authenticated_rate_limit}），路径: {path}",
+            )
         return False, ""
 
     def auto_ban_spider(self, ip: str, reason: str):
@@ -585,6 +630,10 @@ class SecurityManager:
         self.anti_spider_rate_limit = config.get("web_panel_anti_spider_rate_limit", 60)
         self.anti_spider_ban_duration = config.get(
             "web_panel_anti_spider_ban_duration", 300
+        )
+        self.authenticated_rate_limit = config.get(
+            "web_panel_authenticated_rate_limit",
+            max(_DEFAULT_AUTHENTICATED_RATE_LIMIT, self.anti_spider_rate_limit * 4),
         )
 
         # 若受保护 IP 名单发生变化，重新检查封禁表

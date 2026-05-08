@@ -1,6 +1,6 @@
 /**
- * tech-tree.js - "Plague Inc." 风格横向科技树流程图
- * SVG + DOM 混合渲染：SVG 画曲线和粒子，DOM 做可交互节点
+ * tech-tree.js - “瘟疫公司”风格横向科技树流程图
+ * 使用 SVG + DOM 混合渲染：SVG 负责曲线和粒子，DOM 负责可交互节点
  */
 
 const TechTree = {
@@ -14,7 +14,7 @@ const TechTree = {
     _currentStageId: null,
     _stepLayout: {},
 
-    // DOM references
+    // DOM 节点引用
     _viewport: null,
     _svgLevel0: null,
     _nodesLevel0: null,
@@ -29,14 +29,14 @@ const TechTree = {
     _layout: {},
     _level0Paths: [],
 
-    // Particle system
+    // 粒子系统
     _particles: [],
     _particleRunning: false,
     _particleRafId: null,
     _particleLastTime: 0,
     _particlePaths: [],
 
-    // Layout constants
+    // 布局常量
     STAGE_H_GAP: 260,
     PIPELINE_V_GAP: 280,
     LEFT_MARGIN: 200,
@@ -44,7 +44,7 @@ const TechTree = {
     WAVE_AMP: 60,
     WAVE_FREQ: 0.65,
 
-    // ==================== Init ====================
+    // ==================== 初始化 ====================
 
     async init() {
         console.log('TechTree.init() 开始');
@@ -60,6 +60,9 @@ const TechTree = {
         this._stepElements = {};
         this._stopParticles();
         Object.keys(this._floaters).forEach(k => this._closePromptFloater(k));
+        if (typeof App !== 'undefined') {
+            App._updateConfigBadgeVisibility?.();
+        }
 
         // Pan state
         this._panX = 0;
@@ -71,6 +74,7 @@ const TechTree = {
 
         await this._loadConfig();
         console.log('配置加载完成');
+        this._buildSearchIndex();
         this._buildDOM(canvas);
         console.log('DOM构建完成');
         try { 
@@ -121,10 +125,9 @@ const TechTree = {
 
     async save() {
         if (!this.hasChanges()) return;
-        const merged = { ...this._config, ...this._modified };
-        const res = await Api.reloadPlugin(merged);
+        const res = await Api.reloadPlugin(this._modified);
         if (res.ok) {
-            this._config = merged;
+            this._config = { ...this._config, ...this._modified };
             this._modified = {};
             this._updateSaveButton();
             Utils.toast('配置已保存，插件重启成功', 'success');
@@ -281,6 +284,14 @@ const TechTree = {
         const canvas = document.getElementById('tech-tree-canvas');
         if (canvas) { canvas.scrollTop = 0; canvas.scrollLeft = 0; }
 
+        // Responsive layout constants
+        const isMobile = window.innerWidth < 768;
+        const STAGE_H_GAP = isMobile ? 180 : this.STAGE_H_GAP;
+        const PIPELINE_V_GAP = isMobile ? 200 : this.PIPELINE_V_GAP;
+        const LEFT_MARGIN = isMobile ? 100 : this.LEFT_MARGIN;
+        const TOP_MARGIN = isMobile ? 100 : this.TOP_MARGIN;
+        const WAVE_AMP = isMobile ? 40 : this.WAVE_AMP;
+
         const pipelines = FlowData.pipelines;
         console.log('流水线数据:', pipelines);
         console.log('流水线数量:', pipelines.length);
@@ -288,10 +299,10 @@ const TechTree = {
         let maxX = 0;
 
         pipelines.forEach((pipeline, pi) => {
-            const baseY = this.TOP_MARGIN + pi * this.PIPELINE_V_GAP;
+            const baseY = TOP_MARGIN + pi * PIPELINE_V_GAP;
             pipeline.stages.forEach((stage, si) => {
-                const x = this.LEFT_MARGIN + si * this.STAGE_H_GAP;
-                const waveY = this.WAVE_AMP * Math.sin(si * this.WAVE_FREQ);
+                const x = LEFT_MARGIN + si * STAGE_H_GAP;
+                const waveY = WAVE_AMP * Math.sin(si * this.WAVE_FREQ);
                 const y = baseY + waveY;
                 layout[stage.id] = { x, y, pipelineId: pipeline.id };
                 if (x > maxX) maxX = x;
@@ -300,16 +311,16 @@ const TechTree = {
         this._layout = layout;
 
         const totalW = maxX + 300;
-        const totalH = this.TOP_MARGIN + pipelines.length * this.PIPELINE_V_GAP + this.WAVE_AMP + 100;
+        const totalH = TOP_MARGIN + pipelines.length * PIPELINE_V_GAP + WAVE_AMP + 100;
         this._setSVGSize(Math.max(totalW, 1200), Math.max(totalH, 800));
 
         pipelines.forEach((pipeline, pi) => {
-            const baseY = this.TOP_MARGIN + pi * this.PIPELINE_V_GAP;
+            const baseY = TOP_MARGIN + pi * PIPELINE_V_GAP;
             const label = document.createElement('div');
             label.className = 'pipeline-title';
             if (pipeline.disabled) label.style.opacity = '0.3';
             label.style.left = '20px';
-            label.style.top = (baseY - this.WAVE_AMP - 70) + 'px';
+            label.style.top = (baseY - WAVE_AMP - 70) + 'px';
             label.innerHTML = `<span class="pipeline-title-icon">${pipeline.icon}</span>${pipeline.name}<span class="pipeline-title-sub">${pipeline.desc}</span>`;
             this._nodesLevel0.appendChild(label);
         });
@@ -399,6 +410,7 @@ const TechTree = {
         el.style.top = pos.y + 'px';
 
         if (pipeline.disabled) el.classList.add('flow-node--disabled');
+        if (stage.shared) el.classList.add('flow-node--shared-stage');
 
         const stats = this._calcStageStats(stage);
         if (!pipeline.disabled) {
@@ -458,19 +470,33 @@ const TechTree = {
         g.innerHTML = '';
         const svgNS = 'http://www.w3.org/2000/svg';
 
+        // 合并相同起终点的链接
+        const mergedLinks = new Map();
         FlowData.crossLinks.forEach(link => {
             const fromCtx = FlowData.getStepContext(link.from);
             const toCtx = FlowData.getStepContext(link.to);
-            if (!fromCtx || !toCtx) {
-                console.warn(`交叉链接步骤未找到: from=${link.from}, to=${link.to}`);
-                console.warn(`  from步骤: ${link.from}, to步骤: ${link.to}`);
-                return;
+            if (!fromCtx || !toCtx) return;
+            
+            const key = `${fromCtx.stage.id}→${toCtx.stage.id}`;
+            if (!mergedLinks.has(key)) {
+                mergedLinks.set(key, {
+                    fromStage: fromCtx.stage.id,
+                    toStage: toCtx.stage.id,
+                    labels: [],
+                    shared: link.shared
+                });
             }
+            mergedLinks.get(key).labels.push(link.label || '链接');
+        });
 
-            const p1 = layout[fromCtx.stage.id];
-            const p2 = layout[toCtx.stage.id];
+        // 记录已使用的标签位置，用于避免重叠
+        const usedPositions = [];
+
+        mergedLinks.forEach((mergedLink, key) => {
+            const p1 = layout[mergedLink.fromStage];
+            const p2 = layout[mergedLink.toStage];
             if (!p1 || !p2) {
-                console.warn(`交叉链接阶段位置未找到: fromStage=${fromCtx.stage.id}, toStage=${toCtx.stage.id}`);
+                console.warn(`交叉链接阶段位置未找到: ${key}`);
                 return;
             }
 
@@ -482,39 +508,94 @@ const TechTree = {
 
             // 使用贝塞尔曲线连接
             const my = (y1 + y2) / 2;
-            const d = `M ${x1} ${y1} C ${x1 + 30} ${my}, ${x2 - 30} ${my}, ${x2} ${y2}`;
+            const curveOffset = 30;
+            const d = `M ${x1} ${y1} C ${x1 + curveOffset} ${my}, ${x2 - curveOffset} ${my}, ${x2} ${y2}`;
 
             const path = document.createElementNS(svgNS, 'path');
             path.setAttribute('d', d);
-            path.setAttribute('class', 'cross-link-path');
+            path.setAttribute('class', mergedLink.shared ? 'cross-link-path shared' : 'cross-link-path');
             g.appendChild(path);
 
-            // 在曲线中点添加标签
-            const mx = (x1 + x2) / 2;
-            const labelY = my;
-            const labelText = link.label || '链接';
+            // 合并标签文字，用顿号分隔
+            const labelText = mergedLink.labels.join('、');
             
-            // 根据中文字符数量计算标签宽度（中文字符约12px宽）
-            const textLen = Math.max(labelText.length * 12 + 16, 80);
+            // 贝塞尔曲线: M x1,y1 C (x1+30),my (x2-30),my x2,y2
+            // 曲线分三段：
+            // 1. 起点到第一控制点：从 (x1,y1) 弯向 (x1+30,my)
+            // 2. 中间水平段：从 (x1+30,my) 到 (x2-30,my) 几乎是水平的
+            // 3. 第二控制点到终点：从 (x2-30,my) 弯向 (x2,y2)
             
+            // 默认标签位置：曲线中点（水平段中心）
+            let labelX = (x1 + x2) / 2;
+            let labelY = my;
+            
+            // 简单错开策略：根据已有标签数量偏移
+            const labelIndex = usedPositions.length;
+            if (labelIndex > 0) {
+                // 交替向左右偏移，每次偏移80px
+                const direction = labelIndex % 2 === 0 ? 1 : -1;
+                const offsetX = direction * 80 * Math.ceil(labelIndex / 2);
+                labelX = (x1 + x2) / 2 + offsetX;
+                
+                // Y偏移：0, 5, 10 循环
+                const offsetY = (labelIndex % 3) * 5;
+                labelY = my + offsetY;
+            }
+            
+            // 特殊处理："情绪状态影响"标签需要沿曲线下移
+            if (labelText.includes('情绪状态')) {
+                // 曲线从 (x1,y1) 到 (x2,y2)，中间水平段在 my
+                // 我们希望标签在曲线的下半段（从水平段向终点的过渡区域）
+                
+                // 计算曲线上 t=0.7 位置的点（70%处，接近终点但还在曲线上）
+                // 贝塞尔曲线公式: B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3
+                // P0=(x1,y1), P1=(x1+30,my), P2=(x2-30,my), P3=(x2,y2)
+                const t = 0.65; // 65%位置
+                const t1 = 1 - t;
+                const P0x = x1, P0y = y1;
+                const P1x = x1 + curveOffset, P1y = my;
+                const P2x = x2 - curveOffset, P2y = my;
+                const P3x = x2, P3y = y2;
+                
+                labelX = t1*t1*t1*P0x + 3*t1*t1*t*P1x + 3*t1*t*t*P2x + t*t*t*P3x;
+                labelY = t1*t1*t1*P0y + 3*t1*t1*t*P1y + 3*t1*t*t*P2y + t*t*t*P3y;
+                
+                console.log(`特殊处理"情绪状态"标签，沿曲线定位 t=${t}, X=${labelX.toFixed(1)}, Y=${labelY.toFixed(1)}`);
+            }
+            
+            // 特殊处理："内容过滤、打字错误、回复延迟"标签需要向右移动
+            if (labelText.includes('内容过滤') || labelText.includes('打字错误') || labelText.includes('回复延迟')) {
+                // 这个标签应该在它自己的曲线上，向右偏移以区分
+                labelX = labelX + 160; // 向右移动160px
+                console.log(`特殊处理"共用处理"标签，X向右偏移至 ${labelX.toFixed(1)}`);
+            }
+            
+            // 记录当前标签位置
+            usedPositions.push({ x: labelX, y: labelY });
+            
+            // 根据文字长度计算标签宽度（中文字符约12px宽，加padding）
+            const textLen = Math.max(labelText.length * 12 + 20, 80);
+            
+            // 不透明背景，确保文字清晰可见
             const bg = document.createElementNS(svgNS, 'rect');
-            bg.setAttribute('x', mx - textLen / 2);
-            bg.setAttribute('y', labelY - 10);
+            bg.setAttribute('x', labelX - textLen / 2);
+            bg.setAttribute('y', labelY - 11);
             bg.setAttribute('width', textLen);
-            bg.setAttribute('height', 18);
+            bg.setAttribute('height', 20);
+            bg.setAttribute('rx', 4);
+            bg.setAttribute('ry', 4);
             bg.setAttribute('class', 'cross-link-label-bg');
             g.appendChild(bg);
 
             const text = document.createElementNS(svgNS, 'text');
-            text.setAttribute('x', mx);
+            text.setAttribute('x', labelX);
             text.setAttribute('y', labelY + 4);
             text.setAttribute('text-anchor', 'middle');
             text.setAttribute('class', 'cross-link-label');
             text.textContent = labelText;
             g.appendChild(text);
             
-            console.log(`渲染交叉链接: ${link.label} (${link.from} → ${link.to})`);
-            console.log(`  位置: (${x1}, ${y1}) → (${x2}, ${y2})`);
+            console.log(`渲染合并交叉链接: ${labelText} (${mergedLink.fromStage} → ${mergedLink.toStage}) at Y=${labelY}`);
         });
     },
 
@@ -611,32 +692,52 @@ const TechTree = {
         this._stepElements = {};
         this._stepLayout = {};
 
-        // Wavy layout for steps
+        // Wavy layout for steps (alternative steps placed vertically below their predecessor)
         const layout = [];
         const MAX_PER_ROW = 5;
-        if (count <= MAX_PER_ROW) {
-            for(let i=0; i<count; i++) {
-                const progress = count > 1 ? i / (count - 1) : 0.5;
+
+        // First pass: count non-alternative steps for layout
+        const mainSteps = steps.filter(s => s.branchType !== 'alternative');
+        const mainCount = mainSteps.length;
+
+        // Build main layout positions
+        const mainLayout = [];
+        if (mainCount <= MAX_PER_ROW) {
+            for(let i=0; i<mainCount; i++) {
+                const progress = mainCount > 1 ? i / (mainCount - 1) : 0.5;
                 const x = startX + progress * availW;
                 const wave = Math.sin(progress * Math.PI) * (availH * 0.25);
                 const y = startY + wave;
-                layout.push({x, y});
+                mainLayout.push({x, y});
             }
         } else {
-            const rows = Math.ceil(count / MAX_PER_ROW);
+            const rows = Math.ceil(mainCount / MAX_PER_ROW);
             const rowH = availH / Math.max(1, (rows - 1));
-            for(let i=0; i<count; i++) {
+            for(let i=0; i<mainCount; i++) {
                 const row = Math.floor(i / MAX_PER_ROW);
                 const colInRow = i % MAX_PER_ROW;
-                const itemsInThisRow = (row < rows - 1) ? MAX_PER_ROW : (count - row * MAX_PER_ROW);
+                const itemsInThisRow = (row < rows - 1) ? MAX_PER_ROW : (mainCount - row * MAX_PER_ROW);
                 const isReversed = row % 2 === 1;
                 const progress = itemsInThisRow > 1 ? colInRow / (itemsInThisRow - 1) : 0.5;
-                
+
                 let xProg = isReversed ? (1 - progress) : progress;
                 const x = startX + xProg * availW;
                 const localWave = Math.sin(progress * Math.PI) * (rowH * 0.3);
                 const y = startY + row * rowH + localWave * (isReversed ? -1 : 1);
-                layout.push({x, y});
+                mainLayout.push({x, y});
+            }
+        }
+
+        // Map each step to a position: alternative steps go below their predecessor
+        let mainIdx = 0;
+        for (let i = 0; i < count; i++) {
+            if (steps[i].branchType === 'alternative') {
+                // Place below the previous step (same X, offset Y downward)
+                const prevPos = layout[layout.length - 1];
+                layout.push({ x: prevPos.x, y: prevPos.y + 120 });
+            } else {
+                layout.push(mainLayout[mainIdx]);
+                mainIdx++;
             }
         }
 
@@ -658,8 +759,13 @@ const TechTree = {
         const stepPathElements = [];
 
         // Connect Stage to first Step
+        // If alternative steps exist, connect to fork point instead
+        const hasAlternative = steps.some(s => s.branchType === 'alternative');
         if (layout.length > 0) {
-            const d = this._calcStepConnectionPath({x: stagePos.x + 50, y: stagePos.y}, layout[0]);
+            const targetPos = hasAlternative
+                ? { x: layout[0].x - 50, y: layout[0].y }  // fork point
+                : layout[0];
+            const d = this._calcStepConnectionPath({x: stagePos.x + 50, y: stagePos.y}, targetPos);
             const path = document.createElementNS(svgNS, 'path');
             path.setAttribute('d', d);
             path.setAttribute('class', 'step-conn-path');
@@ -683,7 +789,9 @@ const TechTree = {
             this._stepElements[step.id] = el;
             this._stepLayout[step.id] = { x: pos.x, y: pos.y };
 
-            if (i < layout.length - 1) {
+            // 绘制正常连接线（跳过 branchType: alternative 步骤）
+            const nextStep = i < steps.length - 1 ? steps[i + 1] : null;
+            if (i < layout.length - 1 && !(nextStep && nextStep.branchType === 'alternative')) {
                 const p1 = layout[i];
                 const p2 = layout[i+1];
                 const d = this._calcStepConnectionPath(p1, p2);
@@ -694,6 +802,16 @@ const TechTree = {
                 path.style.animationDelay = (i * 0.05) + 's';
                 gSteps.appendChild(path);
                 stepPathElements.push(path);
+            }
+
+            // 绘制失败/丢弃分支线（仅当有 failLabel 时显示）
+            if (step.failLabel && (step.onFail === 'drop' || step.onFail === 'cache' || step.onFail === 'passthrough')) {
+                this._renderFailBranch(gSteps, pos, step, svgNS);
+            }
+
+            // 绘制替代分支线（如吐槽系统）
+            if (step.branchType === 'alternative' && i > 0) {
+                this._renderAlternativeBranch(gSteps, layout[i - 1], pos, step, svgNS);
             }
         });
 
@@ -730,6 +848,118 @@ const TechTree = {
         }
     },
 
+    /** 渲染失败/丢弃分支线（从步骤向右下分叉，避免与下方节点重叠） */
+    _renderFailBranch(gSteps, pos, step, svgNS) {
+        const label = step.failLabel || (step.onFail === 'cache' ? '缓存消息' : '丢弃');
+        const branchLen = 45;
+        const x1 = pos.x + 30; // 从步骤卡片右侧出发
+        const y1 = pos.y + 20;
+        const x2 = x1 + 70;    // 向右偏移
+        const y2 = y1 + branchLen;
+
+        // 分支线（向右下）
+        const d = `M ${x1} ${y1} C ${x1 + 20} ${y1}, ${x2 - 20} ${y2 - 10}, ${x2} ${y2}`;
+        const path = document.createElementNS(svgNS, 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('class', 'step-fail-path');
+        gSteps.appendChild(path);
+
+        // 分支标签放在终点右侧
+        const textLen = Math.max(label.length * 11 + 14, 65);
+        const bg = document.createElementNS(svgNS, 'rect');
+        bg.setAttribute('x', x2 + 8);
+        bg.setAttribute('y', y2 - 10);
+        bg.setAttribute('width', textLen);
+        bg.setAttribute('height', 18);
+        bg.setAttribute('rx', 4);
+        bg.setAttribute('class', 'step-fail-label-bg');
+        gSteps.appendChild(bg);
+
+        const text = document.createElementNS(svgNS, 'text');
+        text.setAttribute('x', x2 + 8 + textLen / 2);
+        text.setAttribute('y', y2 + 3);
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('class', 'step-fail-label');
+        text.textContent = label;
+        gSteps.appendChild(text);
+    },
+
+    /** 渲染替代分支线（如吐槽系统：从公共入口点分叉，两条并行路径） */
+    _renderAlternativeBranch(gSteps, prevPos, pos, step, svgNS) {
+        const label = step.branchLabel || '替代路径';
+
+        // 从前一步骤（同级步骤）的左侧中间高度画一条分叉线到 alternative 步骤
+        // prevPos 是同级的主步骤位置，pos 是 alternative 步骤位置（在其正下方）
+        const forkX = prevPos.x - 50;  // 分叉点在主步骤左侧
+        const forkY = (prevPos.y + pos.y) / 2;
+
+        // 从分叉点到 alternative 步骤
+        const d = `M ${forkX} ${prevPos.y} L ${forkX} ${forkY} C ${forkX} ${forkY + 20}, ${pos.x - 20} ${pos.y}, ${pos.x} ${pos.y}`;
+        const path = document.createElementNS(svgNS, 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('class', 'step-branch-path');
+        gSteps.appendChild(path);
+
+        // 从分叉点到主步骤（短横线）
+        const d2 = `M ${forkX} ${prevPos.y} L ${prevPos.x - 35} ${prevPos.y}`;
+        const path2 = document.createElementNS(svgNS, 'path');
+        path2.setAttribute('d', d2);
+        path2.setAttribute('class', 'step-conn-path');
+        path2.style.opacity = '0.5';
+        gSteps.appendChild(path2);
+
+        // "正常路径" 标注在主步骤右上角（避免与替代路径标签重叠）
+        const normalLabel = '正常生成';
+        const nlLen = normalLabel.length * 11 + 16;
+        const nlBg = document.createElementNS(svgNS, 'rect');
+        nlBg.setAttribute('x', prevPos.x + 35);
+        nlBg.setAttribute('y', prevPos.y - 38);
+        nlBg.setAttribute('width', nlLen);
+        nlBg.setAttribute('height', 18);
+        nlBg.setAttribute('rx', 4);
+        nlBg.setAttribute('class', 'step-branch-label-bg');
+        nlBg.style.stroke = 'var(--accent-green)';
+        gSteps.appendChild(nlBg);
+
+        const nlText = document.createElementNS(svgNS, 'text');
+        nlText.setAttribute('x', prevPos.x + 35 + nlLen / 2);
+        nlText.setAttribute('y', prevPos.y - 25);
+        nlText.setAttribute('text-anchor', 'middle');
+        nlText.setAttribute('class', 'step-branch-label');
+        nlText.style.fill = 'var(--accent-green)';
+        nlText.textContent = normalLabel;
+        gSteps.appendChild(nlText);
+
+        // 替代路径标注放在分叉点左侧，垂直居中
+        const textLen = Math.max(label.length * 11 + 16, 80);
+        const labelX = forkX - textLen / 2 - 15;
+        const labelY = forkY;
+        const bg = document.createElementNS(svgNS, 'rect');
+        bg.setAttribute('x', labelX);
+        bg.setAttribute('y', labelY - 9);
+        bg.setAttribute('width', textLen);
+        bg.setAttribute('height', 18);
+        bg.setAttribute('rx', 4);
+        bg.setAttribute('class', 'step-branch-label-bg');
+        gSteps.appendChild(bg);
+
+        const text = document.createElementNS(svgNS, 'text');
+        text.setAttribute('x', labelX + textLen / 2);
+        text.setAttribute('y', labelY + 4);
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('class', 'step-branch-label');
+        text.textContent = label;
+        gSteps.appendChild(text);
+
+        // 分叉点圆点标记
+        const dot = document.createElementNS(svgNS, 'circle');
+        dot.setAttribute('cx', forkX);
+        dot.setAttribute('cy', prevPos.y);
+        dot.setAttribute('r', 4);
+        dot.setAttribute('class', 'step-fork-dot');
+        gSteps.appendChild(dot);
+    },
+
     _createStepNode(step, pos, index) {
         const el = document.createElement('div');
         el.className = 'flow-node flow-node--step';
@@ -740,6 +970,7 @@ const TechTree = {
 
         if (step.internal) el.classList.add('internal');
         if (step.disabled) el.classList.add('disabled-step');
+        if (step.shared) el.classList.add('flow-node--shared');
         if (this._activeStepId === step.id) el.classList.add('active');
         const stepEffective = this._isStepEffectivelyEnabled(step);
         if (stepEffective) el.classList.add('step-on');
@@ -917,6 +1148,14 @@ const TechTree = {
 
         if (typeof ConfigEditor !== 'undefined') {
             ConfigEditor.render(body, step, this._schema, step.keys[0]);
+        }
+
+        // 共用步骤提示横幅
+        if (step.shared && step.sharedFrom) {
+            const banner = document.createElement('div');
+            banner.className = 'shared-config-banner';
+            banner.innerHTML = '🔗 此配置与<strong>消息回复流水线</strong>共用，修改将同时影响两条流水线';
+            body.insertBefore(banner, body.firstChild);
         }
     },
 
@@ -1331,6 +1570,330 @@ const TechTree = {
 
     // ==================== Viewport Pan & Transform ====================
 
+    // ==================== Smart Search ====================
+
+    _searchIndex: [],
+    _searchDebounceTimer: null,
+
+    _normalizeSearchText(text) {
+        return String(text || '')
+            .toLowerCase()
+            .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ')
+            .replace(/[\s`~!@#$%^&*()\-_=+\[\]{}\\|;:'",.<>/?，。！？；：、（）【】《》“”‘’]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    },
+
+    _compactSearchText(text) {
+        return this._normalizeSearchText(text).replace(/\s+/g, '');
+    },
+
+    _buildSearchTerms(parts) {
+        const rawParts = parts.filter(Boolean).map(part => String(part));
+        const normalizedParts = rawParts.map(part => this._normalizeSearchText(part)).filter(Boolean);
+        const compactParts = rawParts.map(part => this._compactSearchText(part)).filter(Boolean);
+        return {
+            raw: rawParts.join(' '),
+            normalized: normalizedParts.join(' '),
+            compact: compactParts.join('')
+        };
+    },
+
+    _buildSearchIndex() {
+        this._searchIndex = [];
+        const allNodes = FlowData.getAllNodes();
+
+        for (const node of allNodes) {
+            const ctx = FlowData.getStepContext(node.id);
+            if (!ctx) continue;
+            const pipeline = ctx.pipeline;
+            const stage = ctx.stage;
+            if (pipeline.disabled) continue;
+
+            const breadcrumb = `${pipeline.name} › ${stage.name} › ${node.name}`;
+            const nodeTerms = this._buildSearchTerms([
+                node.name,
+                node.desc || '',
+                stage.name,
+                pipeline.name,
+                node.id,
+                breadcrumb
+            ]);
+
+            // Index the step itself
+            this._searchIndex.push({
+                type: 'step',
+                stepId: node.id,
+                stageId: stage.id,
+                pipelineId: pipeline.id,
+                name: node.name,
+                desc: node.desc || '',
+                icon: node.icon || '',
+                breadcrumb,
+                stageName: stage.name,
+                pipelineName: pipeline.name,
+                searchText: nodeTerms.normalized,
+                searchCompactText: nodeTerms.compact
+            });
+
+            // Index each config key
+            if (node.keys) {
+                for (const key of node.keys) {
+                    const schema = this._schema[key];
+                    const keyLabel = schema ? (schema.description || schema.hint || '') : '';
+                    const keyHint = schema ? (schema.hint || '') : '';
+                    if (!keyLabel && !key) continue;
+                    const configTerms = this._buildSearchTerms([
+                        node.name,
+                        node.desc || '',
+                        stage.name,
+                        pipeline.name,
+                        breadcrumb,
+                        key,
+                        keyLabel,
+                        keyHint
+                    ]);
+                    this._searchIndex.push({
+                        type: 'config',
+                        stepId: node.id,
+                        stageId: stage.id,
+                        pipelineId: pipeline.id,
+                        name: node.name,
+                        desc: node.desc || '',
+                        icon: node.icon || '',
+                        breadcrumb,
+                        stageName: stage.name,
+                        pipelineName: pipeline.name,
+                        configKey: key,
+                        keyLabel,
+                        keyHint,
+                        searchText: configTerms.normalized,
+                        searchCompactText: configTerms.compact
+                    });
+                }
+            }
+        }
+    },
+
+    _searchMatch(query) {
+        if (!query || !query.trim()) return [];
+        const q = this._normalizeSearchText(query);
+        const qCompact = this._compactSearchText(query);
+        const tokens = q.split(/\s+/).filter(t => t.length > 0);
+        if (tokens.length === 0) return [];
+
+        const scored = [];
+
+        for (const entry of this._searchIndex) {
+            const nameLower = entry.name.toLowerCase();
+            const descLower = entry.desc.toLowerCase();
+            const stageNameLower = entry.stageName.toLowerCase();
+            const keyLabelLower = entry.keyLabel ? entry.keyLabel.toLowerCase() : '';
+            const keyHintLower = entry.keyHint ? entry.keyHint.toLowerCase() : '';
+            const configKeyLower = entry.configKey ? entry.configKey.toLowerCase() : '';
+            const searchText = entry.searchText || '';
+            const searchCompactText = entry.searchCompactText || '';
+
+            // All tokens must match somewhere in the entry
+            const allMatch = tokens.every(t => searchText.includes(t));
+            const compactMatch = qCompact && searchCompactText.includes(qCompact);
+            const configOnlyCompactMatch = qCompact && (this._compactSearchText(keyLabelLower).includes(qCompact) || this._compactSearchText(keyHintLower).includes(qCompact));
+            const matched = allMatch || compactMatch || configOnlyCompactMatch;
+            if (!matched) continue;
+
+            let score = 0;
+
+            // Score based on name matching
+            if (nameLower === q) score += 100;
+            else if (nameLower.startsWith(q)) score += 80;
+            else if (nameLower.includes(q)) score += 50;
+            else if (qCompact && this._compactSearchText(nameLower).includes(qCompact)) score += 35;
+
+            // Score based on stage name
+            if (stageNameLower.includes(q)) score += 30;
+
+            // Score based on config key label (schema description)
+            if (keyLabelLower && keyLabelLower.includes(q)) score += 40;
+            else if (qCompact && this._compactSearchText(keyLabelLower).includes(qCompact)) score += 32;
+            else if (keyLabelLower) {
+                for (const t of tokens) {
+                    if (keyLabelLower.includes(t)) score += 15;
+                }
+            }
+
+            if (keyHintLower && keyHintLower.includes(q)) score += 18;
+            else if (qCompact && this._compactSearchText(keyHintLower).includes(qCompact)) score += 12;
+
+            // Score based on config key name
+            if (configKeyLower && configKeyLower.includes(q)) score += 20;
+            else if (qCompact && this._compactSearchText(configKeyLower).includes(qCompact)) score += 14;
+
+            // Score based on description
+            if (descLower.includes(q)) score += 10;
+            else if (qCompact && this._compactSearchText(descLower).includes(qCompact)) score += 8;
+
+            if (compactMatch) score += 10;
+
+            // Bonus for multi-token precision
+            if (tokens.length > 1) {
+                let tokenHits = 0;
+                for (const t of tokens) {
+                    if (nameLower.includes(t)) tokenHits += 2;
+                    else if (keyLabelLower.includes(t)) tokenHits += 1;
+                    else if (keyHintLower.includes(t)) tokenHits += 1;
+                }
+                score += tokenHits * 5;
+            }
+
+            if (score > 0) {
+                scored.push({ ...entry, score });
+            }
+        }
+
+        // Sort by score descending
+        scored.sort((a, b) => b.score - a.score);
+
+        // Keep distinct config results so multiple matching fields under the same step can all be shown.
+        // Only de-duplicate exact same target.
+        const results = [];
+        const seenTargets = new Set();
+        for (const item of scored) {
+            const targetId = item.type === 'config'
+                ? `config:${item.stepId}:${item.configKey}`
+                : `step:${item.stepId}`;
+            if (seenTargets.has(targetId)) continue;
+            seenTargets.add(targetId);
+
+            const result = {
+                stepId: item.stepId,
+                stageId: item.stageId,
+                pipelineId: item.pipelineId,
+                name: item.name,
+                icon: item.icon,
+                breadcrumb: item.breadcrumb,
+                score: item.score,
+                type: item.type
+            };
+            if (item.type === 'config') {
+                result.matchedKey = item.configKey;
+                result.matchedKeyLabel = item.keyLabel;
+            }
+            results.push(result);
+            if (results.length >= 20) break;
+        }
+
+        return results;
+    },
+
+    _highlightMatch(text, query) {
+        if (!query || !text) return text;
+        const tokens = query.trim().toLowerCase().split(/\s+/).filter(t => t.length > 0);
+        let result = text;
+        for (const token of tokens) {
+            const idx = result.toLowerCase().indexOf(token);
+            if (idx !== -1) {
+                const matched = result.substring(idx, idx + token.length);
+                result = result.substring(0, idx) +
+                    '<span class="flow-search-highlight">' + matched + '</span>' +
+                    result.substring(idx + token.length);
+            }
+        }
+        return result;
+    },
+
+    _onSearchInput() {
+        const input = document.getElementById('flow-search-input');
+        const container = document.getElementById('flow-search-results');
+        if (!input || !container) return;
+
+        const query = input.value.trim();
+        if (!query) {
+            container.classList.add('hidden');
+            container.innerHTML = '';
+            return;
+        }
+
+        const results = this._searchMatch(query);
+        if (results.length === 0) {
+            container.classList.remove('hidden');
+            container.innerHTML = '<div class="flow-search-empty">未找到匹配结果</div>';
+            return;
+        }
+
+        container.classList.remove('hidden');
+        container.innerHTML = '';
+
+        for (const r of results) {
+            const item = document.createElement('div');
+            item.className = 'flow-search-item';
+
+            const nameRow = document.createElement('div');
+            nameRow.className = 'flow-search-item-name';
+            nameRow.innerHTML = `${r.icon} ${this._highlightMatch(r.name, query)}`;
+            item.appendChild(nameRow);
+
+            const pathRow = document.createElement('div');
+            pathRow.className = 'flow-search-item-path';
+            pathRow.textContent = r.breadcrumb;
+            item.appendChild(pathRow);
+
+            if (r.matchedKeyLabel) {
+                const matchRow = document.createElement('div');
+                matchRow.className = 'flow-search-item-match';
+                matchRow.innerHTML = '⚙ ' + this._highlightMatch(r.matchedKeyLabel, query);
+                item.appendChild(matchRow);
+            }
+
+            item.addEventListener('click', () => {
+                this._navigateToSearchResult(r);
+            });
+
+            container.appendChild(item);
+        }
+    },
+
+    _navigateToSearchResult(result) {
+        // Close search
+        const input = document.getElementById('flow-search-input');
+        const container = document.getElementById('flow-search-results');
+        if (input) input.value = '';
+        if (container) { container.classList.add('hidden'); container.innerHTML = ''; }
+
+        // Navigate
+        this.navigateToStep(result.stepId, result.matchedKey || null);
+    },
+
+    navigateToStep(stepId, focusKey) {
+        const ctx = FlowData.getStepContext(stepId);
+        if (!ctx) return;
+
+        this._zoomToStage(ctx.pipeline.id, ctx.stage.id);
+        setTimeout(() => {
+            this._selectStep(ctx.step);
+            // If a specific config key was matched, re-render with that key focused
+            if (focusKey && typeof ConfigEditor !== 'undefined') {
+                const body = document.getElementById('config-panel-body');
+                if (body) {
+                    ConfigEditor.render(body, ctx.step, this._schema, focusKey);
+                    // Re-add shared banner if needed
+                    if (ctx.step.shared && ctx.step.sharedFrom) {
+                        const banner = document.createElement('div');
+                        banner.className = 'shared-config-banner';
+                        banner.innerHTML = '🔗 此配置与<strong>消息回复流水线</strong>共用，修改将同时影响两条流水线';
+                        body.insertBefore(banner, body.firstChild);
+                    }
+                }
+            }
+        }, 400);
+    },
+
+    _closeSearchResults() {
+        const container = document.getElementById('flow-search-results');
+        if (container) { container.classList.add('hidden'); container.innerHTML = ''; }
+    },
+
+    // ==================== Original Viewport Pan & Transform ====================
+
     _applyViewportTransform() {
         const tx = this._baseTranslateX + this._panX;
         const ty = this._baseTranslateY + this._panY;
@@ -1420,8 +1983,21 @@ const TechTree = {
         document.addEventListener('mouseup', onPointerUp);
 
         // ── Touch support for mobile / tablet ──
+        let lastPinchDist = null;
+        let pinchBaseScale = 1;
+
         canvas.addEventListener('touchstart', (e) => {
-            // Single finger touch only; multi-touch reserved for pinch-zoom etc.
+            // Pinch-to-zoom: two fingers
+            if (e.touches.length === 2) {
+                this._isDragging = false;
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                lastPinchDist = Math.sqrt(dx * dx + dy * dy);
+                pinchBaseScale = this._baseScale;
+                this._viewport.style.transition = 'none';
+                return;
+            }
+            // Single finger touch only
             if (e.touches.length !== 1) return;
             // Don't drag on interactive elements
             if (e.target.closest('.flow-node, .config-panel, .flow-breadcrumb, button, input, select, textarea, .prompt-floater')) return;
@@ -1437,31 +2013,45 @@ const TechTree = {
         }, { passive: true });
 
         document.addEventListener('touchmove', (e) => {
+            // Pinch-to-zoom
+            if (e.touches.length === 2 && lastPinchDist) {
+                e.preventDefault();
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const ratio = dist / lastPinchDist;
+                this._baseScale = Math.max(0.5, Math.min(2.5, pinchBaseScale * ratio));
+                this._applyViewportTransform();
+                return;
+            }
+
             if (!this._isDragging) return;
             if (e.touches.length !== 1) return;
             const t = e.touches[0];
-            const dx = t.clientX - dragStartX;
-            const dy = t.clientY - dragStartY;
-            this._touchMoved = Math.abs(dx) + Math.abs(dy);
+            const dx2 = t.clientX - dragStartX;
+            const dy2 = t.clientY - dragStartY;
+            this._touchMoved = Math.abs(dx2) + Math.abs(dy2);
             // Once clearly dragging, prevent page scroll
             if (this._touchMoved > 8) {
                 e.preventDefault();
             }
-            this._panX = dragStartPanX + dx;
-            this._panY = dragStartPanY + dy;
+            this._panX = dragStartPanX + dx2;
+            this._panY = dragStartPanY + dy2;
             const tx = this._baseTranslateX + this._panX;
             const ty = this._baseTranslateY + this._panY;
             const s = this._baseScale;
             this._viewport.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
         }, { passive: false });
 
-        document.addEventListener('touchend', () => {
+        document.addEventListener('touchend', (e) => {
+            if (e.touches.length < 2) lastPinchDist = null;
             if (!this._isDragging) return;
             this._isDragging = false;
             this._viewport.style.transition = '';
         });
 
         document.addEventListener('touchcancel', () => {
+            lastPinchDist = null;
             if (!this._isDragging) return;
             this._isDragging = false;
             this._viewport.style.transition = '';
@@ -1532,6 +2122,13 @@ const TechTree = {
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
+                // Close search results first
+                const searchResults = document.getElementById('flow-search-results');
+                if (searchResults && !searchResults.classList.contains('hidden')) {
+                    this._closeSearchResults();
+                    return;
+                }
+
                 const panel = document.getElementById('config-panel');
                 if (panel && panel.classList.contains('visible')) {
                     this._closeConfigPanel();
@@ -1540,7 +2137,66 @@ const TechTree = {
                     this._zoomToOverview();
                 }
             }
+
+            // Ctrl+K or Cmd+K to focus search
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                const searchInput = document.getElementById('flow-search-input');
+                if (searchInput) searchInput.focus();
+            }
         });
+
+        // Search input events
+        const searchInput = document.getElementById('flow-search-input');
+        if (searchInput) {
+            searchInput.addEventListener('input', () => {
+                clearTimeout(this._searchDebounceTimer);
+                this._searchDebounceTimer = setTimeout(() => this._onSearchInput(), 150);
+            });
+
+            searchInput.addEventListener('focus', () => {
+                if (searchInput.value.trim()) this._onSearchInput();
+            });
+
+            // Close search when clicking outside
+            document.addEventListener('click', (e) => {
+                const wrap = document.getElementById('flow-search-wrap');
+                if (wrap && !wrap.contains(e.target)) {
+                    this._closeSearchResults();
+                }
+            });
+
+            // Keyboard navigation in search results
+            searchInput.addEventListener('keydown', (e) => {
+                const container = document.getElementById('flow-search-results');
+                if (!container || container.classList.contains('hidden')) return;
+
+                const items = container.querySelectorAll('.flow-search-item');
+                if (items.length === 0) return;
+
+                let activeIdx = -1;
+                items.forEach((item, i) => {
+                    if (item.classList.contains('flow-search-item--active')) activeIdx = i;
+                });
+
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    items.forEach(item => item.classList.remove('flow-search-item--active'));
+                    activeIdx = (activeIdx + 1) % items.length;
+                    items[activeIdx].classList.add('flow-search-item--active');
+                    items[activeIdx].scrollIntoView({ block: 'nearest' });
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    items.forEach(item => item.classList.remove('flow-search-item--active'));
+                    activeIdx = activeIdx <= 0 ? items.length - 1 : activeIdx - 1;
+                    items[activeIdx].classList.add('flow-search-item--active');
+                    items[activeIdx].scrollIntoView({ block: 'nearest' });
+                } else if (e.key === 'Enter' && activeIdx >= 0) {
+                    e.preventDefault();
+                    items[activeIdx].click();
+                }
+            });
+        }
         
         // 检查是否有其他元素覆盖按钮
         console.log('检查按钮位置和尺寸:');

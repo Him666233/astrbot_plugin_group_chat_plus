@@ -934,7 +934,8 @@ class PlatformLTMHelper:
                 if isinstance(component, Image):
                     has_image = True
                 elif isinstance(component, Plain):
-                    if component.text and component.text.strip():
+                    text = component.text if isinstance(component.text, str) else ""
+                    if text.strip():
                         has_text = True
 
             return has_image and not has_text

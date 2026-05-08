@@ -16,19 +16,19 @@ v1.2.0 更新：
 """
 
 import time
-from typing import Dict, Optional
-from astrbot.api.all import logger, Context
+from typing import TYPE_CHECKING, Dict, Optional
+
+from astrbot.api.all import Context, logger
+from astrbot.api.event import AstrMessageEvent
+
 from .ai_response_filter import AIResponseFilter
+from .decision_ai import DecisionAI
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
-from astrbot.api.event import AstrMessageEvent
-
-# 导入 DecisionAI（延迟导入以避免循环依赖）
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .decision_ai import DecisionAI
+    from .decision_ai import DecisionAI as _DecisionAIType
 
 
 class FrequencyAdjuster:
@@ -62,6 +62,24 @@ class FrequencyAdjuster:
         self.adjust_factor_increase = self.config["frequency_increase_factor"]
         self.min_probability = self.config["frequency_min_probability"]
         self.max_probability = self.config["frequency_max_probability"]
+        self.frequency_ai_include_persona = self.config.get(
+            "frequency_ai_include_persona", True
+        )
+        self.frequency_ai_persona_name = self.config.get(
+            "frequency_ai_persona_name", ""
+        )
+        # 🆕 额外推理配置
+        self.enable_reasoning = self.config.get("enable_frequency_ai_reasoning", False)
+        self.reasoning_log_enabled = self.config.get(
+            "frequency_ai_reasoning_log", False
+        )
+        self.reasoning_log_mode = self.config.get(
+            "frequency_ai_reasoning_log_mode", "processed"
+        )
+        self.reasoning_start_marker = self.config.get(
+            "judgment_reasoning_start_marker", ""
+        )
+        self.reasoning_end_marker = self.config.get("judgment_reasoning_end_marker", "")
 
         # 存储每个会话的检查状态（使用完整的会话标识确保隔离）
         # 格式: {chat_key: {"last_check_time": 时间戳, "message_count": 消息数}}
@@ -293,8 +311,29 @@ class FrequencyAdjuster:
             # 将静态指令（角色、格式说明、判断标准、输出要求）放在最前面，
             # 动态内容（时间段信息、聊天记录）放在最后面。
             # 这样AI服务商的前缀缓存（prefix caching）可以命中静态部分，降低调用成本。
+            _use_reasoning = self.enable_reasoning
+            _r_start = self.reasoning_start_marker if _use_reasoning else ""
+            _r_end = self.reasoning_end_marker if _use_reasoning else ""
+
+            # 根据是否启用额外推理选择不同的输出要求
+            if _use_reasoning and _r_start and _r_end:
+                output_requirement = DecisionAI._build_reasoning_protocol(
+                    _r_start,
+                    _r_end,
+                    allowed_answers=["正常", "过于频繁", "过少"],
+                )
+            else:
+                output_requirement = (
+                    "【输出要求】\n"
+                    "- 最终结论必须且只能是以下三个词之一：正常 / 过于频繁 / 过少\n"
+                    "- 最终结论必须独占最后一行，不要输出解释、前缀、后缀或标点\n"
+                    "- 不要输出任何其他文字\n"
+                )
+
             prompt = f"""你是一个群聊观察者。请根据下方提供的聊天记录，判断AI助手的发言频率是否合适。
 
+{DecisionAI.build_judgment_persona_notice('频率判断')}
+{DecisionAI.build_frequency_judgment_notice()}
 【当前人格与时间说明】
 - 你需要结合你当前的人格设定，判断在不同时间段下你应该多活跃或少活跃。
 - 如果下方提供了「当前时间与活跃度提示」，请参考用户配置的活跃度系数来判断现在说话是否合适。
@@ -316,10 +355,7 @@ class FrequencyAdjuster:
 - 如果AI（assistant）长时间不发言，即使有用户（user）提到相关话题也不回应 → 过少
 - 如果AI（assistant）的发言频率自然，既不抢话也不冷场 → 正常
 
-**你只能输出以下三个词之一，不要输出任何其他文字、解释或标点：**
-- 正常
-- 过于频繁
-- 过少
+{output_requirement}
 
 请根据下方信息进行判断：
 {time_context}
@@ -329,8 +365,6 @@ class FrequencyAdjuster:
             # 复用 DecisionAI.call_decision_ai，而不是直接调用底层 provider：
             # 这样可以自动继承人格设定、上下文注入以及统一的思考链过滤逻辑，
             # 同时保持与主读空气逻辑一致的安全性和行为习惯。
-            from .decision_ai import DecisionAI
-
             response = await DecisionAI.call_decision_ai(
                 context=context,
                 event=event,
@@ -338,15 +372,33 @@ class FrequencyAdjuster:
                 provider_id=provider_id,
                 timeout=timeout,
                 prompt_mode="override",
+                include_persona=self.frequency_ai_include_persona,
+                configured_persona_name=self.frequency_ai_persona_name,
+                context_label="频率动态调整器",
             )
 
             if not response:
                 logger.warning("[频率动态调整器] AI返回为空")
                 return None
 
-            # 使用专门的频率判断结果提取器，将 LLM 的自然语言输出归一化为
-            # "正常" / "过于频繁" / "过少" 三种枚举值，避免下游逻辑需要解析自由文本。
-            decision = AIResponseFilter.extract_frequency_decision(response)
+            # 🆕 统一解析协议：先过滤模型原生思考链，再提取自定义推理块，最后归一化频率结论
+            parse_result = AIResponseFilter.parse_frequency_response(
+                response,
+                start_marker=_r_start,
+                end_marker=_r_end,
+            )
+
+            # 如果启用了额外推理且开启了日志，按配置输出推理信息
+            if _use_reasoning:
+                DecisionAI.log_reasoning_output(
+                    log_prefix="[频率动态调整器-额外推理]",
+                    raw_response=response,
+                    parse_result=parse_result,
+                    log_enabled=self.reasoning_log_enabled,
+                    log_mode=self.reasoning_log_mode,
+                )
+
+            decision = parse_result.get("normalized_answer")
 
             if decision:
                 logger.info(f"[频率动态调整器] AI判断结果: {decision}")
@@ -412,6 +464,9 @@ class FrequencyAdjuster:
         self.check_states[chat_key] = {
             "last_check_time": time.time(),
             "message_count": 0,
+            "adjusted_probability": self.check_states.get(chat_key, {}).get(
+                "adjusted_probability"
+            ),
         }
 
     def record_message(self, chat_key: str):

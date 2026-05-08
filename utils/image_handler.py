@@ -7,10 +7,11 @@
 """
 
 import asyncio
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from astrbot.api.all import *
-from astrbot.api.message_components import Face, At, Reply
+from astrbot.api.message_components import Face, At, AtAll, Reply
 from .image_description_cache import ImageDescriptionCache
+from .ai_error_formatter import format_ai_error
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -26,6 +27,11 @@ class ImageHandler:
     3. 调用AI将图片转为文字描述
     4. 将描述融入原消息
     """
+
+    @staticmethod
+    def _coerce_plain_text(value: Any) -> str:
+        """兼容某些平台 Plain.text=None 的情况。"""
+        return value if isinstance(value, str) else ""
 
     @staticmethod
     async def process_message_images(
@@ -258,7 +264,7 @@ class ImageHandler:
                 image_components.append(component)
             elif isinstance(component, Plain):
                 # 检查是否有非空白文字
-                if component.text and component.text.strip():
+                if ImageHandler._coerce_plain_text(component.text).strip():
                     has_text = True
             elif isinstance(component, Reply):
                 # 引用消息也视为有文字内容，防止「引用+图片」的消息被当作纯图片丢弃
@@ -289,6 +295,8 @@ class ImageHandler:
             return f"[表情:{component.id}]"
         elif isinstance(component, At):
             return f"[At:{component.qq}]"
+        elif isinstance(component, AtAll):
+            return "[At:all]"
         elif isinstance(component, Reply):
             # 格式化引用消息，保留引用内容让AI理解上下文
             try:
@@ -331,7 +339,7 @@ class ImageHandler:
 
         for component in message_chain:
             if isinstance(component, Plain):
-                text_parts.append(component.text)
+                text_parts.append(ImageHandler._coerce_plain_text(component.text))
             elif isinstance(component, Image):
                 # 跳过图片
                 continue
@@ -474,7 +482,7 @@ class ImageHandler:
                     )
                     continue
                 except Exception as e:
-                    logger.error(f"转换图片 {idx} 时发生错误: {e}")
+                    logger.error(f"{format_ai_error(e, f'图片转文字-{idx}')}")
                     continue
 
             # 如果没有成功转换任何图片,返回None
@@ -486,7 +494,7 @@ class ImageHandler:
             result_parts = []
             for chain_idx, component in enumerate(message_chain):
                 if isinstance(component, Plain):
-                    result_parts.append(component.text)
+                    result_parts.append(ImageHandler._coerce_plain_text(component.text))
                 elif isinstance(component, Image):
                     # 如果这张图片有描述,使用描述替换
                     # 通过chain_idx找到对应的image_components索引

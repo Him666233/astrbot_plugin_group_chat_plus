@@ -169,7 +169,8 @@ const Charts = {
                 { label: '主动对话', value: d.proactive_active_count || 0, id: 'ov-proactive' },
                 { label: '缓存消息', value: sd.message_cache_count ?? d.total_cached_messages ?? 0, id: 'ov-cached-msgs' },
                 { label: '等待窗口', value: sd.wait_windows ? sd.wait_windows.length : (d.active_wait_windows || 0), id: 'ov-wait-wins' },
-                { label: '冷却用户', value: sd.cooldowns ? sd.cooldowns.length : (d.cooldown_users || 0), id: 'ov-cooldown-users' },
+                { label: '正式冷却', value: sd.cooldowns ? sd.cooldowns.length : (d.cooldown_users || 0), id: 'ov-cooldown-users' },
+                { label: '待冷却', value: sd.pending_cooldowns ? sd.pending_cooldowns.length : (d.pending_cooldown_users || 0), id: 'ov-pending-cooldown-users' },
                 { label: '主动处理', value: sd.proactive_processing !== undefined ? (sd.proactive_processing ? '是' : '否') : (d.proactive_processing || 0), id: 'ov-pro-processing' },
             ];
 
@@ -236,14 +237,25 @@ const Charts = {
             }
 
             const { labels, values } = this._probLabelsValues(d);
+            const modeNote = document.createElement('div');
+            modeNote.style.cssText = 'font-size:12px;color:var(--text-secondary);margin-bottom:10px;line-height:1.6;';
+            modeNote.innerHTML = (d.mode || 'traditional') === 'traditional'
+                ? `当前为<strong>传统模式</strong>：回复后概率提升按整个会话计算，持续 <strong>${d.probability_duration || 0}s</strong>，再次成功回复会刷新计时。`
+                : `当前为<strong>注意力模式</strong>：回复后加成已由注意力机制按用户接管，<strong>after_reply_probability</strong> 不参与当前会话计算。`;
+            card.appendChild(modeNote);
             this._drawBarChart(canvas, labels, values, 'var(--text-primary)');
 
             const stats = document.createElement('div');
             stats.className = 'stats-row';
             stats.id = 'stats-probability';
+            const mode = (d.mode || 'traditional') === 'traditional' ? '传统模式' : '注意力模式';
+            const replyStat = (d.mode || 'traditional') === 'traditional'
+                ? `<div class="stat-item"><div class="stat-value" id="prob-reply">${((d.after_reply_probability || 0) * 100).toFixed(1)}%</div><div class="stat-label">回复后概率</div></div>`
+                : `<div class="stat-item"><div class="stat-value" id="prob-reply">由注意力接管</div><div class="stat-label">回复后加成</div></div>`;
             stats.innerHTML = `
                 <div class="stat-item"><div class="stat-value" id="prob-init">${((d.initial_probability || 0) * 100).toFixed(1)}%</div><div class="stat-label">基础概率</div></div>
-                <div class="stat-item"><div class="stat-value" id="prob-reply">${((d.after_reply_probability || 0) * 100).toFixed(1)}%</div><div class="stat-label">回复后概率</div></div>`;
+                ${replyStat}
+                <div class="stat-item"><div class="stat-value" id="prob-mode">${mode}</div><div class="stat-label">当前模式</div></div>`;
             card.appendChild(stats);
 
             this._prevData['prob-data'] = values.join(',');
@@ -332,6 +344,7 @@ const Charts = {
             'ov-cached-msgs': sd.message_cache_count ?? d.total_cached_messages ?? 0,
             'ov-wait-wins': sd.wait_windows ? sd.wait_windows.length : (d.active_wait_windows || 0),
             'ov-cooldown-users': sd.cooldowns ? sd.cooldowns.length : (d.cooldown_users || 0),
+            'ov-pending-cooldown-users': sd.pending_cooldowns ? sd.pending_cooldowns.length : (d.pending_cooldown_users || 0),
             'ov-pro-processing': sd.proactive_processing !== undefined ? (sd.proactive_processing ? '是' : '否') : (d.proactive_processing || 0),
         };
         for (const [id, val] of Object.entries(map)) {
@@ -380,9 +393,13 @@ const Charts = {
             }
 
             const initVal = ((d.initial_probability || 0) * 100).toFixed(1) + '%';
-            const replyVal = ((d.after_reply_probability || 0) * 100).toFixed(1) + '%';
+            const replyVal = (d.mode || 'traditional') === 'traditional'
+                ? ((d.after_reply_probability || 0) * 100).toFixed(1) + '%'
+                : '由注意力接管';
+            const modeVal = (d.mode || 'traditional') === 'traditional' ? '传统模式' : '注意力模式';
             this._setTextIfChanged('prob-init', initVal);
             this._setTextIfChanged('prob-reply', replyVal);
+            this._setTextIfChanged('prob-mode', modeVal);
         } catch (e) { console.error('Charts: probability update failed', e); }
     },
 
@@ -444,8 +461,12 @@ const Charts = {
 
     /** 提取概率图的 labels/values */
     _probLabelsValues(d) {
-        const labels = ['基础概率', '回复后概率'];
-        const values = [d.initial_probability || 0, d.after_reply_probability || 0];
+        const labels = ['基础概率'];
+        const values = [d.initial_probability || 0];
+        if ((d.mode || 'traditional') === 'traditional') {
+            labels.push('回复后概率');
+            values.push(d.after_reply_probability || 0);
+        }
         if (d.frequency_adjusted_probability !== undefined) {
             labels.push('频率调整');
             values.push(d.frequency_adjusted_probability || 0);

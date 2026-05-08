@@ -81,6 +81,10 @@ body {
     border: 1px solid rgba(255, 80, 80, 0.3);
     box-shadow: var(--shadow);
 }
+
+.box--blocked { border-color: rgba(255,80,80,0.4); }
+.box--forbidden { border-color: rgba(255,150,50,0.4); }
+.box--notfound { border-color: rgba(100,100,200,0.4); }
 .icon { font-size: 64px; margin-bottom: 20px; }
 h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight: 600; }
 .code-badge {
@@ -112,6 +116,11 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
     text-align: left;
     word-break: break-word;
     line-height: 1.6;
+    display: none;
+}
+
+.reason-box.visible {
+    display: block;
 }
 .reason-label {
     font-size: 11px;
@@ -137,7 +146,7 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
     <div class="code-badge" id="err-badge">ERROR</div>
     <h1 id="err-title">访问出错</h1>
     <p class="desc" id="err-desc">发生了一个错误，请联系管理员。</p>
-    <div class="reason-box" id="err-reason-box" style="display:none;">
+    <div class="reason-box" id="err-reason-box">
         <div class="reason-label">原因</div>
         <div id="err-reason"></div>
     </div>
@@ -170,19 +179,19 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
         badge = '403 BLOCKED';
         title = '访问被拒绝';
         desc = '您的 IP 地址无法访问此面板，可能已被封禁或不在访问名单中。';
-        document.querySelector('.box').style.borderColor = 'rgba(255,80,80,0.4)';
+        document.querySelector('.box').classList.add('box--blocked');
     } else if (code === '403') {
         icon = '🔒';
         badge = '403 FORBIDDEN';
         title = '禁止访问';
         desc = '您没有权限访问此资源。';
-        document.querySelector('.box').style.borderColor = 'rgba(255,150,50,0.4)';
+        document.querySelector('.box').classList.add('box--forbidden');
     } else if (code === '404') {
         icon = '🔍';
         badge = '404 NOT FOUND';
         title = '页面不存在';
         desc = '您访问的页面不存在，请检查地址是否正确。';
-        document.querySelector('.box').style.borderColor = 'rgba(100,100,200,0.4)';
+        document.querySelector('.box').classList.add('box--notfound');
     } else {
         icon = '⚠️';
         badge = 'ERROR';
@@ -200,7 +209,7 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
         var reasonBox = document.getElementById('err-reason-box');
         var reasonEl = document.getElementById('err-reason');
         reasonEl.textContent = reason;
-        reasonBox.style.display = 'block';
+        reasonBox.classList.add('visible');
     }
 
     // 动态设置页面标题

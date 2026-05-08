@@ -84,7 +84,7 @@ class MessageCleaner:
         r"\s*\[戳一戳提示\]这是一个戳一戳消息，但不是戳你的，是.*在戳.*",
         # 🆕 v1.1.1: 戳过对方提示（AI刚刚主动戳过对方，供AI参考，不应保存）
         r"\s*\[戳过对方提示\]你刚刚戳过这条消息的发送者.*",
-        # 🆕 空@时嵌入的多行提示词（有缓存摘要版和无缓存版）
+        # 🆕 单独无信息@消息时嵌入的多行提示词（有缓存摘要版和无缓存版）
         # 注意：必须在通用单行[系统提示]规则之前，否则头部被先删掉导致多行规则失效
         r"\[系统提示\][^\n]+只是单纯@了你，没有附带任何新的消息内容。\n📋[\s\S]*?就像真人一样。",
         r"\[系统提示\][^\n]+单独@了你，但没有附带任何消息内容，[\s\S]*?之类的话。",
@@ -340,7 +340,7 @@ class MessageCleaner:
                         # 纯文本组件
                         # 🔧 修复：防御性检查text是否为None，避免某些平台/情况下text为None导致消息丢失
                         if component.text is not None:
-                            raw_parts.append(component.text)
+                            raw_parts.append(str(component.text))
                     elif isinstance(component, At):
                         # @组件，保留@标记
                         if hasattr(component, "qq"):

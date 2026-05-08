@@ -111,6 +111,160 @@ class MemoryInjector:
             return None, False, None
 
     @staticmethod
+    def _resolve_livingmemory_version(context: Context, version: str = "v2") -> str:
+        """解析 LivingMemory 架构版本选择。"""
+        if version != "auto":
+            return version
+
+        try:
+            star_metadata = context.get_registered_star("astrbot_plugin_livingmemory")
+            if (
+                not star_metadata
+                or not star_metadata.activated
+                or not star_metadata.star_cls
+            ):
+                return "v2"
+
+            plugin_instance = star_metadata.star_cls
+            if getattr(plugin_instance, "initializer", None) is not None:
+                return "v2"
+
+            return "v1"
+        except Exception:
+            return "v2"
+
+    @staticmethod
+    async def _resolve_livingmemory_persona_id(
+        context: Context,
+        session_id: str,
+        event: Optional[AstrMessageEvent] = None,
+        compat_mode: str = "auto",
+    ) -> Optional[str]:
+        if compat_mode == "off":
+            if DEBUG_MODE:
+                logger.info("[LivingMemory] 人格隔离开关已关闭，跳过 persona_id 解析")
+            return None
+
+        persona_mgr = getattr(context, "persona_manager", None)
+        if not persona_mgr:
+            return None
+
+        platform_name = None
+        if event is not None:
+            for attr in ("platform_name",):
+                value = getattr(event, attr, None)
+                if value:
+                    platform_name = value
+                    break
+            if not platform_name:
+                getter = getattr(event, "get_platform_name", None)
+                if callable(getter):
+                    try:
+                        platform_name = getter()
+                    except Exception:
+                        platform_name = None
+        if not platform_name and isinstance(session_id, str) and ":" in session_id:
+            platform_name = session_id.split(":", 1)[0]
+
+        async def _try_resolver() -> Optional[str]:
+            if not hasattr(persona_mgr, "resolve_selected_persona"):
+                return None
+
+            conv_mgr = getattr(context, "conversation_manager", None)
+            conversation_persona_id = None
+            if conv_mgr:
+                try:
+                    curr_cid = await conv_mgr.get_curr_conversation_id(session_id)
+                    if curr_cid:
+                        conv = await conv_mgr.get_conversation(session_id, curr_cid)
+                        if conv:
+                            conversation_persona_id = getattr(conv, "persona_id", None)
+                except Exception as e:
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"[LivingMemory] 通过 conversation_manager 获取 persona_id 失败: {e}"
+                        )
+
+            try:
+                persona_id, persona, _, _ = await persona_mgr.resolve_selected_persona(
+                    umo=session_id,
+                    conversation_persona_id=conversation_persona_id,
+                    platform_name=platform_name,
+                )
+                if persona_id:
+                    return str(persona_id)
+                if isinstance(persona, dict):
+                    for key in ("id", "name", "persona_id"):
+                        value = persona.get(key)
+                        if value:
+                            return str(value)
+                return None
+            except Exception as e:
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[LivingMemory] resolve_selected_persona 解析失败: {e}"
+                    )
+                return None
+
+        async def _try_default_persona_v3() -> Optional[str]:
+            if not hasattr(persona_mgr, "get_default_persona_v3"):
+                return None
+            try:
+                persona = await persona_mgr.get_default_persona_v3(session_id)
+                if isinstance(persona, dict):
+                    for key in ("id", "name", "persona_id"):
+                        value = persona.get(key)
+                        if value:
+                            return str(value)
+                return None
+            except Exception as e:
+                if DEBUG_MODE:
+                    logger.info(f"[LivingMemory] get_default_persona_v3 解析失败: {e}")
+                return None
+
+        async def _try_legacy_key_lookup() -> Optional[str]:
+            if not hasattr(persona_mgr, "get_personas_by_key"):
+                return None
+            try:
+                persona = persona_mgr.get_personas_by_key(session_id)
+                if persona is None:
+                    return None
+                for attr in ("name", "id", "persona_id"):
+                    value = getattr(persona, attr, None)
+                    if value:
+                        return str(value)
+                if isinstance(persona, dict):
+                    for key in ("id", "name", "persona_id"):
+                        value = persona.get(key)
+                        if value:
+                            return str(value)
+                return None
+            except Exception as e:
+                if DEBUG_MODE:
+                    logger.info(f"[LivingMemory] get_personas_by_key 解析失败: {e}")
+                return None
+
+        if compat_mode == "resolver_only":
+            return await _try_resolver()
+
+        if compat_mode == "legacy_only":
+            persona_id = await _try_default_persona_v3()
+            if persona_id:
+                return persona_id
+            return await _try_legacy_key_lookup()
+
+        for resolver in (
+            _try_resolver,
+            _try_default_persona_v3,
+            _try_legacy_key_lookup,
+        ):
+            persona_id = await resolver()
+            if persona_id:
+                return persona_id
+
+        return None
+
+    @staticmethod
     def check_memory_plugin_available(
         context: Context, mode: str = "legacy", version: str = "v1"
     ) -> bool:
@@ -147,6 +301,7 @@ class MemoryInjector:
                 return False
 
             elif mode == "livingmemory":
+                version = MemoryInjector._resolve_livingmemory_version(context, version)
                 # LivingMemory模式：通过统一辅助方法检查
                 plugin_instance, is_initialized, memory_engine = (
                     MemoryInjector._get_livingmemory_plugin_state(context, version)
@@ -190,12 +345,52 @@ class MemoryInjector:
             return False
 
     @staticmethod
+    def resolve_mode(context: Context, mode: str, version: str = "v2") -> tuple:
+        """
+        解析记忆插件模式。当 mode="auto" 时自动检测已安装的记忆插件。
+
+        检测优先级：LivingMemory v2 > LivingMemory v1 > Legacy
+
+        Args:
+            context: Context对象
+            mode: 插件模式，"auto"/"legacy"/"livingmemory"
+            version: LivingMemory插件版本（仅在非auto模式下使用）
+
+        Returns:
+            tuple: (resolved_mode, resolved_version)
+                resolved_mode: "livingmemory" | "legacy" | None（None表示无可用插件）
+                resolved_version: 实际使用的版本号
+        """
+        if mode != "auto":
+            if mode == "livingmemory":
+                version = MemoryInjector._resolve_livingmemory_version(context, version)
+            return (mode, version)
+
+        # 优先检测 LivingMemory（先 v2 再 v1）
+        for v in ("v2", "v1"):
+            if MemoryInjector.check_memory_plugin_available(context, "livingmemory", v):
+                if DEBUG_MODE:
+                    logger.info(f"[auto模式] 检测到 LivingMemory 插件可用（{v}版本）")
+                return ("livingmemory", v)
+
+        # 回退到 Legacy
+        if MemoryInjector.check_memory_plugin_available(context, "legacy", version):
+            if DEBUG_MODE:
+                logger.info("[auto模式] 检测到 Legacy 记忆插件可用")
+            return ("legacy", version)
+
+        if DEBUG_MODE:
+            logger.info("[auto模式] 未检测到任何可用的记忆插件")
+        return (None, version)
+
+    @staticmethod
     async def get_memories(
         context: Context,
         event: AstrMessageEvent,
         mode: str = "legacy",
         top_k: int = 5,
         version: str = "v1",
+        persona_compat_mode: str = "auto",
     ) -> Optional[str]:
         """
         调用记忆插件获取记忆内容（支持双模式）
@@ -266,6 +461,7 @@ class MemoryInjector:
                     return "当前没有任何记忆。"
 
             elif mode == "livingmemory":
+                version = MemoryInjector._resolve_livingmemory_version(context, version)
                 # ===== LivingMemory模式：通过公开API调用（支持v1/v2） =====
                 _, is_initialized, memory_engine = (
                     MemoryInjector._get_livingmemory_plugin_state(context, version)
@@ -286,10 +482,11 @@ class MemoryInjector:
 
                 # 实时获取当前人格ID（支持动态人格切换）
                 try:
-                    persona_id = (
-                        context.persona_manager.get_personas_by_key(session_id).name
-                        if context.persona_manager
-                        else None
+                    persona_id = await MemoryInjector._resolve_livingmemory_persona_id(
+                        context,
+                        session_id,
+                        event=event,
+                        compat_mode=persona_compat_mode,
                     )
                 except Exception as pe:
                     logger.debug(f"[LivingMemory-{version}模式] 获取人格ID失败: {pe}")
@@ -420,6 +617,7 @@ class MemoryInjector:
         mode: str = "legacy",
         top_k: int = 5,
         version: str = "v1",
+        persona_compat_mode: str = "auto",
     ) -> Optional[str]:
         """
         通过 unified_msg_origin 获取记忆内容（用于主动对话场景）
@@ -465,6 +663,7 @@ class MemoryInjector:
                 return result
 
             elif mode == "livingmemory":
+                version = MemoryInjector._resolve_livingmemory_version(context, version)
                 # LivingMemory模式：需要查询字符串，使用会话历史或通用查询
                 from types import SimpleNamespace
 
@@ -488,6 +687,7 @@ class MemoryInjector:
                     mode="livingmemory",
                     top_k=top_k,
                     version=version,
+                    persona_compat_mode=persona_compat_mode,
                 )
 
                 if result is None:

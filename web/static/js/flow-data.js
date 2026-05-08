@@ -4,8 +4,8 @@
  */
 
 const FlowData = {
-    _nodeMap: {},   // stepId → step
-    _stageMap: {},  // stageId → stage
+    _nodeMap: {},   // stepId → 步骤对象
+    _stageMap: {},  // stageId → 阶段对象
 
     pipelines: [
         {
@@ -36,7 +36,10 @@ const FlowData = {
         { from: 'attention-adjust', to: 'proactive-attention', label: '注意力排行共享' },
         { from: 'time-period-adjust', to: 'proactive-time', label: '时间段策略复用' },
         { from: 'base-probability', to: 'proactive-basic', label: '基础概率参考' },
-        { from: 'mood-inject', to: 'proactive-gen', label: '情绪状态影响' }
+        { from: 'mood-inject', to: 'proactive-gen', label: '情绪状态影响' },
+        { from: 'content-filter', to: 'proactive-content-filter', label: '内容过滤共用', shared: true },
+        { from: 'typo-gen', to: 'proactive-typo-gen', label: '打字错误共用', shared: true },
+        { from: 'typing-delay', to: 'proactive-typing-delay', label: '回复延迟共用', shared: true }
     ],
 
     init() {
@@ -110,7 +113,7 @@ const FlowData = {
                     id: 'message-parse',
                     name: '特殊消息解析',
                     icon: '📋',
-                    desc: '解析入群欢迎消息和转发合并消息为AI可读文本',
+                    desc: '解析入群欢迎消息和 QQ / OneBot 合并转发消息，并将结果折叠为单条 AI 可读文本',
                     activeIfAny: ['enable_welcome_message_parsing', 'enable_forward_message_parsing'],
                     keys: ['enable_welcome_message_parsing', 'welcome_message_mode',
                            'enable_forward_message_parsing', 'forward_max_nesting_depth'],
@@ -121,10 +124,11 @@ const FlowData = {
                     id: 'at-filter',
                     name: '@消息过滤',
                     icon: '📢',
-                    desc: '@全体成员消息和@他人消息的过滤规则',
-                    activeIfAny: ['enable_ignore_at_all', 'enable_ignore_at_others'],
-                    keys: ['enable_ignore_at_all',
-                           'enable_ignore_at_others', 'ignore_at_others_mode'],
+                    desc: '@全体成员与@他人采用相邻但独立的规则：可先忽略@全体成员；@他人过滤会基于完整提及结构判断，多人@、重复@同一人按统一结构处理；同时@AI时允许继续处理。通过过滤后，消息内部的At标签会被补足为可读形式（如 [At:123|张三]）。',
+                    activeIfAny: ['enable_ignore_at_all', 'enable_ignore_at_others', 'at_all_message_mode'],
+                    keys: ['enable_ignore_at_all', 'at_all_message_mode',
+                           'at_all_probability_boost_value', 'enable_ignore_at_others',
+                           'ignore_at_others_mode'],
                     onFail: 'drop',
                     failLabel: '命中@过滤 → 丢弃',
                     next: 'poke-detect'
@@ -183,13 +187,15 @@ const FlowData = {
                     id: 'wait-window',
                     name: '等待窗口',
                     icon: '⏳',
-                    desc: '等待用户连续发送多条消息后合并处理，避免逐条回复',
+                    desc: '等待用户连续发送多条消息后合并处理，避免逐条回复；其中@AI消息可按模式即时打断、独立绕过或仅洗刷AI自己的At后合并，而普通@别人不应仅因为有At就误打断窗口。',
                     toggle: 'enable_group_wait_window',
                     keys: ['enable_group_wait_window', 'group_wait_window_timeout_ms',
                            'group_wait_window_max_extra_messages',
                            'group_wait_window_max_users',
                            'group_wait_window_attention_decay_per_msg',
-                           'group_wait_window_merge_at_messages',
+                           'group_wait_window_at_mode',
+                           'group_wait_window_keyword_mode',
+                           'group_wait_window_poke_mode',
                            'group_wait_window_merge_at_list_mode',
                            'group_wait_window_merge_at_user_list'],
                     onFail: 'cache',
@@ -224,11 +230,12 @@ const FlowData = {
                     id: 'base-probability',
                     name: '基础概率',
                     icon: '📊',
-                    desc: '初始概率值，回复后临时提升概率，戳一戳跳过概率检查',
+                    desc: '初始概率值，回复后临时提升概率，戳一戳跳过概率检查；@全体成员可按专用模式跳过概率或仅临时提升当前消息概率',
                     keys: ['initial_probability', 'after_reply_probability',
                            'probability_duration',
                            'poke_bot_skip_probability',
-                           'poke_bot_probability_boost_reference'],
+                           'poke_bot_probability_boost_reference',
+                           'at_all_message_mode', 'at_all_probability_boost_value'],
                     onFail: 'pass',
                     next: 'time-period-adjust'
                 },
@@ -249,14 +256,14 @@ const FlowData = {
                     id: 'attention-adjust',
                     name: '注意力机制',
                     icon: '👁️',
-                    desc: '追踪多个用户的互动历史，根据注意力分数调整回复概率',
+                    desc: '追踪多个用户的互动历史，根据注意力分数调整回复概率；读空气未回复衰减已改为独立配置，可与冷却机制解耦协同',
                     toggle: 'enable_attention_mechanism',
                     keys: ['enable_attention_mechanism', 'attention_increased_probability',
                            'attention_decreased_probability', 'attention_duration',
                            'attention_max_tracked_users', 'attention_decay_halflife',
                            'emotion_decay_halflife', 'attention_boost_step',
-                           'attention_decrease_step', 'attention_decrease_on_no_reply_step',
-                           'attention_decrease_threshold', 'emotion_boost_step',
+                           'attention_decrease_step', 'attention_decay_on_no_reply_step',
+                           'attention_decay_on_no_reply_min_threshold', 'emotion_boost_step',
                            'enable_attention_emotion_detection',
                            'attention_emotion_keywords', 'attention_enable_negation',
                            'attention_negation_words', 'attention_negation_check_range',
@@ -282,11 +289,15 @@ const FlowData = {
                     id: 'attention-cooldown',
                     name: '注意力冷却',
                     icon: '❄️',
-                    desc: '防止注意力误判，暂停注意力自动增长',
+                    desc: '未接续谈保护 + 正式冷却：先保护同一用户的续谈机会，再在确认未接上时冻结注意力增长；未回复衰减改为独立机制，冷却开启时仅在正式冷却后执行',
                     toggle: 'enable_attention_cooldown',
                     parentToggle: 'enable_attention_mechanism',
-                    keys: ['enable_attention_cooldown', 'cooldown_max_duration',
-                           'cooldown_trigger_threshold', 'cooldown_attention_decrease'],
+                    keys: ['enable_attention_cooldown', 'enable_cooldown_auto_release',
+                           'cooldown_max_duration', 'cooldown_trigger_threshold',
+                           'enable_pending_attention_cooldown',
+                           'pending_cooldown_grace_user_messages',
+                           'pending_cooldown_max_wait_seconds',
+                           'pending_cooldown_same_user_probability_floor'],
                     onFail: 'pass',
                     next: 'humanize-mode'
                 },
@@ -366,14 +377,26 @@ const FlowData = {
                     id: 'frequency-adjust',
                     name: '频率调整器',
                     icon: '📊',
-                    desc: 'AI自动分析群内发言频率，动态调整回复概率',
+                    desc: 'AI自动分析群内发言频率，动态调整回复概率。支持可选的额外推理模式，并可按配置输出处理后的推理块或原始模型文本到日志；可单独决定是否注入人格或指定判断专用人格名。频率判断主要依据最近 `user:` / `assistant:` 对话节奏与时段活跃度，不看关键词命中本身',
                     toggle: 'enable_frequency_adjuster',
+                    promptDataKey: 'frequency-ai',
+                    sharedConfig: {
+                        title: '判断型AI共用配置',
+                        text: '这两个推理起止标志符不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
+                        badgeText: '共用',
+                        fieldNote: '此项为三处判断型AI共用配置：读空气AI、主动对话判断AI、频率判断AI。修改后会同步影响全部。',
+                        keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker']
+                    },
                     keys: ['enable_frequency_adjuster', 'frequency_check_interval',
                            'frequency_analysis_timeout', 'frequency_adjust_duration',
                            'frequency_analysis_message_count',
                            'frequency_min_message_count',
                            'frequency_decrease_factor', 'frequency_increase_factor',
-                           'frequency_min_probability', 'frequency_max_probability'],
+                           'frequency_min_probability', 'frequency_max_probability',
+                           'frequency_ai_include_persona', 'frequency_ai_persona_name',
+                           'enable_frequency_ai_reasoning', 'frequency_ai_reasoning_log',
+                           'frequency_ai_reasoning_log_mode',
+                           'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker'],
                     onFail: 'pass',
                     next: 'hard-limit'
                 },
@@ -443,8 +466,9 @@ const FlowData = {
                     id: 'metadata-inject',
                     name: '元数据注入',
                     icon: '🏷️',
-                    desc: '为消息添加时间戳和发送者信息，帮助AI理解对话上下文',
-                    keys: ['include_timestamp', 'include_sender_info'],
+                    desc: '为消息添加时间戳和发送者信息，帮助AI理解对话上下文；对于单独的、不包含任何信息的 @ 消息，系统会先在前置阶段识别事实，再在通过读空气筛选后、进入回复生成时动态追加上下文提醒。',
+                    keys: ['include_timestamp', 'include_sender_info',
+                           'single_at_message_reply_link_max_messages', 'single_at_message_reply_link_max_seconds'],
                     onFail: 'pass',
                     next: 'context-build'
                 },
@@ -454,7 +478,8 @@ const FlowData = {
                     icon: '📚',
                     desc: '组装历史消息上下文，控制消息数量和缓存策略',
                     keys: ['max_context_messages', 'custom_storage_max_messages',
-                           'pending_cache_max_count', 'pending_cache_ttl_seconds'],
+                           'pending_cache_max_count', 'pending_cache_ttl_seconds',
+                           'enable_idle_cache_flush', 'idle_cache_flush_delay_seconds'],
                     onFail: 'pass',
                     next: null
                 }
@@ -479,8 +504,8 @@ const FlowData = {
                     desc: '调用外部记忆插件，将长期记忆注入AI上下文',
                     toggle: 'enable_memory_injection',
                     keys: ['enable_memory_injection', 'memory_plugin_mode',
-                           'livingmemory_version', 'livingmemory_top_k',
-                           'memory_insertion_timing'],
+                           'livingmemory_version', 'livingmemory_persona_compat_mode',
+                           'livingmemory_top_k', 'memory_insertion_timing'],
                     onFail: 'pass',
                     next: 'ai-decide'
                 },
@@ -488,10 +513,21 @@ const FlowData = {
                     id: 'ai-decide',
                     name: 'AI读空气决策',
                     icon: '💭',
-                    desc: '调用决策AI分析对话上下文，判断是否适合回复',
+                    desc: '调用决策AI分析对话上下文，判断是否适合回复。支持可选的额外推理模式，并可按配置输出处理后的推理块或原始模型文本到日志；支持单独关闭人格注入或指定判断专用人格名。关键词命中只代表进入判断流程或获得提示，不代表必须回复。当前消息发送者仍然是读空气判断的主要对象',
                     promptDataKey: 'decision-ai',
-                    keys: ['decision_ai_provider_id', 'decision_ai_prompt_mode',
-                           'decision_ai_extra_prompt', 'decision_ai_timeout'],
+                    sharedConfig: {
+                        title: '判断型AI共用配置',
+                        text: '这两个推理起止标志符不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
+                        badgeText: '共用',
+                        fieldNote: '此项为三处判断型AI共用配置：读空气AI、主动对话判断AI、频率判断AI。修改后会同步影响全部。',
+                        keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker']
+                    },
+                    keys: ['decision_ai_provider_id', 'decision_ai_include_persona',
+                           'decision_ai_persona_name', 'decision_ai_prompt_mode',
+                           'decision_ai_extra_prompt', 'decision_ai_timeout',
+                           'enable_decision_ai_reasoning', 'decision_ai_reasoning_log',
+                           'decision_ai_reasoning_log_mode',
+                           'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker'],
                     onFail: 'drop',
                     failLabel: 'AI判定不回复 → 缓存消息',
                     next: 'concurrent-lock'
@@ -500,8 +536,16 @@ const FlowData = {
                     id: 'concurrent-lock',
                     name: '并发锁定',
                     icon: '🔐',
-                    desc: '防止同一群组同时处理多条消息导致重复回复',
-                    keys: ['concurrent_wait_max_loops', 'concurrent_wait_interval'],
+                    desc: '防止同一群组同时处理多条消息导致重复回复。\n• legacy模式（默认）：等待旧消息处理完再处理新消息，每条消息独立回复\n• smart模式：将同期到达的新消息合并进当前处理上下文，AI一次性感知所有消息后回复，避免「明明说了还说」的重复感\n• 若开启 Smart 批次回复提示增强，则回复阶段会进一步动态提示 AI：当前触发对象仍是主要回复对象，但可以像真人一样自然顺带回应批次中的其他消息',
+                    fieldMeta: {
+                        enable_smart_batch_reply_hint: {
+                            badgeText: '共用配置',
+                            tooltipTitle: '同一配置项',
+                            tooltipText: '这个开关在“并发锁定”和“AI回复生成”里都会出现，但它们指向的是同一个真实配置值，不是两份独立设置。之所以重复展示，是因为它既影响 Smart 并发批次的处理语义，也影响回复阶段给 AI 的动态提示组织；你在任意一处开启或关闭，另一处都会同步体现。'
+                        }
+                    },
+                    keys: ['concurrent_wait_max_loops', 'concurrent_wait_interval',
+                           'concurrent_mode', 'enable_smart_batch_reply_hint', 'smart_concurrent_merge_wait'],
                     onFail: 'pass',
                     next: null
                 }
@@ -536,9 +580,17 @@ const FlowData = {
                     id: 'ai-reply-gen',
                     name: 'AI回复生成',
                     icon: '✨',
-                    desc: '调用AI模型生成回复文本，注入工具提醒和人设',
+                    desc: '调用AI模型生成回复文本，注入工具文本提醒和人设；当同一发送者刚刚有未接上的消息时，还会动态追加一段“最近对话未接上”补充提示。若开启 Smart 批次回复提示增强，Smart 模式下这里还会动态提示 AI：主回当前对象，并可自然顺带回应批次里的其他消息',
                     promptDataKey: 'reply-ai',
+                    fieldMeta: {
+                        enable_smart_batch_reply_hint: {
+                            badgeText: '共用配置',
+                            tooltipTitle: '同一配置项',
+                            tooltipText: '这个开关在“并发锁定”和“AI回复生成”里都会出现，但它们指向的是同一个真实配置值，不是两份独立设置。之所以重复展示，是因为它既影响 Smart 并发批次的处理语义，也影响回复阶段给 AI 的动态提示组织；你在任意一处开启或关闭，另一处都会同步体现。'
+                        }
+                    },
                     keys: ['reply_ai_prompt_mode', 'reply_ai_extra_prompt',
+                           'enable_smart_batch_reply_hint',
                            'enable_tools_reminder', 'tools_reminder_persona_filter',
                            'reply_timeout_warning_threshold',
                            'reply_generation_timeout_warning'],
@@ -650,11 +702,11 @@ const FlowData = {
                         id: 'proactive-basic',
                         name: '基础设置',
                         icon: '🗣️',
-                        desc: '主动对话总开关、沉默阈值、基础触发概率',
+                        desc: '主动对话总开关、沉默阈值、基础触发概率。新增：普通对话冷静期（proactive_normal_reply_cooldown）防止AI刚回完消息又主动发言',
                         toggle: 'enable_proactive_chat',
                         keys: ['enable_proactive_chat', 'proactive_silence_threshold',
                                'proactive_probability', 'proactive_check_interval',
-                               'proactive_enabled_groups'],
+                               'proactive_enabled_groups', 'proactive_normal_reply_cooldown'],
                         onFail: 'drop',
                         failLabel: '未启用 → 不触发',
                         next: 'proactive-activity'
@@ -699,12 +751,25 @@ const FlowData = {
                         id: 'proactive-ai-judge',
                         name: 'AI预判断',
                         icon: '🤔',
-                        desc: '先让AI判断当前是否适合主动发话',
+                        desc: '先让AI判断当前是否适合主动发话。支持可选的额外推理模式，并可按配置输出处理后的推理块或原始模型文本到日志；支持单独关闭人格注入或指定判断专用人格名。这一步主要看上下文、发言间隔、时段和群氛围，而不是关键词直接触发',
                         toggle: 'enable_proactive_ai_judge',
                         parentToggle: 'enable_proactive_chat',
+                        promptDataKey: 'proactive-ai-judge',
+                        sharedConfig: {
+                            title: '判断型AI共用配置',
+                            text: '这两个推理起止标志符不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
+                            badgeText: '共用',
+                            fieldNote: '此项为三处判断型AI共用配置：读空气AI、主动对话判断AI、频率判断AI。修改后会同步影响全部。',
+                            keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker']
+                        },
                         keys: ['enable_proactive_ai_judge',
+                               'proactive_ai_judge_include_persona',
+                               'proactive_ai_judge_persona_name',
                                'proactive_ai_judge_prompt',
-                               'proactive_ai_judge_timeout'],
+                               'proactive_ai_judge_timeout',
+                               'enable_proactive_ai_reasoning', 'proactive_ai_reasoning_log',
+                               'proactive_ai_reasoning_log_mode',
+                               'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker'],
                         onFail: 'drop',
                         failLabel: 'AI判定不适合 → 跳过',
                         next: 'proactive-attention'
@@ -758,23 +823,66 @@ const FlowData = {
             },
             {
                 id: 'proactive-generate',
-                name: '生成与反馈',
+                name: '内容生成',
                 icon: '✨',
-                desc: 'AI生成主动话题，发送后收集反馈调整后续策略',
-                nextStage: null,
-                nextLabel: null,
+                desc: '两种生成方式二选一：正常时AI生成话题，连续无人回复时触发吐槽系统替代',
+                nextStage: 'proactive-shared',
+                nextLabel: '进入共用处理',
                 steps: [
                     {
                         id: 'proactive-gen',
                         name: 'AI话题生成',
                         icon: '💬',
-                        desc: '调用AI生成主动对话内容，支持重试和@转换',
+                        desc: '【正常路径】调用AI生成主动对话内容，支持重试和@转换',
                         promptDataKey: 'proactive-ai',
                         parentToggle: 'enable_proactive_chat',
                         keys: ['proactive_prompt', 'proactive_retry_prompt',
                                'proactive_generation_timeout_warning',
                                'proactive_reply_context_prompt',
                                'enable_proactive_at_conversion'],
+                        onFail: 'drop',
+                        failLabel: '生成失败 → 累计失败次数',
+                        next: null
+                    },
+                    {
+                        id: 'complaint',
+                        name: '吐槽系统',
+                        icon: '😤',
+                        desc: '【替代路径】连续多次主动对话无人回复时，替代AI话题生成，发送幽默吐槽内容',
+                        toggle: 'enable_complaint_system',
+                        parentToggle: 'enable_proactive_chat',
+                        keys: ['enable_complaint_system', 'complaint_trigger_threshold',
+                               'complaint_level_light', 'complaint_probability_light',
+                               'complaint_level_medium', 'complaint_probability_medium',
+                               'complaint_level_strong', 'complaint_probability_strong',
+                               'complaint_decay_on_success',
+                               'complaint_decay_check_interval',
+                               'complaint_decay_no_failure_threshold',
+                               'complaint_decay_amount',
+                               'complaint_max_accumulation'],
+                        onFail: 'pass',
+                        branchType: 'alternative',
+                        branchLabel: '失败累积 → 替代生成',
+                        next: null
+                    }
+                ]
+            },
+            this._stageProactiveShared(),
+            {
+                id: 'proactive-post',
+                name: '发送后处理',
+                icon: '📤',
+                desc: '主动对话发送后的状态更新、概率提升和反馈调整',
+                nextStage: null,
+                nextLabel: null,
+                steps: [
+                    {
+                        id: 'proactive-history-save',
+                        name: '历史保存',
+                        icon: '💾',
+                        desc: '将主动对话内容保存到对话历史缓存',
+                        internal: true,
+                        keys: [],
                         onFail: 'pass',
                         next: 'proactive-boost'
                     },
@@ -803,30 +911,70 @@ const FlowData = {
                                'interaction_score_decay_rate',
                                'interaction_score_min', 'interaction_score_max'],
                         onFail: 'pass',
-                        next: 'complaint'
-                    },
-                    {
-                        id: 'complaint',
-                        name: '吐槽系统',
-                        icon: '😤',
-                        desc: '多次主动对话无人回复时，触发幽默吐槽',
-                        toggle: 'enable_complaint_system',
-                        parentToggle: 'enable_proactive_chat',
-                        keys: ['enable_complaint_system', 'complaint_trigger_threshold',
-                               'complaint_level_light', 'complaint_probability_light',
-                               'complaint_level_medium', 'complaint_probability_medium',
-                               'complaint_level_strong', 'complaint_probability_strong',
-                               'complaint_decay_on_success',
-                               'complaint_decay_check_interval',
-                               'complaint_decay_no_failure_threshold',
-                               'complaint_decay_amount',
-                               'complaint_max_accumulation'],
-                        onFail: 'pass',
                         next: null
                     }
                 ]
             }
         ];
+    },
+
+    /** 主动对话流水线 — 共用处理阶段（与消息回复流水线共享的后处理步骤） */
+    _stageProactiveShared() {
+        return {
+            id: 'proactive-shared',
+            name: '共用处理',
+            icon: '🔗',
+            desc: '与消息回复流水线共用的后处理步骤，修改会同时影响两条流水线',
+            shared: true,
+            nextStage: 'proactive-post',
+            nextLabel: '进入发送后处理',
+            steps: [
+                {
+                    id: 'proactive-content-filter',
+                    name: '内容过滤',
+                    icon: '🧹',
+                    desc: '过滤输出内容中的敏感词、保存过滤、重复消息拦截（共用消息流水线配置）',
+                    shared: true,
+                    sharedFrom: 'content-filter',
+                    activeIfAny: ['enable_output_content_filter', 'enable_save_content_filter', 'enable_duplicate_filter'],
+                    keys: ['enable_output_content_filter', 'output_content_filter_rules',
+                           'enable_save_content_filter', 'save_content_filter_rules',
+                           'enable_duplicate_filter', 'duplicate_filter_check_count',
+                           'enable_duplicate_time_limit', 'duplicate_filter_time_limit'],
+                    onFail: 'drop',
+                    failLabel: '内容被过滤 → 不发送',
+                    next: 'proactive-typo-gen'
+                },
+                {
+                    id: 'proactive-typo-gen',
+                    name: '打字错误模拟',
+                    icon: '✏️',
+                    desc: '模拟真人打字的错别字，增加自然感（共用消息流水线配置）',
+                    shared: true,
+                    sharedFrom: 'typo-gen',
+                    toggle: 'enable_typo_generator',
+                    keys: ['enable_typo_generator', 'typo_error_rate',
+                           'typo_homophones', 'typo_min_text_length',
+                           'typo_min_chinese_chars', 'typo_min_message_length',
+                           'typo_min_count', 'typo_max_count'],
+                    onFail: 'pass',
+                    next: 'proactive-typing-delay'
+                },
+                {
+                    id: 'proactive-typing-delay',
+                    name: '回复延迟',
+                    icon: '⏱️',
+                    desc: '模拟真人打字速度，按字数计算延迟时间（共用消息流水线配置）',
+                    shared: true,
+                    sharedFrom: 'typing-delay',
+                    toggle: 'enable_typing_simulator',
+                    keys: ['enable_typing_simulator', 'typing_speed',
+                           'typing_max_delay', 'typing_delay_timeout_warning'],
+                    onFail: 'pass',
+                    next: null
+                }
+            ]
+        };
     },
 
     // ==================== 私信流水线 ====================

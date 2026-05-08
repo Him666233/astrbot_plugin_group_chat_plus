@@ -61,6 +61,13 @@ from .reply_density_manager import ReplyDensityManager
 # v1.2.1 新增功能 - 消息质量预判器
 from .message_quality_scorer import MessageQualityScorer
 
+# v1.2.2 新增功能 - 智能并发合并管理器
+from .smart_concurrent_manager import SmartConcurrentManager
+
+# v1.2.3 新增功能 - AI 服务商错误格式化器
+from .ai_error_formatter import format_ai_error
+from .system_prompt_rewriter import SystemPromptRewriter, SystemPromptRewriteResult
+
 # 全局调试日志开关（供各模块统一读取）
 DEBUG_MODE: bool = False
 
@@ -117,6 +124,13 @@ __all__ = [
     "ReplyDensityManager",
     # v1.2.1 开始的新增 - 消息质量预判器
     "MessageQualityScorer",
+    # v1.2.2 开始的新增 - 智能并发合并管理器
+    "SmartConcurrentManager",
+    # v1.2.3 开始的新增 - AI 服务商错误格式化器
+    "format_ai_error",
+    # v1.2.3 开始的新增 - system_prompt 重写器
+    "SystemPromptRewriter",
+    "SystemPromptRewriteResult",
     # 全局调试
     "DEBUG_MODE",
     "set_debug_mode",

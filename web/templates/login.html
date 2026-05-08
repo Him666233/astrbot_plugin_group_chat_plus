@@ -29,6 +29,7 @@
                        autocomplete="current-password" maxlength="128">
                 <button id="btn-login" class="btn btn-primary">登录</button>
                 <p class="login-hint">首次启动的初始密码请查看 AstrBot 日志</p>
+                __LEGACY_AUTH_NOTICE__
             </div>
             <div id="login-error" class="error-msg"></div>
         </div>
@@ -56,7 +57,7 @@
                        autocomplete="new-password" maxlength="128">
                 <input type="password" id="confirm-password" placeholder="确认新密码"
                        autocomplete="new-password" maxlength="128">
-                <p class="login-hint" style="text-align:left;margin:0 0 4px;">
+                <p class="login-hint login-hint--password-req">
                     密码要求：6 ~ 128 位，支持任意可打印字符（字母、数字、符号均可）。<br>
                     建议使用包含大小写字母、数字和符号的强密码，避免使用生日、连续数字等易猜内容。
                 </p>
@@ -96,20 +97,45 @@
             if (page) page.classList.remove('hidden');
         }
 
-        // 检查是否已登录（有效 token 则直接跳转面板）
+        // 跳转到面板页
+        function navigateToPanel() {
+            window.location.href = '/panel';
+        }
+
+        function handleAuthFailure(res) {
+            Api.clearToken();
+            if (!res) {
+                window.location.href = '/';
+                return;
+            }
+            var msg = res.msg || '登录已失效，请重新登录';
+            if (typeof Utils !== 'undefined' && Utils.alert) {
+                Utils.alert(msg).then(function() { window.location.href = '/'; });
+            } else {
+                window.location.href = '/';
+            }
+        }
+
+        // 检查是否已登录（有效 cookie 会话则直接跳转面板）
+        var _redirectAttempts = 0;
         async function checkExistingSession() {
-            var token = Api.getToken ? Api.getToken() : localStorage.getItem('gcp_token');
-            if (!token) return;
+            // 防止重定向循环：如果短时间内多次回到登录页，停止自动跳转
+            var lastAttempt = sessionStorage.getItem('gcp_redirect_ts');
+            var now = Date.now();
+            if (lastAttempt && now - parseInt(lastAttempt) < 3000) {
+                Api.clearToken();
+                sessionStorage.removeItem('gcp_redirect_ts');
+                return;
+            }
+
             try {
-                var res = await Api.request('GET', '/api/auth/verify');
+                var res = await Api.verify();
                 if (res && res.ok) {
-                    window.location.href = '/panel';
-                } else {
-                    if (Api.clearToken) Api.clearToken();
-                    else localStorage.removeItem('gcp_token');
+                    sessionStorage.setItem('gcp_redirect_ts', String(now));
+                    navigateToPanel();
                 }
             } catch(e) {
-                // token 无效，停留在登录页
+                // 会话无效，停留在登录页
             }
         }
 
@@ -132,15 +158,17 @@
                     return;
                 }
 
-                Api.setToken(res.token);
                 if (input) input.value = '';
                 hideError('login-error');
 
                 if (!res.password_changed) {
+                    // 首次/重置密码后的首次登录：允许先进入改密页。
+                    // 改密成功后会强制当前会话与其他设备会话一起失效，再要求重新登录。
                     showPage('password-change');
                 } else {
-                    // 登录成功，跳转到面板页
-                    window.location.href = '/panel';
+                    // 登录界面访问到有效 cookie 会话时，会直接跳转 /panel，
+                    // 不要求用户重复输入密码。
+                    navigateToPanel();
                 }
             } catch(e) {
                 showError('login-error', '网络错误，请重试');
@@ -166,9 +194,16 @@
                 var res = await Api.changePassword(oldPw, newPw);
                 if (!res.ok) { showError('pw-change-error', res.msg || '修改失败'); return; }
 
-                Api.setToken(res.token);
                 hideError('pw-change-error');
-                window.location.href = '/panel';
+                if (typeof Utils !== 'undefined' && Utils.alert) {
+                    Utils.alert(res.msg || '密码修改成功，请重新登录').then(function() {
+                        Api.clearToken();
+                        window.location.href = '/';
+                    });
+                } else {
+                    Api.clearToken();
+                    window.location.href = '/';
+                }
             } catch(e) {
                 showError('pw-change-error', '网络错误，请重试');
             } finally {

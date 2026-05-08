@@ -35,6 +35,9 @@ from astrbot.core.message.components import Plain, At, BaseMessageComponent
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.api.all import AstrBotMessage, MessageType, MessageMember
 
+from .private_chat_context_manager import ContextManager
+from ...utils.ai_error_formatter import format_ai_error
+
 # 🆕 v1.2.0: 导入钩子调用相关模块
 from astrbot.core.star.star_handler import EventType
 
@@ -44,6 +47,7 @@ PLUGIN_CUSTOM_CONTEXTS = "_group_chat_plus_contexts"
 PLUGIN_CUSTOM_SYSTEM_PROMPT = "_group_chat_plus_system_prompt"
 PLUGIN_CUSTOM_PROMPT = "_group_chat_plus_prompt"
 PLUGIN_IMAGE_URLS = "_group_chat_plus_image_urls"
+PLUGIN_CURRENT_MESSAGE = "_group_chat_plus_current_message"
 
 
 class ProactiveChatManager:
@@ -154,7 +158,8 @@ class ProactiveChatManager:
     _enable_memory_injection: bool = False
     _memory_plugin_mode: str = "legacy"
     _livingmemory_top_k: int = 5
-    _livingmemory_version: str = "v1"
+    _livingmemory_version: str = "auto"
+    _livingmemory_persona_compat_mode: str = "auto"
     # 工具提醒配置
     _enable_tools_reminder: bool = False
     _tools_reminder_persona_filter: bool = False
@@ -312,7 +317,10 @@ class ProactiveChatManager:
         cls._enable_memory_injection = config["enable_memory_injection"]
         cls._memory_plugin_mode = config["memory_plugin_mode"]
         cls._livingmemory_top_k = config["livingmemory_top_k"]
-        cls._livingmemory_version = config.get("livingmemory_version", "v1")
+        cls._livingmemory_version = config.get("livingmemory_version", "auto")
+        cls._livingmemory_persona_compat_mode = config.get(
+            "livingmemory_persona_compat_mode", "auto"
+        )
         # 工具提醒配置
         cls._enable_tools_reminder = config["enable_tools_reminder"]
         cls._tools_reminder_persona_filter = config.get(
@@ -364,7 +372,7 @@ class ProactiveChatManager:
             cls._content_filter = plugin_instance.content_filter
         else:
             # 如果没有共享实例，创建独立的过滤器（冗余设计，确保功能可用）
-            from .content_filter import ContentFilterManager
+            from .private_chat_content_filter import ContentFilterManager
 
             cls._content_filter = ContentFilterManager(
                 enable_output_filter=cls._enable_output_content_filter,
@@ -2421,7 +2429,7 @@ class ProactiveChatManager:
         if cls._enable_dynamic_proactive_probability:
             try:
                 # 动态导入以避免循环依赖
-                from .time_period_manager import TimePeriodManager
+                from .private_chat_time_period_manager import TimePeriodManager
 
                 # 解析时间段配置（使用静默模式，避免重复输出日志）
                 periods_json = cls._proactive_time_periods
@@ -2968,7 +2976,7 @@ class ProactiveChatManager:
             # 方法2：如果context方法失败，尝试从历史消息中获取
             if not platform_id:
                 try:
-                    from .context_manager import ContextManager
+                    from .private_chat_context_manager import ContextManager
 
                     # 如果platform_name_from_key为空，说明chat_key格式有问题，跳过此群
                     if not platform_name_from_key:
@@ -3050,12 +3058,12 @@ class ProactiveChatManager:
         """
         try:
             # 动态导入
-            from .context_manager import ContextManager
-            from .reply_handler import ReplyHandler
-            from .message_processor import MessageProcessor
-            from .message_cleaner import MessageCleaner
-            from .memory_injector import MemoryInjector
-            from .tools_reminder import (
+            from .private_chat_context_manager import ContextManager
+            from .private_chat_reply_handler import ReplyHandler
+            from .private_chat_message_processor import MessageProcessor
+            from .private_chat_message_cleaner import MessageCleaner
+            from .private_chat_memory_injector import MemoryInjector
+            from .private_chat_tools_reminder import (
                 ToolsReminder,
             )  # 保留导入以备其他地方调用，主动对话流程中不注入工具信息（避免浪费token）
 
@@ -3204,7 +3212,7 @@ class ProactiveChatManager:
 
 特殊标记说明：
 - 历史消息中的[表情包图片]标记表示那些图片是表情包/贴纸，不是普通照片。理解其传达的情绪即可，不要描述图片内容，也不要在发言中提及"表情包"标记本身。
-- 如果历史中出现"[转发消息]"，那是用户分享的合并转发消息，理解其内容即可，不要主动提起"之前那条转发消息"。
+- 如果历史中出现"[转发消息]"，那是用户分享的 QQ / OneBot 合并转发消息；系统可能已经把其中可展开的嵌套转发整理进同一段文本里，理解内容即可，不要主动提起"之前那条转发消息"。
 
 记住：就像是你自己突然想到了什么，很自然地说出来，不要有任何关于"主动发起"的痕迹。
 """
@@ -3346,7 +3354,7 @@ class ProactiveChatManager:
                             )
                     else:
                         # 导入注意力管理器
-                        from .attention_manager import AttentionManager
+                        from ...utils.attention_manager import AttentionManager
 
                         # 🆕 步骤1.5.2: 解析权重配置并获取候选用户
                         # 解析权重字符串配置
@@ -3728,7 +3736,11 @@ class ProactiveChatManager:
                                         and "content" in msg
                                     ):
                                         msg_obj = AstrBotMessage()
-                                        msg_obj.message_str = msg["content"]
+                                        msg_obj.message_str = (
+                                            ContextManager._content_to_safe_text(
+                                                msg.get("content")
+                                            )
+                                        )
                                         msg_obj.platform_name = (
                                             platform_id  # 🔧 修复：使用platform_id
                                         )
@@ -3837,7 +3849,11 @@ class ProactiveChatManager:
                         if isinstance(cached_msg, dict):
                             try:
                                 msg_obj = AstrBotMessage()
-                                msg_obj.message_str = cached_msg.get("content", "")
+                                msg_obj.message_str = (
+                                    ContextManager._content_to_safe_text(
+                                        cached_msg.get("content", "")
+                                    )
+                                )
                                 msg_obj.platform_name = platform_name
                                 msg_obj.timestamp = cached_msg.get(
                                     "message_timestamp"
@@ -3961,15 +3977,24 @@ class ProactiveChatManager:
                                     if raw_content:
                                         history_contents.add(raw_content)
                         elif isinstance(msg, dict) and "content" in msg:
-                            history_contents.add(msg["content"])
+                            history_contents.add(
+                                ContextManager._make_content_hashable(msg["content"])
+                            )
 
                     # 检查缓存消息是否已在历史中（去重
                     for cached_msg in cached_messages:
                         if isinstance(cached_msg, dict) and "content" in cached_msg:
-                            cached_content = cached_msg.get("content", "").strip()
+                            cached_content = ContextManager._content_to_safe_text(
+                                cached_msg.get("content", "")
+                            ).strip()
                             if cached_content:
                                 # 检查是否重复
-                                if cached_content not in history_contents:
+                                if (
+                                    ContextManager._make_content_hashable(
+                                        cached_msg.get("content", "")
+                                    )
+                                    not in history_contents
+                                ):
                                     cached_messages_to_merge.append(cached_msg)
                                 elif debug_mode:
                                     logger.info(
@@ -4005,7 +4030,9 @@ class ProactiveChatManager:
                     if isinstance(cached_msg, dict):
                         try:
                             msg_obj = AstrBotMessage()
-                            msg_obj.message_str = cached_msg.get("content", "")
+                            msg_obj.message_str = ContextManager._content_to_safe_text(
+                                cached_msg.get("content", "")
+                            )
                             msg_obj.platform_name = (
                                 platform_id  # 🔧 修复：使用platform_id
                             )
@@ -4144,9 +4171,20 @@ class ProactiveChatManager:
                 memory_mode = cls._memory_plugin_mode
                 livingmemory_top_k = cls._livingmemory_top_k
                 livingmemory_version = cls._livingmemory_version
+                livingmemory_persona_compat_mode = cls._livingmemory_persona_compat_mode
+
+                # auto模式：自动检测可用的记忆插件
+                memory_mode, livingmemory_version = MemoryInjector.resolve_mode(
+                    context, memory_mode, livingmemory_version
+                )
 
                 # 使用新的 get_memories_by_session 方法获取记忆（无需 event 对象）
-                if MemoryInjector.check_memory_plugin_available(
+                if memory_mode is None:
+                    if debug_mode:
+                        logger.info(
+                            "[主动对话] auto模式未检测到可用的记忆插件，跳过记忆注入"
+                        )
+                elif MemoryInjector.check_memory_plugin_available(
                     context, mode=memory_mode, version=livingmemory_version
                 ):
                     try:
@@ -4156,6 +4194,7 @@ class ProactiveChatManager:
                             mode=memory_mode,
                             top_k=livingmemory_top_k,
                             version=livingmemory_version,
+                            persona_compat_mode=livingmemory_persona_compat_mode,
                         )
                         if memories:
                             old_len = len(final_message)
@@ -4266,11 +4305,13 @@ class ProactiveChatManager:
 
             # 🆕 v1.2.0: 创建 ProviderRequest 并尝试触发 on_llm_request 钩子
             # 这样可以让其他插件（如 emotionai）注入提示词
+            # 主动对话不需要工具调用：保留 on_llm_request 钩子用于其他插件注入提示词，
+            # 但显式不向模型传递工具集，避免无意义的工具调用与额外 token 开销。
             req = ProviderRequest(
-                prompt=final_message,
+                prompt="",
                 session_id=f"{platform_id}_{chat_id}",
                 image_urls=[],
-                func_tool=func_tools_mgr,
+                func_tool=None,
                 contexts=[],
                 system_prompt=system_prompt,
                 conversation=None,
@@ -4293,6 +4334,11 @@ class ProactiveChatManager:
                     virtual_event.set_extra(PLUGIN_CUSTOM_SYSTEM_PROMPT, system_prompt)
                     virtual_event.set_extra(PLUGIN_CUSTOM_PROMPT, final_message)
                     virtual_event.set_extra(PLUGIN_IMAGE_URLS, [])
+                    # 🔧 主动对话无用户消息，传空字符串作为向量检索查询词，
+                    #    避免 final_message（完整上下文）触发 token 超限截断警告。
+                    #    main.py 的 on_llm_request 钩子（priority=-1）会把
+                    #    req.prompt 换回 final_message 供 AI 推理使用。
+                    virtual_event.set_extra(PLUGIN_CURRENT_MESSAGE, "")
 
                     # 触发 on_llm_request 钩子
                     await call_event_hook(
@@ -4317,40 +4363,46 @@ class ProactiveChatManager:
                     logger.warning(f"[主动对话] 触发钩子失败: {e}，继续使用原始请求")
 
             # 调用AI生成
-            _generation_start = time.time()
-            completion_result = await provider.text_chat(
-                prompt=req.prompt,
-                session_id=req.session_id,
-                contexts=req.contexts,
-                system_prompt=req.system_prompt,
-                image_urls=req.image_urls,
-                func_tool_manager=req.func_tool,
-            )
-            _generation_elapsed = time.time() - _generation_start
-
-            if not completion_result or not hasattr(
-                completion_result, "completion_text"
-            ):
-                logger.warning("[主动对话生成] AI未生成有效内容")
-                return
-
-            generated_content = completion_result.completion_text.strip()
-            # 🆕 v1.2.0: 保存原始内容用于保存过滤（与普通回复流程一致的冗余设计）
-            original_generated_content = generated_content
-
-            # 耗时监控和警告
-            # 🔧 使用类变量替代 config.get()
-            timeout_warning = cls._proactive_generation_timeout_warning
-            if _generation_elapsed > timeout_warning:
-                logger.warning(
-                    f"⚠️ [主动对话生成] AI生成耗时异常: {_generation_elapsed:.2f}秒（超过{timeout_warning}秒）"
+            try:
+                _generation_start = time.time()
+                completion_result = await provider.text_chat(
+                    prompt=req.prompt,
+                    session_id=req.session_id,
+                    contexts=req.contexts,
+                    system_prompt=req.system_prompt,
+                    image_urls=req.image_urls,
+                    func_tool_manager=None,
                 )
-            elif debug_mode:
-                logger.info(f"[主动对话生成] AI生成耗时: {_generation_elapsed:.2f}秒")
+                _generation_elapsed = time.time() - _generation_start
 
-            logger.info(
-                f"✅ [主动对话生成] AI成功生成内容，长度: {len(generated_content)} 字符"
-            )
+                if not completion_result or not hasattr(
+                    completion_result, "completion_text"
+                ):
+                    logger.warning("[主动对话生成] AI未生成有效内容")
+                    return
+
+                generated_content = completion_result.completion_text.strip()
+                original_generated_content = generated_content
+
+                timeout_warning = cls._proactive_generation_timeout_warning
+                if _generation_elapsed > timeout_warning:
+                    logger.warning(
+                        f"⚠️ [主动对话生成] AI生成耗时异常: {_generation_elapsed:.2f}秒（超过{timeout_warning}秒）"
+                    )
+                elif debug_mode:
+                    logger.info(
+                        f"[主动对话生成] AI生成耗时: {_generation_elapsed:.2f}秒"
+                    )
+
+                logger.info(
+                    f"✅ [主动对话生成] AI成功生成内容，长度: {len(generated_content)} 字符"
+                )
+            except Exception as e:
+                logger.error(f"{format_ai_error(e, '私信-主动对话生成')}")
+                logger.info(
+                    "[私信-主动对话] AI调用失败，跳过本次主动对话（不影响打分/概率/冷淡期机制）"
+                )
+                return
 
             # ========== 🆕 v1.2.0: 应用输出内容过滤（独立于保存过滤，与普通回复流程一致）==========
             # 输出过滤：控制发送给用户的内容
@@ -4365,7 +4417,7 @@ class ProactiveChatManager:
                     and cls._output_content_filter_rules
                 ):
                     # 冗余设计：如果没有共享过滤器实例，使用静态方法直接过滤
-                    from .content_filter import ContentFilter
+                    from .private_chat_content_filter import ContentFilter
 
                     filtered_generated_content = ContentFilter.filter_for_output(
                         generated_content,
@@ -4642,7 +4694,7 @@ class ProactiveChatManager:
                     logger.info("[主动对话-步骤7] 保存历史到官方对话系统")
 
             # 导入MessageCleaner用于清理消息
-            from .message_cleaner import MessageCleaner
+            from .private_chat_message_cleaner import MessageCleaner
 
             # 构造unified_msg_origin（与主动回复逻辑一致）
             message_type_str = "FriendMessage" if is_private else "GroupMessage"
@@ -4692,7 +4744,7 @@ class ProactiveChatManager:
                     )
                 elif cls._enable_save_content_filter and cls._save_content_filter_rules:
                     # 冗余设计：如果没有共享过滤器实例，使用静态方法直接过滤
-                    from .content_filter import ContentFilter
+                    from .private_chat_content_filter import ContentFilter
 
                     bot_message_to_save = ContentFilter.filter_for_save(
                         bot_message,
@@ -4821,17 +4873,24 @@ class ProactiveChatManager:
                 existing_contents = set()
                 for msg in history_list:
                     if isinstance(msg, dict) and "content" in msg:
-                        content = msg["content"]
-                        if isinstance(content, str):
+                        content = ContextManager._make_content_hashable(msg["content"])
+                        if content is not None:
                             existing_contents.add(content)
 
                 # 处理每条缓存消息，转换为官方格式并去重
                 for cached_msg in cached_messages_raw:
                     if isinstance(cached_msg, dict) and "content" in cached_msg:
-                        raw_content = cached_msg.get("content", "")
+                        raw_content = ContextManager._content_to_safe_text(
+                            cached_msg.get("content", "")
+                        )
 
                         # 去重检查
-                        if raw_content in existing_contents:
+                        if (
+                            ContextManager._make_content_hashable(
+                                cached_msg.get("content", "")
+                            )
+                            in existing_contents
+                        ):
                             if debug_mode:
                                 logger.info(
                                     f"[主动对话保存] 跳过重复的缓存消息: {raw_content[:50]}..."
@@ -4919,7 +4978,11 @@ class ProactiveChatManager:
                                 {"role": "user", "content": formatted_content}
                             )
 
-                        existing_contents.add(formatted_content)
+                        existing_contents.add(
+                            ContextManager._make_content_hashable(
+                                cached_msg.get("content", "")
+                            )
+                        )
 
                 if debug_mode:
                     logger.info(
@@ -5137,7 +5200,13 @@ class ProactiveChatManager:
             cls.activate_temp_probability_boost(chat_key, boost_value, boost_duration)
 
         except Exception as e:
-            logger.error(f"[主动对话处理] 发生错误: {e}", exc_info=True)
+            logger.error(
+                f"{format_ai_error(e, '私信-主动对话-发送/保存')}",
+                exc_info=True,
+            )
+            logger.info(
+                "[私信-主动对话] 发送或保存阶段出错，跳过本次主动对话（不影响打分/概率/冷淡期机制）"
+            )
         finally:
             # ========== 🆕 并发保护：清除主动对话处理标记 ==========
             # 🔒 使用锁保护删除操作，避免与并发检测冲突

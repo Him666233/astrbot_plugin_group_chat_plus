@@ -1,5 +1,5 @@
-/* ========== Config Panel (Right Slide-out) ========== */
-/* Base layout is now in tech-tree.css (position:absolute + transform slide) */
+/* ========== 配置面板（右侧滑出） ========== */
+/* 基础布局已移动到 tech-tree.css（absolute 定位 + transform 滑动） */
 
 .config-panel-header {
     padding: 16px;
@@ -24,13 +24,102 @@
 
 /* ========== Config Field ========== */
 .config-field {
+    position: relative;
     margin-bottom: 16px;
     padding-bottom: 16px;
     border-bottom: 1px solid var(--border-color);
+    z-index: 0;
 }
 .config-field:last-child {
     border-bottom: none;
     margin-bottom: 0;
+}
+
+.config-field-has-tag:hover,
+.config-field-has-tag:focus-within {
+    z-index: 20;
+}
+
+.config-field-has-tag .config-field-label {
+    padding-right: 128px;
+}
+
+.config-field-tag {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 22px;
+    max-width: 120px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    color: var(--text-primary);
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.10);
+    cursor: help;
+    z-index: 2;
+}
+
+.config-field-tag:focus-visible {
+    outline: 2px solid var(--glass-border-hover);
+    outline-offset: 2px;
+}
+
+.config-field-tag-label {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.config-field-tag-tooltip {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: min(280px, calc(100vw - 80px));
+    padding: 10px 12px;
+    border-radius: 10px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--glass-border-hover);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: normal;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-4px);
+    transition: opacity var(--transition), transform var(--transition), visibility var(--transition);
+    pointer-events: none;
+    z-index: 30;
+}
+
+.config-field-tag-tooltip strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.config-field-tag-tooltip span {
+    display: block;
+    color: var(--text-secondary);
+    white-space: pre-line;
+}
+
+.config-field-tag:hover .config-field-tag-tooltip,
+.config-field-tag:focus-visible .config-field-tag-tooltip {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
 }
 
 /* Override global red focus within config panel */
@@ -218,6 +307,57 @@
     background-repeat: no-repeat;
     background-position: right 10px center;
     padding-right: 28px;
+}
+
+/* ========== Shared Config Banner ========== */
+.shared-config-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: rgba(64, 160, 255, 0.08);
+    border: 1px solid rgba(64, 160, 255, 0.28);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+.shared-config-banner-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.shared-config-banner-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.shared-config-banner-text strong {
+    color: var(--text-primary);
+}
+
+.config-field-shared {
+    border-left: 2px solid rgba(64, 160, 255, 0.35);
+    padding-left: 10px;
+}
+
+.config-shared-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: #7dc4ff;
+    background: rgba(64, 160, 255, 0.14);
+    border: 1px solid rgba(64, 160, 255, 0.24);
+    vertical-align: middle;
+}
+
+.config-field-shared-note {
+    font-size: 11px;
+    color: #8ebfe8;
+    line-height: 1.45;
+    margin-bottom: 6px;
 }
 
 /* ========== Security Readonly Banner ========== */

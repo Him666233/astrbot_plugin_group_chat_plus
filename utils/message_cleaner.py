@@ -32,10 +32,15 @@ v1.2.1 更新：
 版本: v1.2.1
 """
 
+import logging
 import re
+from typing import Any
 from astrbot.api.all import *
-from astrbot.api.message_components import Plain, At, Image, Reply
+from astrbot.api.message_components import Plain, At, AtAll, Image, Reply
 from astrbot.core.message.components import Forward
+
+logger = logging.getLogger(__name__)
+AstrMessageEvent = Any
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -55,6 +60,11 @@ class MessageCleaner:
     # 🆕 v1.1.0: 主动对话标记
     # 用于标识AI主动发起的对话，这个标记和相关提示词会保留到官方历史
     PROACTIVE_CHAT_MARKER = "[PROACTIVE_CHAT]"
+
+    # 🆕 窗口追加消息上下文标记
+    # 用于标识AI回复时已参考了窗口缓冲的追加消息（Phase-2保存在回复之后）
+    # ⚠️ 受保护标记：clean_message() 不应移除此标记，它需要保留在历史中帮助AI理解时序
+    WINDOW_CONTEXT_MARKER = "[追加消息上下文]"
 
     # 🆕 v1.1.0: 主动对话系统提示词的特征模式
     # 这些提示词会被保留到官方历史，让AI理解自己是主动发起的
@@ -97,7 +107,7 @@ class MessageCleaner:
         r"\s*\[戳一戳提示\]这是一个戳一戳消息，但不是戳你的，是.*在戳.*",
         # 🆕 v1.1.1: 戳过对方提示（AI刚刚主动戳过对方，供AI参考，不应保存）
         r"\s*\[戳过对方提示\]你刚刚戳过这条消息的发送者.*",
-        # 🆕 空@时嵌入的多行提示词（有缓存摘要版和无缓存版）
+        # 🆕 单独无信息@消息时嵌入的多行提示词（有缓存摘要版和无缓存版）
         # 注意：必须在通用单行[系统提示]规则之前，否则头部被先删掉导致多行规则失效
         r"\[系统提示\][^\n]+单独@了你，没有附带任何文字内容。\n以下是@你之前[\s\S]*?用你自己的方式回应就好。",
         r"\[系统提示\][^\n]+单独@了你，没有附带任何消息内容，也没有特别需要接上的近期上下文，自然回应就好。",
@@ -172,11 +182,22 @@ class MessageCleaner:
         r"--- 以下是你收到这条消息后，同一用户或其他用户紧接着又发的消息 ---[\s\S]*?--- 以上为紧接着的追加消息 ---",
         r"这些消息不一定是对你说的，请自行参考判断是否需要在回复中一并考虑。",
         r"重要：这些追加消息的发送者可能与当前对话对象不同，请根据每条消息的发送者名字和ID仔细区分。",
+        r"\[系统信息-Smart并发追加消息\][\s\S]*?(?=\n\n|$)",
+        r"\[系统提示-Smart并发\][\s\S]*?(?=\n\n|$)",  # Smart批次回复提示增强
         # 🆕 v1.2.1: 新版历史标记和分隔线
         r"【禁止重复-你的历史回复】",  # 新版 bot 历史回复前缀标记
         r"=== 以上全部是历史消息，你已经处理过了，不要重复回答 ===",  # 新版历史分隔提示
         r"=== 【重要】以下是当前新消息（请优先关注这条消息的核心内容）===",  # 新版当前消息分隔线
         r"\[系统信息-回复密度\][\s\S]*?(?=\n\n|$)",  # 回复密度提示
+        r"\[Smart合并\][^\n]*",  # 🆕 v1.2.3: Smart并发合并虚拟AI回复标记
+        r"\[系统信息-最近未接上对话\][\s\S]*?(?=\n\n|$)",  # 最近未接上对话（决策AI）
+        r"\[系统提示-单独无信息@消息上下文提醒\][\s\S]*?(?=\n\n|$)",  # 单独无信息@消息提醒
+        r"\[空@补充提示\][\s\S]*?(?=\n\n|$)",  # 兼容旧版空@中性强化提示
+        r"如果最近未接上的人不是当前发送者本人，不要强行续接别人的话题。",  # 最近未接上补充尾句
+        r"当前这个单独@你的人，和你最近一次明确回复的对象是同一个人，[\s\S]*?不要强行续话。",  # 兼容旧版空@同人强化
+        r"当前这个人单独@了你，但没有附带其他内容。[\s\S]*?不要死盯上一段对话。",  # 兼容旧版空@异人/中性强化
+        r"空@AI强化始终默认生效，不提供单独配置项",  # 兼容旧版展示文案兜底
+        r"\[系统提示-工具提醒开始\][\s\S]*?\[系统提示-工具提醒结束\]",  # 工具提醒整块
     ]
 
     @staticmethod
@@ -374,11 +395,13 @@ class MessageCleaner:
                         # 纯文本组件
                         # 🔧 修复：防御性检查text是否为None，避免某些平台/情况下text为None导致消息丢失
                         if component.text is not None:
-                            raw_parts.append(component.text)
+                            raw_parts.append(str(component.text))
                     elif isinstance(component, At):
                         # @组件，保留@标记
                         if hasattr(component, "qq"):
                             raw_parts.append(f"[At:{component.qq}]")
+                    elif isinstance(component, AtAll):
+                        raw_parts.append("[At:all]")
                     elif isinstance(component, Image):
                         # 图片组件，保留图片标记
                         raw_parts.append("[图片]")
@@ -519,31 +542,50 @@ class MessageCleaner:
             return "[引用消息]"
 
     @staticmethod
-    def is_empty_at_message(raw_message: str, is_at_message: bool) -> bool:
+    def is_empty_at_message(
+        raw_message: str,
+        is_at_message: bool,
+        mention_info: dict | None = None,
+        mode: str = "only_ai",
+    ) -> bool:
         """
-        判断是否是纯@消息（只有@没有其他内容）
+        判断是否是空@消息。
 
         Args:
             raw_message: 原始消息
-            is_at_message: 是否是@消息
+            is_at_message: 是否是@AI消息
+            mention_info: 完整@解析结果（可选）
+            mode:
+                - contains_ai: 只要空消息里包含@AI就算
+                - only_ai: 空消息里只能包含@AI（可重复），不能包含他人/全体
 
         Returns:
-            True=纯@消息（只有@标记），False=有其他内容
+            True=满足指定模式的空@消息，False=不满足
         """
         if not is_at_message:
             return False
 
-        # 移除所有@标记
-        without_at = re.sub(r"\[At:\d+\]", "", raw_message)
-        # 移除空白字符
+        # 先判断是否为空消息：移除所有@标记（兼容裸At与已解析At）
+        without_at = re.sub(r"\[At:[^\]|]+(?:\|[^\]]*)?\]", "", raw_message or "")
         without_at = without_at.strip()
+        if without_at:
+            return False
 
-        # 如果移除@后为空，说明是纯@消息
-        is_empty = len(without_at) == 0
+        mention_info = mention_info if isinstance(mention_info, dict) else {}
+        has_structured_mentions = bool(mention_info)
+        has_at_ai = bool(mention_info.get("has_at_ai", False))
+        has_at_others = bool(mention_info.get("has_at_others", False))
+        has_at_all = bool(mention_info.get("has_at_all", False))
 
-        if is_empty:
-            if DEBUG_MODE:
-                logger.info("[消息清理] 检测到纯@消息（无其他内容）")
+        if mode == "contains_ai":
+            # 宽松模式：只要空消息里明确包含@AI就算；若解析结构缺失，则回退到 is_at_message
+            is_empty = has_at_ai or (is_at_message and not has_structured_mentions)
+        else:
+            # only_ai: 必须依赖结构化结果，且只能包含@AI（可重复），不能含他人/全体
+            is_empty = has_structured_mentions and has_at_ai and not has_at_others and not has_at_all
+
+        if is_empty and DEBUG_MODE:
+            logger.info(f"[消息清理] 检测到空@消息（mode={mode}）")
 
         return is_empty
 

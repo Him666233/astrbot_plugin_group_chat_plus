@@ -329,7 +329,8 @@ const SessionMgr = {
             { label: '处理中', value: d.is_processing ? '是' : '否', id: 'ov-processing' },
             { label: '主动处理', value: d.proactive_processing ? '是' : '否', id: 'ov-pro-proc' },
             { label: '等待窗口', value: (d.wait_windows || []).length, id: 'ov-wait' },
-            { label: '冷却用户', value: (d.cooldowns || []).length, id: 'ov-cooldown' },
+            { label: '正式冷却', value: (d.cooldowns || []).length, id: 'ov-cooldown' },
+            { label: '待冷却', value: (d.pending_cooldowns || []).length, id: 'ov-pending-cooldown' },
             { label: '疲劳锁定', value: (d.fatigue_blocks || []).length, id: 'ov-fatigue' },
             { label: '回复密度', value: density.reply_count !== undefined ? `${density.reply_count}/${density.max_replies || '-'}` : '-', id: 'ov-density' },
             { label: '活跃度', value: typeof activity.activity_score === 'number' ? activity.activity_score.toFixed(2) : '-', id: 'ov-activity' },
@@ -384,10 +385,15 @@ const SessionMgr = {
         const p = d.probability || {};
         container.innerHTML = '';
 
+        const isTraditional = (p.mode || 'traditional') === 'traditional';
+        const modeLabel = isTraditional ? '传统模式' : '注意力模式';
+
         const items = [
             { label: '基础概率', value: p.initial_probability, color: '' },
-            { label: '回复后概率', value: p.after_reply_probability, color: 'green' },
         ];
+        if (isTraditional) {
+            items.push({ label: '回复后概率', value: p.after_reply_probability, color: 'green' });
+        }
         if (p.frequency_adjusted_probability !== undefined) {
             items.push({ label: '频率调整后', value: p.frequency_adjusted_probability, color: 'orange' });
         }
@@ -397,6 +403,13 @@ const SessionMgr = {
                 value: p.temp_boost.value, color: 'purple'
             });
         }
+
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:12px;color:var(--text-secondary);margin-bottom:10px;line-height:1.6;';
+        note.innerHTML = isTraditional
+            ? `当前为<strong>${modeLabel}</strong>：成功回复后会在 <strong>${p.probability_duration || 0}s</strong> 内为整个会话临时提高概率；该提升不区分用户，并且再次成功回复会刷新计时。`
+            : `当前为<strong>${modeLabel}</strong>：回复后概率提升已由注意力机制接管，<strong>after_reply_probability</strong> 不再参与当前会话计算。`;
+        container.appendChild(note);
 
         const grid = document.createElement('div');
         grid.id = 'prob-grid';
@@ -517,10 +530,12 @@ const SessionMgr = {
         }
         wrap.appendChild(waitSection);
 
-        // 冷却用户
+        // 正式冷却 / 待冷却
         const cooldowns = d.cooldowns || [];
+        const pendingCooldowns = d.pending_cooldowns || [];
         const coolSection = document.createElement('div');
-        coolSection.innerHTML = `<h4 style="margin:0 0 8px;font-size:13px;color:var(--text-secondary);">冷却中用户 (${cooldowns.length})</h4>`;
+        coolSection.innerHTML = `<h4 style="margin:0 0 8px;font-size:13px;color:var(--text-secondary);">正式冷却用户 (${cooldowns.length})</h4>`;
+        coolSection.innerHTML += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">正式冷却会冻结该用户的注意力增长；若用户已不在注意力追踪列表中，会被自动移出冷却名单。</div>';
         if (cooldowns.length) {
             const table = document.createElement('table');
             table.className = 'data-table';
@@ -537,9 +552,33 @@ const SessionMgr = {
             table.appendChild(tbody);
             coolSection.appendChild(table);
         } else {
-            coolSection.innerHTML += '<div style="font-size:12px;color:var(--text-muted);">无冷却中用户</div>';
+            coolSection.innerHTML += '<div style="font-size:12px;color:var(--text-muted);">无正式冷却用户</div>';
         }
         wrap.appendChild(coolSection);
+
+        const pendingSection = document.createElement('div');
+        pendingSection.innerHTML = `<h4 style="margin:12px 0 8px;font-size:13px;color:var(--text-secondary);">待冷却用户 (${pendingCooldowns.length})</h4>`;
+        pendingSection.innerHTML += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">待冷却只观察同一用户自己的后续消息；如果该用户已经不在注意力追踪列表中，会直接从待冷却名单移除，不再推进到正式冷却。</div>';
+        if (pendingCooldowns.length) {
+            const table = document.createElement('table');
+            table.className = 'data-table';
+            table.innerHTML = `<thead><tr><th>用户</th><th>名称</th><th>剩余</th><th>观察</th><th>原因</th></tr></thead>`;
+            const tbody = document.createElement('tbody');
+            pendingCooldowns.forEach(c => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td style="font-family:monospace;font-size:11px;">${Utils.escapeHtml(c.user_id)}</td>` +
+                    `<td>${Utils.escapeHtml(c.user_name || '-')}</td>` +
+                    `<td>${Utils.formatDuration(c.remaining || 0)}</td>` +
+                    `<td>${Utils.escapeHtml(`${c.consumed_user_messages || 0}/${c.grace_message_budget || 0}`)}</td>` +
+                    `<td>${Utils.escapeHtml(c.reason || '-')}</td>`;
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            pendingSection.appendChild(table);
+        } else {
+            pendingSection.innerHTML += '<div style="font-size:12px;color:var(--text-muted);">无待冷却用户</div>';
+        }
+        wrap.appendChild(pendingSection);
 
         // 疲劳锁定
         const fatigueBlocks = d.fatigue_blocks || [];
@@ -732,11 +771,69 @@ const SessionMgr = {
         editor.appendChild(editorHeader);
 
         const textarea = document.createElement('textarea');
-        textarea.className = 'file-editor textarea';
+        textarea.className = 'file-editor-textarea';
         textarea.style.cssText = 'font-family:monospace;font-size:12px;min-height:400px;width:100%;margin-top:8px;';
         textarea.value = JSON.stringify(messages, null, 2);
-        editor.appendChild(textarea);
 
+        // 移动端触屏设备：键盘弹出时整体上移避免遮挡
+        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        let keyboardVisible = false;
+        let originalTransform = '';
+
+        const showKeyboardMode = () => {
+            if (keyboardVisible) return;
+            keyboardVisible = true;
+            console.log('[键盘适配] 键盘已弹出，整体上移');
+            
+            // 获取整个会话详情容器
+            const sessionDetail = document.getElementById('session-detail');
+            if (sessionDetail) {
+                originalTransform = sessionDetail.style.transform || '';
+                // 整体向上移动60%视口高度，确保编辑区域可见
+                sessionDetail.style.transform = 'translateY(-60vh)';
+                sessionDetail.style.transition = 'transform 0.3s ease';
+            }
+        };
+
+        const hideKeyboardMode = () => {
+            if (!keyboardVisible) return;
+            keyboardVisible = false;
+            console.log('[键盘适配] 键盘已收起，恢复原位');
+            
+            const sessionDetail = document.getElementById('session-detail');
+            if (sessionDetail) {
+                sessionDetail.style.transform = originalTransform;
+            }
+        };
+
+        if (isTouchDevice) {
+            console.log('[键盘适配] 触屏设备检测成功，启用键盘适配');
+            
+            // textarea获得焦点时上移
+            textarea.addEventListener('focus', () => {
+                console.log('[键盘适配] textarea获得焦点');
+                // 延迟执行，等待键盘完全弹出
+                setTimeout(showKeyboardMode, 300);
+            });
+            
+            // textarea失去焦点时恢复
+            textarea.addEventListener('blur', () => {
+                console.log('[键盘适配] textarea失去焦点');
+                // 延迟执行，等待键盘完全收起
+                setTimeout(hideKeyboardMode, 100);
+            });
+        }
+
+        // 保存或取消时清理
+        const cleanup = () => {
+            hideKeyboardMode();
+            console.log('[键盘适配] 清理完成');
+        };
+
+        saveBtn.addEventListener('click', cleanup, { once: true });
+        cancelBtn.addEventListener('click', cleanup, { once: true });
+
+        editor.appendChild(textarea);
         container.appendChild(editor);
     },
 

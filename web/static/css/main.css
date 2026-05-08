@@ -31,6 +31,9 @@
     --glass-blur: 12px;
     --glass-shadow: 0 8px 32px rgba(0,0,0,0.3);
     --accent-glow: rgba(224,32,32,0.15);
+    --flow-label-bg: rgba(17,17,17,0.96);
+    --flow-label-bg-soft: rgba(10,10,10,0.92);
+    --flow-label-shadow: drop-shadow(0 2px 6px rgba(0,0,0,0.28));
 }
 
 /* ========== Light Theme ========== */
@@ -54,6 +57,9 @@
     --glass-shadow: 0 8px 32px rgba(0,0,0,0.1);
     --glow-red: 0 0 12px rgba(224,32,32,0.15);
     --accent-glow: rgba(224,32,32,0.08);
+    --flow-label-bg: rgba(255,255,255,0.96);
+    --flow-label-bg-soft: rgba(245,245,245,0.94);
+    --flow-label-shadow: drop-shadow(0 2px 8px rgba(0,0,0,0.12));
 }
 
 /* ========== Reset ========== */
@@ -142,9 +148,39 @@ textarea { resize: vertical; min-height: 80px; }
     align-items: center;
     gap: 10px;
     border-bottom: 1px solid var(--border-color);
+    min-width: 0;
 }
-.sidebar-logo { width: 32px; height: 32px; border-radius: 6px; }
-.sidebar-title { font-size: 15px; font-weight: 600; }
+.sidebar-logo {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+.sidebar-brand {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.sidebar-title {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.2;
+}
+.sidebar-version,
+.mobile-topbar-version {
+    font-size: clamp(11px, 0.7vw + 9px, 12px);
+    line-height: 1.2;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+.sidebar-version:empty,
+.mobile-topbar-version:empty {
+    display: none;
+}
 .nav-list { list-style: none; flex: 1; padding: 8px 0; }
 .nav-item {
     padding: 10px 16px;
@@ -270,6 +306,20 @@ textarea { resize: vertical; min-height: 80px; }
 .confirm-box p { font-size: 14px; line-height: 1.6; margin-bottom: 16px; }
 .confirm-box h3 { font-size: 16px; font-weight: 600; }
 .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.support-author-dialog__note {
+    margin-bottom: 16px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+}
+.support-author-dialog__note p {
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+.support-author-dialog__note p:last-child {
+    margin-bottom: 0;
+}
 
 /* ========== Command Cards ========== */
 .cmd-card {
@@ -374,6 +424,36 @@ textarea { resize: vertical; min-height: 80px; }
 }
 .page-info { font-size: 12px; color: var(--text-muted); }
 
+/* ========== Config File Badge ========== */
+.config-file-badge {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 120;
+    max-width: min(320px, calc(100vw - 32px));
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur));
+    box-shadow: var(--glass-shadow);
+    color: var(--text-primary);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: none;
+}
+.config-file-badge__label {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.config-file-badge__value {
+    font-size: 12px;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-all;
+}
+
 /* ========== Settings ========== */
 .settings-section {
     background: var(--bg-secondary);
@@ -386,6 +466,46 @@ textarea { resize: vertical; min-height: 80px; }
     font-weight: 600;
     margin-bottom: 12px;
     color: var(--text-primary);
+}
+
+/* ========== Heartbeat Status Badges ========== */
+.heartbeat-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.2;
+    border: 1px solid transparent;
+}
+.heartbeat-status-badge--ok {
+    background: rgba(34,197,94,0.15);
+    color: var(--accent-green);
+    border-color: rgba(34,197,94,0.28);
+}
+.heartbeat-status-badge--retrying {
+    background: rgba(232,168,56,0.15);
+    color: var(--accent-orange);
+    border-color: rgba(232,168,56,0.28);
+}
+.heartbeat-status-badge--invalid {
+    background: rgba(224,32,32,0.14);
+    color: var(--accent-red);
+    border-color: rgba(224,32,32,0.28);
+}
+.heartbeat-status-badge--idle,
+.heartbeat-status-badge--stopped {
+    background: var(--glass-bg);
+    color: var(--text-secondary);
+    border-color: var(--glass-border);
+}
+.heartbeat-status-value {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
 }
 
 /* ========== Button Disabled ========== */
@@ -628,6 +748,12 @@ textarea { resize: vertical; min-height: 80px; }
     margin-bottom: 12px;
     padding: 12px 16px;
 }
+.file-editor-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+}
 .file-editor textarea {
     font-family: monospace;
     font-size: 12px;
@@ -841,6 +967,13 @@ textarea { resize: vertical; min-height: 80px; }
 /* 默认：移动端专属元素隐藏 */
 #mobile-topbar { display: none; }
 #sidebar-overlay { display: none; }
+.mobile-topbar-brand {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
 
 /* ===== 平板端 (768px – 1023px) ===== */
 @media (max-width: 1023px) {
@@ -857,6 +990,10 @@ textarea { resize: vertical; min-height: 80px; }
 
     /* 视图头部减少内边距 */
     .view-header { padding: 12px 20px; }
+    .sidebar-version,
+    .mobile-topbar-version {
+        font-size: 11px;
+    }
 }
 
 /* ===== 移动端 (≤767px) ===== */
@@ -875,8 +1012,8 @@ textarea { resize: vertical; min-height: 80px; }
         display: flex;
         align-items: center;
         gap: 12px;
-        height: 48px;
-        padding: 0 16px;
+        min-height: 56px;
+        padding: 6px 16px;
         background: var(--bg-secondary);
         border-bottom: 1px solid var(--border-color);
         flex-shrink: 0;
@@ -893,7 +1030,14 @@ textarea { resize: vertical; min-height: 80px; }
         font-size: 15px;
         font-weight: 600;
         color: var(--text-primary);
-        flex: 1;
+        line-height: 1.2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .mobile-topbar-version {
+        font-size: 10px;
+        color: var(--text-secondary);
     }
 
     /* === 侧边栏：抽屉式滑入 === */
@@ -934,8 +1078,8 @@ textarea { resize: vertical; min-height: 80px; }
 
     /* === 内容区：去除 sidebar 占位 === */
     #content {
-        height: calc(100vh - 48px);
-        height: calc(100dvh - 48px);
+        height: calc(100vh - 56px);
+        height: calc(100dvh - 56px);
     }
 
     /* === 视图头部：紧凑 === */
@@ -945,10 +1089,36 @@ textarea { resize: vertical; min-height: 80px; }
         gap: 6px;
     }
     .view-header h2 { font-size: 14px; }
+    .config-file-badge {
+        right: 12px;
+        bottom: 12px;
+        max-width: calc(100vw - 24px);
+        padding: 8px 10px;
+    }
     .view-actions { flex-wrap: wrap; gap: 4px; }
     .view-actions .btn-sm { padding: 5px 9px; font-size: 12px; }
     /* 超长按钮文字缩短 */
     #btn-save-config { font-size: 11px; }
+
+    /* 流程图视图头部：纵向堆叠 */
+    #view-tech-tree .view-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+    #view-tech-tree .view-header h2 {
+        font-size: 15px;
+        margin: 0;
+    }
+    #view-tech-tree .view-actions {
+        justify-content: flex-end;
+    }
+    /* 搜索框移动端全宽 */
+    .flow-search-wrap {
+        max-width: 100% !important;
+        margin: 0 !important;
+        order: 3;
+    }
 
     /* === Toast 通知 === */
     #toast-container {
@@ -988,12 +1158,20 @@ textarea { resize: vertical; min-height: 80px; }
         margin-left: 0;
         width: 100%;
     }
-    #session-detail { padding: 10px 12px; }
+    #session-detail { padding: 10px 12px; overflow-y: auto; }
     .detail-cards {
         grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
         gap: 8px;
     }
     .chat-history-viewer { max-height: 280px; }
+
+    /* 聊天记录编辑器：适配移动端键盘 */
+    .file-editor {
+        padding-bottom: 40px;
+    }
+    .file-editor textarea {
+        min-height: 200px;
+    }
 
     /* === 指令执行 === */
     #commands-container { padding: 12px !important; }
@@ -1029,4 +1207,51 @@ textarea { resize: vertical; min-height: 80px; }
         flex-shrink: 0;
     }
     .file-textarea { min-height: 240px; }
+
+    /* 文件编辑器标题栏：标题与按钮换行防溢出 */
+    .file-editor-header {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 12px;
+    }
+    .file-editor-header > span {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px !important;
+    }
+    .file-editor-actions {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    /* 聊天记录 JSON 编辑器：键盘弹出时自动滚动可见 */
+    .file-editor textarea {
+        min-height: 200px;
+    }
+    
+    /* 编辑器textarea专用样式 */
+    .file-editor-textarea {
+        scroll-margin-top: 20px;
+        scroll-margin-bottom: 20px;
+    }
+    
+    /* 会话详情容器：支持平滑变换 */
+    #session-detail {
+        will-change: transform;
+    }
+    
+    /* view-sessions容器：支持平滑上移 */
+    #view-sessions {
+        will-change: transform;
+        position: relative;
+    }
+    
+    /* tab-history容器：支持平滑上移 */
+    #tab-history {
+        will-change: transform;
+        position: relative;
+    }
 }

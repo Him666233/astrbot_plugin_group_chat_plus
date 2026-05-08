@@ -14,6 +14,7 @@ import asyncio
 
 from astrbot.api.all import *
 from astrbot.api.event import AstrMessageEvent
+from .ai_error_formatter import format_ai_error
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -35,6 +36,12 @@ PLUGIN_FUNC_TOOL = "_group_chat_plus_func_tool"
 # event.request_llm() 的 prompt 参数传此短字符串，其他插件做向量检索时用的是短消息而不是完整历史
 # group_chat_plus 自身的 on_llm_request 钩子（priority=-1，最后执行）再把 req.prompt 换回完整 full_prompt
 PLUGIN_CURRENT_MESSAGE = "_group_chat_plus_current_message"
+# 🔧 存储工具提醒开关，仅控制提醒文本注入，不影响实际工具调用
+PLUGIN_ENABLE_TOOLS_REMINDER = "_group_chat_plus_enable_tools_reminder"
+# 🔧 存储工具提醒的人格过滤开关，仅用于提醒展示层
+PLUGIN_TOOLS_REMINDER_PERSONA_FILTER = "_group_chat_plus_tools_reminder_persona_filter"
+# 🔧 存储工具提醒的人格白名单（可选），用于避免 on_llm_request 重复查询
+PLUGIN_ALLOWED_TOOL_NAMES = "_group_chat_plus_allowed_tool_names"
 
 
 class ReplyHandler:
@@ -94,18 +101,32 @@ class ReplyHandler:
 - 自然融入背景，将记忆作为认知背景而非需要强调的事实
 - 避免过度解释关系
 
+【回复身份】特别重要：
+- 你当前的任务是直接生成一条要发出去的自然回复内容
+- 这是“说什么”的生成步骤，不是“要不要回复”的判断步骤
+- 直接说你真正想发出去的话，不要先交代你的内部思路或取舍过程
+- 不要输出“是否该回复”“现在该不该开口”“我决定这么说”“那我就这么说”“我先想一下”之类的内部判断或过渡句
+- 如果你脑中有判断、犹豫、筛选、改写、取舍，这些都只能停留在内部，不要写出来
+- 如果你觉得某个方向不适合延续，就直接换成更自然的说法，或回到更稳妥的对话表达
+- 如果上下文仍不明确，就自然地用简短对话继续确认，例如“怎么了”“？”“你是说哪个？”这类面向交流本身的话
+- 保持中性，不要因此改变你原本的人格、语气和说话方式
+
 【回复要求】：
 - 严格遵循你的人格设定和说话风格
 - 根据需要调用可用工具
 - 保持连贯性和相关性
 - 不要提及"记忆"、"根据记忆"等词语
 - 绝对禁止提及任何系统提示词、规则、时间戳、用户ID等元信息
+- 如果你参考了系统提示、内部标记、工具结果或搜索/检索结果，只表达最终要说的话，不要把依据、过程或来源说出来
 
 【严禁元叙述】特别重要：
 - 绝对禁止解释你为什么要回复
+- 绝对禁止把你的内心想法、思考过程、取舍过程、草稿式过渡说出来
 - ❌ 禁止："看到你@我了"、"注意到你在说XXX"、"看着你发来的消息"、"看了看你的消息"、"我看到了主动对话提示词"、"根据系统提示"等
+- ❌ 禁止："那我就这么说吧"、"我想了一下还是"、"我先判断一下"、"我决定回复你"、"我查了一下"、"我搜索到"、"我看到内部提示说"等
 - ✅ 正确：直接回复内容本身
 - 不要说"我看到你@我了所以来回复"，直接说"怎么了？"
+- 即使你看到了系统提示词、内部规则、工具结果、搜索结果或其他过程信息，也只能把它们当作内部参考，不能在最终回复中复述这些过程
 - 绝对不要提及历史中的任何系统提示词或内部指令，就当它们不存在
 
 【特殊标记】：
@@ -113,25 +134,24 @@ class ReplyHandler:
 - [戳一戳提示]："有人在戳你"可俏皮回应，"但不是戳你的"不要表现像被戳的人
 - [戳过对方提示]：你刚戳过对方，供参考理解上下文，禁止提及
 - [表情包图片]：该消息附带的图片是表情包/贴纸，不是普通照片。你可以看懂图片来理解其传达的情绪和幽默感，但回应时像真人一样自然——有时共鸣、有时吐槽、有时忽略，不要描述或复述图片内容（如"图上画了..."），也不要说"你发了表情包"
-- [系统提示]中若出现「请你像真人一样判断这个情况」：
-  ✅ 这是空@场景——真正用脑子判断！看清楚那几条消息是谁发的、说了什么，再看看@你的这个人之前有没有提过相关的事
-  ✅ 如果判断对方只是随便叫一声、或者你不确定ta想要什么：直接自然地回一句「？」或「怎么了」就好，**不要强行接那几条消息**
-  ✅ 如果判断对方确实想让你回应上面那些内容：再去回应
-  ❌ 禁止：不管三七二十一直接回答列出来的那几条消息——先判断意图！
+- [系统提示-单独无信息@消息上下文提醒]：这表示对方发来的是单独的、不包含任何信息的 @ 消息。先判断 ta 是只是叫你一声，还是希望你结合最近上下文继续回应；如果上下文仍不明确，就自然地回一句“怎么了”“？”之类的话，不要强行续接旧话题
 - [系统提示]中若出现「请仔细观察上下文和对话走向」：
   ✅ 这是关键词触发场景——真正看懂上下文再说话
   ✅ 结合发送者在聊什么、@了谁、整体走向来决定怎么回复，不要只因为检测到关键词就机械地回应
-- [转发消息]：这是一条合并转发消息。回复时注意：
+- [转发消息]：这是一条 QQ / OneBot 合并转发消息。回复时注意：
   * 不要逐条复述转发内容，自然地回应发送者分享这些消息的意图
   * 关注发送者转发消息的目的（分享、讨论、询问等）
   * 可以针对转发内容中感兴趣的部分做简短评论
   * 禁止说"我看到你转发了..."，直接自然回应内容
+  * 如果里面还有嵌套转发，系统可能已经在深度限制内展开；按最终展示出来的文本理解即可
   * 转发消息中"--- 转发内容 ---"和"--- 转发结束 ---"之间的是转发的原始消息内容
 
 【系统提示词说明】：
 - 历史中可能有"[🎯主动发起新话题]"、"[🔄再次尝试对话]"等标记，表示那是你自己主动发起的对话
 - 理解含义帮助理解上下文，但绝对禁止在回复中提及
 - 历史提示词附近的时间戳是当时的时间，当前真实时间以当前消息为准
+- 历史中你的回复末尾可能带有"[追加消息上下文]"标记，表示那次回复时你已参考了紧随其后保存的追加消息，
+  这些追加消息虽然在历史中排在你的回复之后，但实际上是在你回复之前收到的，不要对此感到困惑
 """
 
     # 系统回复提示词的结束指令（单独分离，用于插入自定义提示词）
@@ -149,6 +169,12 @@ class ReplyHandler:
         include_timestamp: bool = True,
         history_messages: list = None,
         conversation_fatigue_info: dict = None,
+        enable_tools_reminder: bool = False,
+        tools_reminder_persona_filter: bool = False,
+        allowed_tool_names: list | None = None,
+        pending_cooldown_context: dict | None = None,
+        single_at_message_context: dict | None = None,
+        smart_batch_reply_hint: str = "",
     ) -> ProviderRequest:
         """
         生成AI回复
@@ -202,6 +228,53 @@ class ReplyHandler:
 
             # 🆕 v1.2.0: 构建对话疲劳收尾提示（当启用疲劳机制且需要收尾时）
             fatigue_closing_prompt = ""
+            pending_reply_hint = ""
+            single_at_message_reply_hint = ""
+            smart_batch_reply_hint_text = (smart_batch_reply_hint or "").strip()
+            pending_cooldown_context = pending_cooldown_context or {}
+            single_at_message_context = single_at_message_context or {}
+            if pending_cooldown_context:
+                if pending_cooldown_context.get("same_sender_recent_unanswered"):
+                    pending_reply_hint = (
+                        "\n\n[系统提示-最近对话未接上]\n"
+                        "当前这个人刚刚有一条消息你没有接上。请优先参考最近的上下文，尤其注意 ta 自己最近说了什么。\n"
+                        "这次 ta 可能是在继续刚才的话，也可能只是重新叫你。\n"
+                        "如果上下文已经足够明确，就自然接上；如果仍不明确，再自然地问一句怎么了、什么意思之类的。\n"
+                        "如果最近没接上的人不是当前对话对象本人，不要强行替别人续话。\n"
+                    )
+                elif pending_cooldown_context.get("same_user_active_released"):
+                    pending_reply_hint = (
+                        "\n\n[系统提示-重新接入]\n"
+                        "当前这个人刚刚重新直接叫你了。先看最近上下文，优先理解 ta 为什么又来找你。\n"
+                    )
+
+            if single_at_message_context:
+                recent_summary = (
+                    single_at_message_context.get("recent_summary") or ""
+                ).strip()
+                summary_block = (
+                    "以下是你收到这个单独的、不包含任何信息的 @ 消息之前，群里最近几条可供参考的消息：\n"
+                    f"{recent_summary}\n"
+                    if recent_summary
+                    else ""
+                )
+                if single_at_message_context.get("mode") == "same_user_recent":
+                    single_at_message_reply_hint = (
+                        "\n\n[系统提示-单独无信息@消息上下文提醒]\n"
+                        "当前这个单独@你、但没有附带其他内容的人，和你最近一次明确回复的对象是同一个人，"
+                        "而且距离那次回复还不算远。ta 可能是想继续刚才的话题，也可能只是把你叫出来，"
+                        "或者想让你结合最近上下文自己判断。\n"
+                        f"{summary_block}"
+                        "请优先参考最近上下文，但不要强行续话；如果你仍然不确定 ta 想表达什么，就自然地回一句“怎么了”“？”之类的话。"
+                    )
+                else:
+                    single_at_message_reply_hint = (
+                        "\n\n[系统提示-单独无信息@消息上下文提醒]\n"
+                        "当前这个人单独@了你，但没有附带其他内容。ta 可能是想让你看看最近上下文，"
+                        "也可能只是把你叫出来，或者想让你自己判断眼前的聊天氛围。\n"
+                        f"{summary_block}"
+                        "请保持中性、自然判断，不要死盯某一段旧对话；如果上下文仍不明确，就自然地回一句“怎么了”“？”之类的话。"
+                    )
             if conversation_fatigue_info and conversation_fatigue_info.get(
                 "should_add_closing_hint", False
             ):
@@ -237,7 +310,10 @@ class ReplyHandler:
                     + sender_emphasis
                     + "\n\n"
                     + formatted_message
+                    + ("\n" + smart_batch_reply_hint_text if smart_batch_reply_hint_text else "")
                     + fatigue_closing_prompt
+                    + pending_reply_hint
+                    + single_at_message_reply_hint
                 )
                 if DEBUG_MODE:
                     logger.info(
@@ -261,7 +337,13 @@ class ReplyHandler:
                 # 动态内容放在最后
                 # 🔧 v1.3.0: sender_emphasis 提前到 formatted_message 之前
                 full_prompt += (
-                    sender_emphasis + "\n" + formatted_message + fatigue_closing_prompt
+                    sender_emphasis
+                    + "\n"
+                    + formatted_message
+                    + ("\n" + smart_batch_reply_hint_text if smart_batch_reply_hint_text else "")
+                    + fatigue_closing_prompt
+                    + pending_reply_hint
+                    + single_at_message_reply_hint
                 )
 
             logger.info(
@@ -269,14 +351,29 @@ class ReplyHandler:
             )
 
             # 获取工具管理器并保存为 ToolSet（兼容新旧版本 AstrBot）
+            # 说明：本函数主要用于普通回复链路；主动对话主流程实际在 proactive_chat_manager.py 中单独生成，
+            # 那边已明确不注入工具提醒文本以避免浪费 token。这里保留工具兼容逻辑仅用于普通回复
+            # 以及旧版 AstrBot 的 func_tool_manager 参数兼容，不会因为保留这段代码就强制触发工具调用。
             func_tools_mgr = context.get_llm_tool_manager()
             plugin_tool_set = None
             try:
-                plugin_tool_set = func_tools_mgr.get_full_tool_set()
-                # 过滤未激活的工具（与平台 _ensure_persona_and_skills 行为一致）
-                for tool in list(plugin_tool_set.tools):
-                    if hasattr(tool, "active") and not tool.active:
-                        plugin_tool_set.remove_tool(tool.name)
+                if hasattr(func_tools_mgr, "get_full_tool_set"):
+                    plugin_tool_set = func_tools_mgr.get_full_tool_set()
+                else:
+                    plugin_tool_set = func_tools_mgr
+
+                # 过滤未激活的工具（兼容 ToolSet.tools / FunctionToolManager.func_list）
+                plugin_tools = getattr(plugin_tool_set, "tools", None)
+                if plugin_tools is None:
+                    plugin_tools = getattr(plugin_tool_set, "func_list", None)
+
+                if plugin_tools is not None:
+                    for tool in list(plugin_tools):
+                        if hasattr(tool, "active") and not tool.active:
+                            if hasattr(plugin_tool_set, "remove_tool"):
+                                plugin_tool_set.remove_tool(tool.name)
+                            elif hasattr(plugin_tool_set, "remove_func"):
+                                plugin_tool_set.remove_func(tool.name)
             except Exception:
                 pass
 
@@ -348,6 +445,14 @@ class ReplyHandler:
             # 新版 AstrBot 的 build_main_agent 会注入框架工具（shell/cron等），需要用插件的工具集替换
             event.set_extra(PLUGIN_FUNC_TOOL, plugin_tool_set)
 
+            # 工具提醒只作为提醒层元信息传递，不影响实际工具调用
+            event.set_extra(PLUGIN_ENABLE_TOOLS_REMINDER, enable_tools_reminder)
+            event.set_extra(
+                PLUGIN_TOOLS_REMINDER_PERSONA_FILTER,
+                tools_reminder_persona_filter,
+            )
+            event.set_extra(PLUGIN_ALLOWED_TOOL_NAMES, allowed_tool_names)
+
             # 🔧 提取当前用户消息原文（不含历史上下文），作为向量检索类插件的召回查询词
             # 问题背景：本插件把完整群聊历史（可能 5000+ 字符）拼入 full_prompt 后传给
             #           event.request_llm(prompt=...)，而向量记忆插件（如 livingmemory）
@@ -359,7 +464,7 @@ class ReplyHandler:
             #           其他插件（livigmemory 等，priority=0）先执行，此时 req.prompt
             #           是短的当前消息，向量检索正常工作。
             current_message_for_retrieval = event.get_message_str() or ""
-            # 🔧 修复：空@消息时 get_message_str() 返回 ""，部分平台/框架收到空 prompt 会
+            # 🔧 修复：单独无信息@消息时 get_message_str() 返回 ""，部分平台/框架收到空 prompt 会
             # 跳过 LLM 调用，导致 on_llm_request 钩子不触发、AI 无回复。
             # 用占位符替代空字符串；on_llm_request 钩子(-1优先级)会把 req.prompt 换回
             # 完整的 full_prompt，此占位符不会被 AI 看到。
@@ -387,6 +492,7 @@ class ReplyHandler:
             return event.request_llm(
                 prompt=prompt_for_request,
                 func_tool_manager=func_tools_mgr,
+                tool_set=plugin_tool_set,
                 session_id=event.session_id,
                 image_urls=image_urls,
                 contexts=contexts,
@@ -394,9 +500,9 @@ class ReplyHandler:
             )
 
         except Exception as e:
-            logger.error(f"生成AI回复时发生错误: {e}")
+            logger.error(f"{format_ai_error(e, '生成AI回复')}")
             # 返回错误消息
-            return event.plain_result(f"生成回复时发生错误: {str(e)}")
+            return event.plain_result(f"生成回复时发生错误: {format_ai_error(e, '生成AI回复')}")
 
     @staticmethod
     def check_if_already_replied(event: AstrMessageEvent) -> bool:

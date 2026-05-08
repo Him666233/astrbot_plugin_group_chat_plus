@@ -2,7 +2,7 @@
 
 > 本文档详细描述了群聊增强插件的完整文件结构及每个文件的职责。
 
-[← 返回 README](../README.md) | [深度指南与常见问题](ARCHITECTURE.md) | [消息工作流程](MESSAGE_WORKFLOW.md) | [配置项参考](CONFIG_REFERENCE.md)
+[← 返回 README](../README.md) | [深度指南与常见问题](ARCHITECTURE.md) | [消息工作流程](MESSAGE_WORKFLOW.md) | [配置项参考](CONFIG_REFERENCE.md) | [桌面端兼容](DESKTOP_COMPATIBILITY.md)
 
 ---
 
@@ -22,6 +22,7 @@ astrbot_plugin_group_chat_plus/
 ├── docs/                       # 📖 文档目录
 │   ├── MESSAGE_WORKFLOW.md     # 消息工作流程详解
 │   ├── CONFIG_REFERENCE.md     # 配置项完整参考
+│   ├── DESKTOP_COMPATIBILITY.md # AstrBot 桌面端兼容说明
 │   └── PROJECT_STRUCTURE.md    # 本文件
 │
 ├── web/                        # 🖥️ Web 管理面板
@@ -72,15 +73,17 @@ astrbot_plugin_group_chat_plus/
 │   ├── typing_simulator.py     # 打字延迟模拟
 │   ├── typo_generator.py       # 打字错误生成
 │   ├── time_period_manager.py  # 时段概率管理
-│   ├── forward_message_parser.py # 转发消息解析
+│   ├── forward_message_parser.py # 公共转发消息解析内核
 │   ├── welcome_message_parser.py # 欢迎消息解析
 │   ├── memory_injector.py      # 长期记忆注入
 │   ├── tools_reminder.py       # 工具提示
+│   ├── system_prompt_rewriter.py # system_prompt 兼容增强与保守回退
 │   ├── platform_ltm_helper.py  # 平台图片说明提取
 │   ├── cooldown_manager.py     # 注意力冷却
 │   ├── message_cache_manager.py# 待处理消息缓存
 │   ├── content_filter.py       # 内容过滤器
 │   ├── ai_response_filter.py   # AI 回复验证
+│   ├── ai_error_formatter.py   # 🆕 AI 错误格式化（识别服务商故障/网络问题/HTML错误页）
 │   ├── message_quality_scorer.py # 消息质量预判
 │   ├── reply_density_manager.py# 回复密度限制
 │   └── _session_guard.py       # 会话安全守卫
@@ -107,7 +110,7 @@ astrbot_plugin_group_chat_plus/
 - **事件处理器**：
   - `on_group_message()` — 群聊消息入口，执行 Phase 1-3
   - `_process_message()` — 消息主处理管线，执行 Phase 4-9
-  - `on_llm_request()` — LLM 请求钩子（优先级 -1），负责上下文注入和历史处理
+  - `on_llm_request()` — LLM 请求钩子（优先级 -1），负责上下文注入、system_prompt 兼容重写与历史处理
   - `after_message_sent()` — 消息发送后的统计和状态更新
 - **主动对话** — 定时任务，独立于消息流程运行
 - **Web 面板启动** — 初始化 Web 服务器
@@ -143,7 +146,10 @@ pypinyin    # 拼音处理，用于打字错误生成器
 Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 
 - **路由注册** — 登录页、面板页、API 端点、静态资源
-- **中间件** — 路径遍历防护 → IP 访问控制 → 防爬虫检测 → JWT 认证 → 安全头注入
+- **中间件链** — 路径遍历防护 → IP 访问控制 → 防爬虫检测 → JWT 认证 → 安全头注入
+- **安全响应头** — X-Content-Type-Options / X-Frame-Options / X-XSS-Protection / Referrer-Policy / Permissions-Policy 等
+- **Content-Security-Policy** — 基于 nonce 的严格 CSP（script-src 使用 nonce 替代 unsafe-inline，防止 XSS 注入）
+- **敏感文件保护** — Web 文件管理 API 对 `auth.json`、`jwt_secret.json`、`access_log*`、`bans.json` 实施访问控制（返回 403）
 - **API 处理器**：
   - `/api/login` — 用户认证
   - `/api/change-password` — 密码修改
@@ -155,8 +161,11 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 
 ### auth.py — 认证模块
 
-- **密码管理** — PBKDF2-HMAC-SHA256 哈希，安全的密码存储和验证
-- **JWT 管理** — Token 创建、验证、过期检查、IP 绑定
+- **密码管理** — 默认使用 Argon2id 内存硬化哈希，兼容验证旧版 PBKDF2-SHA256，并在首次成功登录后自动透明迁移
+- **JWT 管理** — Token 创建、验证、过期检查、IP 绑定；JWT 签名密钥独立存储于 `jwt_secret.json`（与密码哈希物理隔离）
+- **认证文件分离** — `auth.json` 仅存储密码相关数据（哈希/salt/hash_version/password_changed），`jwt_secret.json` 存储 JWT 密钥及会话管理数据
+- **自动迁移** — 启动时检测旧版格式（auth.json 中含 jwt_secret），自动分离到独立文件
+- **默认密码机制** — 首次安装/重置生成随机密码，以 WARNING 级别输出到 AstrBot 日志并附带安全警告；用户修改密码后明文副本自动清除且不再输出
 
 ### security.py — 安全管理器
 
@@ -193,7 +202,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 | `charts.js` | 基于 Canvas 的实时统计图表（消息量、回复率、群活跃度） |
 | `config-editor.js` | 配置可视化编辑器，根据 JSON Schema 动态生成表单 |
 | `flow-data.js` | 消息处理流程的可视化数据定义 |
-| `prompt-data.js` | 系统提示词模板的预置数据 |
+| `prompt-data.js` | 系统提示词模板的预置数据（读空气AI / 回复AI / 主动对话AI / 主动对话判断AI） |
 | `session-mgr.js` | 会话管理界面 |
 | `tech-tree.js` | 技术树/功能关联图谱的渲染逻辑 |
 | `utils.js` | 通用工具函数（格式化、DOM 操作等） |
@@ -209,25 +218,27 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 | 文件 | 类 | 说明 |
 |------|-----|------|
 | `probability_manager.py` | `ProbabilityManager` | 管理动态概率计算，整合回复后提升、时段调整等因素 |
-| `decision_ai.py` | `DecisionAI` | 核心"读空气"逻辑。构建提示词 → 调用 AI → 解析 yes/no 决策结果 |
-| `reply_handler.py` | `ReplyHandler` | AI 回复生成。构建完整上下文 → 调用 `event.request_llm()` → 后处理 |
+| `decision_ai.py` | `DecisionAI` | 核心"读空气"逻辑。构建提示词 → 解析判断型AI人格（默认跟随当前会话，也可按配置关闭或指定人格）→ 调用 AI → 解析 yes/no 决策结果 |
+| `reply_handler.py` | `ReplyHandler` | AI 回复生成。构建完整上下文 → 采集工具快照与提醒元信息 → 以短消息/占位 prompt 调用 `event.request_llm()`，再由 `on_llm_request` 恢复完整上下文 |
+| `system_prompt_rewriter.py` | `SystemPromptRewriter` | system_prompt 兼容增强器。优先复用旧版精确命中路径，在平台 persona/LTM 包装轻微变化时做轻量识别；若仍失败，则进入保守回退模式，优先保证回复链不断 |
 
 ### 消息处理模块
 
 | 文件 | 类 | 说明 |
 |------|-----|------|
-| `message_processor.py` | `MessageProcessor` | 为消息注入元数据（时间戳、发送者信息） |
+| `message_processor.py` | `MessageProcessor` | 为消息注入元数据（时间戳、发送者信息），并对原始 At 标签做内联解析增强（如 `[At:ID|解析结果]`）；旧版 `【@指向说明】` 仍保留为单次高层提醒 |
 | `context_manager.py` | `ContextManager` | 管理自定义消息存储 + 同步平台官方历史记录。处理历史截止时间戳 |
-| `message_cleaner.py` | `MessageCleaner` | 清洗历史消息，过滤系统提示词和标记 |
+| `message_cleaner.py` | `MessageCleaner` | 清洗历史消息，过滤系统提示词和标记；提取原始消息链中的 At / AtAll 结构，并提供空@消息双模式判定（`contains_ai` / `only_ai`） |
 | `image_handler.py` | `ImageHandler` | 调用图片转文字 API，提取图片 URL，处理多图 |
 | `image_description_cache.py` | `ImageDescriptionCache` | 本地缓存图片描述结果，避免重复 API 调用 |
-| `forward_message_parser.py` | `ForwardMessageParser` | 解析 QQ 合并转发消息，支持嵌套转发 |
+| `forward_message_parser.py` | `ForwardMessageParser` | 群聊与私聊共用的公共转发解析内核，面向 QQ / OneBot 合并转发，支持在深度限制内展开嵌套转发，并将结果折叠为单条可读文本继续下传 |
 | `welcome_message_parser.py` | `WelcomeMessageParser` | 检测新成员入群消息 |
 | `keyword_checker.py` | `KeywordChecker` | 匹配触发关键词和黑名单关键词 |
 | `emoji_detector.py` | `EmojiDetector` | 检测消息是否为纯表情/贴图 |
 | `message_quality_scorer.py` | `MessageQualityScorer` | 判断消息质量（疑问句加权、水聊降权） |
 | `content_filter.py` | `ContentFilter` | 按规则过滤 AI 输出内容 |
 | `ai_response_filter.py` | `AIResponseFilter` | 验证 AI 回复的有效性 |
+| `ai_error_formatter.py` | `format_ai_error()` | 🆕 AI 错误格式化器：识别 HTTP 状态码/HTML 网关错误页/上游模型空输出/网络异常，输出清晰可读的错误信息（区分「服务商故障」和「代码问题」） |
 | `platform_ltm_helper.py` | `PlatformLTMHelper` | 提取平台消息中的图片说明（caption） |
 
 ### 行为模拟模块
@@ -237,7 +248,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 | `attention_manager.py` | `AttentionManager` | 多用户注意力追踪（0-1连续值），指数衰减，情绪检测，溢出效应 |
 | `mood_tracker.py` | `MoodTracker` | 情绪状态追踪和检测 |
 | `humanize_mode.py` | `HumanizeMode` | 拟人模式状态机（沉默→关注→参与），动态消息阈值 |
-| `proactive_chat_manager.py` | `ProactiveChatManager` | 主动对话管理，沉默检测，时机判断 |
+| `proactive_chat_manager.py` | `ProactiveChatManager` | 主动对话管理，沉默检测，时机判断；其中主动对话预判断AI也支持独立的人格开关与指定人格 |
 | `typing_simulator.py` | `TypingSimulator` | 根据文本长度计算打字延迟 |
 | `typo_generator.py` | `TypoGenerator` | 基于拼音相似性生成自然错别字 |
 | `frequency_adjuster.py` | `FrequencyAdjuster` | 分析群聊消息频率，动态调整回复频率 |
@@ -251,7 +262,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 | `reply_density_manager.py` | `ReplyDensityManager` | 滑动窗口统计回复频率，实现软/硬限制 |
 | `message_cache_manager.py` | `MessageCacheManager` | 管理待处理消息池（缓存+转正机制） |
 | `memory_injector.py` | `MemoryInjector` | 集成长期记忆插件（LivingMemory / Legacy 模式） |
-| `tools_reminder.py` | `ToolsReminder` | 提取并提示 AI 当前可用工具 |
+| `tools_reminder.py` | `ToolsReminder` | 基于当前会话最终工具集构建工具提醒文本；支持会话插件集过滤、可选的人格过滤，并会在 `skills_like` 模式下自动降级为仅展示工具名/描述，`full` 或旧版配置下保持名称/描述/参数的完整展示；仅作用于提醒层 |
 | `_session_guard.py` | `SessionGuard` | 会话安全机制，防止并发冲突 |
 
 ---
@@ -266,6 +277,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 - **无概率筛选** — 私聊总是回复（不做"读空气"判断）
 - **消息聚合** — 支持等待并批量合并多条消息
 - **简化架构** — 较少的功能模块和配置项
+- **回复链路对齐群聊** — 私信回复生成同样使用 `event.request_llm()` + `on_llm_request` 恢复完整上下文；私信主动对话使用 `ProviderRequest + OnLLMRequestEvent` 兼容链路
 
 ### 文件结构
 
@@ -280,7 +292,7 @@ private_chat/
     ├── private_chat_message_processor.py       # 消息元数据注入
     ├── private_chat_context_manager.py         # 上下文管理（仅自定义存储）
     ├── private_chat_emoji_detector.py          # 表情检测
-    ├── private_chat_forward_message_parser.py  # 转发消息解析
+    ├── private_chat_forward_message_parser.py  # 转发消息解析（兼容导出，复用公共实现）
     ├── private_chat_keyword_checker.py         # 关键词检测
     ├── private_chat_memory_injector.py         # 记忆注入
     ├── private_chat_message_cleaner.py         # 消息清洗
@@ -295,7 +307,7 @@ private_chat/
     └── private_chat_content_filter.py          # 内容过滤
 ```
 
-> 每个文件基本对应 `utils/` 中同名模块的简化版本，适配私聊场景的需求差异。
+> 大多数文件基本对应 `utils/` 中同名模块的私聊适配版本；其中 `private_chat_forward_message_parser.py` 已收敛为兼容导出层，直接复用 `utils/forward_message_parser.py` 的公共转发解析实现。
 
 ---
 
@@ -307,7 +319,8 @@ private_chat/
 |------|------|
 | `history_cutoff.json` | 历史截止时间戳，记录 `gcp_reset` 执行时间 |
 | `bans.json` | IP 封禁记录持久化（Web 面板） |
-| `web_panel_password.json` | Web 面板密码哈希存储 |
+| `web_data/auth.json` | Web 面板密码数据（密码哈希、salt、hash_version、password_changed 标志） |
+| `web_data/jwt_secret.json` | Web 面板 JWT 签名密钥及会话管理数据（与 auth.json 物理隔离） |
 
 ---
 
@@ -373,4 +386,4 @@ on_group_message()
 
 ---
 
-[← 返回 README](../README.md) | [深度指南与常见问题](ARCHITECTURE.md) | [消息工作流程 →](MESSAGE_WORKFLOW.md) | [配置项参考 →](CONFIG_REFERENCE.md)
+[← 返回 README](../README.md) | [深度指南与常见问题](ARCHITECTURE.md) | [消息工作流程 →](MESSAGE_WORKFLOW.md) | [配置项参考 →](CONFIG_REFERENCE.md) | [桌面端兼容 →](DESKTOP_COMPATIBILITY.md)

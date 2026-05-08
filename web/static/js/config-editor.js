@@ -7,6 +7,80 @@ const ConfigEditor = {
     _currentNode: null,
     _schema: {},
 
+    _escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+
+    _getRealEntryNodesByKey(key) {
+        if (typeof FlowData === 'undefined' || typeof FlowData.getAllNodes !== 'function') return [];
+        const seen = new Set();
+        return FlowData.getAllNodes().filter(node => {
+            if (!node || !Array.isArray(node.keys) || !node.keys.includes(key)) return false;
+            if (node.internal) return false;
+            if (seen.has(node.id)) return false;
+            seen.add(node.id);
+            return true;
+        });
+    },
+
+    _getStepPath(stepId) {
+        if (typeof FlowData === 'undefined' || typeof FlowData.getStepContext !== 'function') return stepId;
+        const ctx = FlowData.getStepContext(stepId);
+        if (!ctx) return stepId;
+        return `${ctx.pipeline.name} → ${ctx.stage.name} → ${ctx.step.name}`;
+    },
+
+    _getEffectiveFieldMeta(node, key, sharedMeta, explicitFieldMeta) {
+        const entryNodes = this._getRealEntryNodesByKey(key);
+        if (entryNodes.length < 2) return null;
+
+        const relatedNodes = entryNodes.map(entry => {
+            if (typeof FlowData !== 'undefined' && typeof FlowData.getNodeById === 'function') {
+                return FlowData.getNodeById(entry.id) || entry;
+            }
+            return entry;
+        });
+
+        const hasSharedSemantics = !!explicitFieldMeta
+            || !!sharedMeta?.isShared
+            || relatedNodes.some(entry => {
+                if (entry.fieldMeta?.[key]) return true;
+                if (entry.sharedConfig?.keys?.includes(key)) return true;
+                return !!(entry.shared && entry.sharedFrom);
+            });
+
+        if (!hasSharedSemantics) return null;
+
+        const currentPath = this._getStepPath(node.id);
+        const otherPaths = entryNodes
+            .filter(entry => entry.id !== node.id)
+            .map(entry => this._getStepPath(entry.id));
+        if (otherPaths.length === 0) return null;
+
+        const badgeText = explicitFieldMeta?.badgeText
+            || (sharedMeta?.isShared ? (sharedMeta.badgeText || '共用配置') : '共用配置');
+        const tooltipTitle = explicitFieldMeta?.tooltipTitle
+            || (sharedMeta?.isShared ? '共用配置说明' : '同一配置项');
+
+        const baseText = explicitFieldMeta?.tooltipText
+            || '此项在多个真实配置入口中出现，但它们指向的是同一个真实配置值；在任意一处修改，其他入口都会同步生效。';
+
+        const locationText = otherPaths.length === 1
+            ? `当前入口：${currentPath}\n共用入口：${otherPaths[0]}`
+            : `当前入口：${currentPath}\n其他共用入口：\n• ${otherPaths.join('\n• ')}`;
+
+        return {
+            badgeText,
+            tooltipTitle,
+            tooltipText: `${baseText}\n\n${locationText}`
+        };
+    },
+
     /** 渲染节点的所有配置项到容器 */
     render(container, node, schema, focusKey) {
         container.innerHTML = '';
@@ -15,6 +89,9 @@ const ConfigEditor = {
 
         const disabled = node.disabled ||
             (node.parentToggle && !TechTree.getVal(node.parentToggle));
+        const sharedConfig = node.sharedConfig || null;
+        const sharedKeys = sharedConfig?.keys || [];
+        const fieldMetaMap = node.fieldMeta || {};
 
         // 依赖提示
         if (node.parentToggle && !TechTree.getVal(node.parentToggle)) {
@@ -23,6 +100,19 @@ const ConfigEditor = {
             const ps = schema[node.parentToggle];
             hint.textContent = `⚠️ 需开启「${ps ? ps.description : node.parentToggle}」才生效`;
             container.appendChild(hint);
+        }
+
+        // 共用配置提示横幅
+        if (sharedConfig && sharedKeys.length > 0) {
+            const banner = document.createElement('div');
+            banner.className = 'shared-config-banner';
+            banner.innerHTML = `
+                <span class="shared-config-banner-icon">🔗</span>
+                <span class="shared-config-banner-text">
+                    <strong>${sharedConfig.title || '这是一个共用配置'}</strong><br>
+                    ${sharedConfig.text || '以下带有「共用」标识的配置项会在多个节点之间同步生效。'}
+                </span>`;
+            container.appendChild(banner);
         }
 
         // 只读安全项提示横幅（仅当节点有 readonlyKeys 时显示）
@@ -43,9 +133,17 @@ const ConfigEditor = {
             const s = schema[key];
             if (!s) return;
             const isReadonly = readonlyKeys.includes(key);
+            const isShared = sharedKeys.includes(key);
+            const sharedMeta = isShared ? {
+                isShared: true,
+                badgeText: sharedConfig.badgeText || '共用',
+                note: sharedConfig.fieldNote || '此项属于共享配置，修改后会同步影响读空气AI、主动对话判断AI、频率判断AI。'
+            } : null;
+            const explicitFieldMeta = fieldMetaMap[key] || null;
+            const fieldMeta = this._getEffectiveFieldMeta(node, key, sharedMeta, explicitFieldMeta);
             const field = isReadonly
                 ? this._createReadonlyField(key, s)
-                : this._createField(key, s, disabled);
+                : this._createField(key, s, disabled, sharedMeta, fieldMeta);
             container.appendChild(field);
 
             // 滚动到聚焦项（仅滚动 config-panel-body，不影响祖先容器）
@@ -91,17 +189,53 @@ const ConfigEditor = {
     },
 
     /** 创建单个配置字段 */
-    _createField(key, schema, disabled) {
+    _createField(key, schema, disabled, sharedMeta = null, fieldMeta = null) {
         const field = document.createElement('div');
         field.className = 'config-field';
         if (disabled) field.classList.add('disabled');
         if (key in TechTree._modified) field.classList.add('modified');
+        if (sharedMeta?.isShared) field.classList.add('config-field-shared');
+
+        if (fieldMeta?.badgeText) {
+            field.classList.add('config-field-has-tag');
+            const tag = document.createElement('div');
+            tag.className = 'config-field-tag';
+            tag.setAttribute('tabindex', '0');
+            tag.setAttribute('role', 'note');
+            const tooltipTitle = fieldMeta.tooltipTitle
+                ? `<strong>${this._escapeHtml(fieldMeta.tooltipTitle)}</strong>`
+                : '';
+            const tooltipText = fieldMeta.tooltipText
+                ? `<span>${this._escapeHtml(fieldMeta.tooltipText)}</span>`
+                : '';
+            tag.innerHTML = `
+                <span class="config-field-tag-label">${this._escapeHtml(fieldMeta.badgeText)}</span>
+                <span class="config-field-tag-tooltip">
+                    ${tooltipTitle}
+                    ${tooltipText}
+                </span>`;
+            field.appendChild(tag);
+        }
 
         // 标签
         const label = document.createElement('div');
         label.className = 'config-field-label';
         label.textContent = (schema.description || key).replace(/^[^\s]+\s/, '');
+        if (sharedMeta?.isShared) {
+            const badge = document.createElement('span');
+            badge.className = 'config-shared-badge';
+            badge.textContent = sharedMeta.badgeText || '共用';
+            label.appendChild(document.createTextNode(' '));
+            label.appendChild(badge);
+        }
         field.appendChild(label);
+
+        if (sharedMeta?.isShared && sharedMeta.note) {
+            const sharedNote = document.createElement('div');
+            sharedNote.className = 'config-field-shared-note';
+            sharedNote.textContent = sharedMeta.note;
+            field.appendChild(sharedNote);
+        }
 
         // 提示
         if (schema.hint) {
@@ -223,7 +357,7 @@ const ConfigEditor = {
         ta.rows = 4;
         ta.value = val !== undefined ? String(val) : '';
         ta.addEventListener('change', () => TechTree.setVal(key, ta.value));
-        // Prevent wheel event from bubbling to parent to allow scrolling inside textarea
+        // 阻止滚轮事件冒泡到父级，允许在 textarea 内部独立滚动
         ta.addEventListener('wheel', (e) => {
             e.stopPropagation();
         });

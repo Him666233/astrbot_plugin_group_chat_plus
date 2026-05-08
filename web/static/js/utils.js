@@ -100,6 +100,35 @@ const Utils = {
         });
     },
 
+    /** 支持作者弹窗 */
+    supportAuthorDialog() {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'confirm-overlay';
+            overlay.innerHTML = `
+                <div class="confirm-box support-author-dialog">
+                    <h3>❤️ 支持作者</h3>
+                    <p>即将跳转至爱发电进行捐赠。</p>
+                    <div class="support-author-dialog__note">
+                        <p>如果这个插件帮到了你，欢迎通过爱发电支持作者持续维护与更新。</p>
+                        <p>你的支持可以帮助作者投入更多时间优化功能、修复问题，并持续提供免费开源版本。</p>
+                    </div>
+                    <div class="confirm-actions">
+                        <button class="btn" data-action="cancel">取消</button>
+                        <button class="btn btn-primary" data-action="ok">确认跳转</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+            overlay.addEventListener('click', e => {
+                const action = e.target.dataset.action;
+                if (action) {
+                    overlay.remove();
+                    resolve(action === 'ok');
+                }
+            });
+        });
+    },
+
     /** 反馈对话框：选择GitHub反馈或加入群聊 */
     feedbackDialog() {
         return new Promise(resolve => {

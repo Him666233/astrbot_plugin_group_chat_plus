@@ -43,8 +43,13 @@ class ToolsReminder:
                 logger.warning("无法获取LLM工具管理器")
                 return []
 
-            # 直接访问func_list属性获取所有工具
-            tools = tool_manager.func_list
+            # 同时兼容 FunctionToolManager(.func_list) 与 ToolSet(.tools)
+            tools = getattr(tool_manager, "func_list", None)
+            if tools is None:
+                tools = getattr(tool_manager, "tools", None)
+            if tools is None and hasattr(tool_manager, "get_full_tool_set"):
+                tool_set = tool_manager.get_full_tool_set()
+                tools = getattr(tool_set, "tools", [])
 
             tool_list = []
             for tool in tools:
@@ -83,12 +88,15 @@ class ToolsReminder:
             return []
 
     @staticmethod
-    def format_tools_info(tools: List[Dict]) -> str:
+    def format_tools_info(
+        tools: List[Dict], include_parameters: bool = True
+    ) -> str:
         """
         格式化工具列表为可读文本
 
         Args:
             tools: 工具信息列表
+            include_parameters: 是否包含参数列表
 
         Returns:
             格式化后的文本
@@ -104,8 +112,7 @@ class ToolsReminder:
             formatted_parts.append(f"{idx}. 工具名称: {tool['name']}")
             formatted_parts.append(f"   功能描述: {tool['description']}")
 
-            # 如果有参数信息,也列出来
-            if tool.get("parameters"):
+            if include_parameters and tool.get("parameters"):
                 formatted_parts.append("   参数:")
                 for param in tool["parameters"]:
                     param_line = f"     - {param['name']} ({param['type']})"
@@ -180,6 +187,7 @@ class ToolsReminder:
         original_message: str,
         context: Context,
         allowed_tool_names: Optional[List[str]] = None,
+        include_parameters: bool = True,
     ) -> str:
         """
         将工具信息注入到消息
@@ -187,6 +195,8 @@ class ToolsReminder:
         Args:
             original_message: 原始消息
             context: Context对象
+            allowed_tool_names: 允许的工具名称列表，None表示不过滤
+            include_parameters: 是否包含参数列表
 
         Returns:
             注入工具信息后的文本
@@ -207,7 +217,9 @@ class ToolsReminder:
                 return original_message
 
             # 格式化工具信息
-            tools_info = ToolsReminder.format_tools_info(tools)
+            tools_info = ToolsReminder.format_tools_info(
+                tools, include_parameters=include_parameters
+            )
 
             # 注入到消息中
             injected_message = (

@@ -16,6 +16,7 @@ v1.1.0 更新：
 
 import time
 import asyncio
+import copy
 from datetime import datetime
 from typing import Dict, Any, Optional
 from astrbot.api.all import *
@@ -54,7 +55,17 @@ class ProbabilityManager:
     """
 
     # 使用字典保存每个聊天的概率状态
-    # 格式: {chat_key: {"probability": float, "boosted_until": timestamp}}
+    # 格式:
+    # {
+    #   chat_key: {
+    #       "base_probability": float,
+    #       "base_until": timestamp,
+    #       "base_source": str,
+    #       "reply_boost_probability": float,
+    #       "reply_boost_until": timestamp,
+    #       "reply_boost_source": str,
+    #   }
+    # }
     _probability_status: Dict[str, Dict[str, Any]] = {}
     _lock = asyncio.Lock()  # 异步锁
 
@@ -128,6 +139,83 @@ class ProbabilityManager:
         return f"{platform_name}_{chat_type}_{chat_id}"
 
     @staticmethod
+    def _clamp_probability(value: Any, fallback: float, label: str) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[概率管理器] {label} 值 '{value}' 无法转换为浮点数，已回退为 {fallback:.2f}"
+            )
+            return fallback
+
+        if parsed < 0.0 or parsed > 1.0:
+            clamped = max(0.0, min(1.0, parsed))
+            logger.warning(
+                f"[概率管理器] {label} 值 {parsed} 超出范围[0,1]，已矫正为 {clamped:.2f}"
+            )
+            return clamped
+
+        return parsed
+
+    @staticmethod
+    def _normalize_duration(duration: Any, fallback: int, label: str) -> int:
+        try:
+            parsed = int(duration)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[概率管理器] {label} 值 '{duration}' 无法转换为整数，已回退为 {fallback} 秒"
+            )
+            return fallback
+
+        if parsed <= 0:
+            logger.warning(
+                f"[概率管理器] {label} 值 {parsed} 小于等于 0，已回退为 {fallback} 秒"
+            )
+            return fallback
+
+        return parsed
+
+    @staticmethod
+    def _migrate_legacy_status(status: Dict[str, Any], chat_key: str) -> Dict[str, Any]:
+        migrated = copy.deepcopy(status)
+        legacy_probability = migrated.get("probability")
+        legacy_until = migrated.get("boosted_until")
+
+        if legacy_probability is not None or legacy_until is not None:
+            logger.warning(
+                f"[概率管理器] 会话 {chat_key} 检测到旧版概率状态结构，已自动迁移为新结构"
+            )
+            if "base_probability" not in migrated and legacy_probability is not None:
+                migrated["base_probability"] = legacy_probability
+            if "base_until" not in migrated and legacy_until is not None:
+                migrated["base_until"] = legacy_until
+            migrated.setdefault("base_source", "legacy_probability_state")
+            migrated.pop("probability", None)
+            migrated.pop("boosted_until", None)
+
+        return migrated
+
+    @staticmethod
+    def _compact_status(status: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        compacted = {
+            key: value
+            for key, value in status.items()
+            if value is not None and value != ""
+        }
+        return compacted or None
+
+    @staticmethod
+    async def get_probability_status_snapshot(chat_key: str) -> Dict[str, Any]:
+        async with ProbabilityManager._lock:
+            status = ProbabilityManager._probability_status.get(chat_key)
+            if not status:
+                return {}
+            migrated = ProbabilityManager._migrate_legacy_status(status, chat_key)
+            if migrated != status:
+                ProbabilityManager._probability_status[chat_key] = migrated
+            return copy.deepcopy(migrated)
+
+    @staticmethod
     async def get_current_probability(
         platform_name: str, is_private: bool, chat_id: str, initial_probability: float
     ) -> float:
@@ -160,28 +248,108 @@ class ProbabilityManager:
         # 生成本次会话的运行时签名
         guard_session(chat_key, probability=0.05)
 
-        # ========== 第一步：获取基础概率（考虑常规提升） ==========
-        base_probability = initial_probability
+        # ========== 第一步：获取基础概率（考虑基础覆盖 + 传统回复后提升） ==========
+        base_probability = ProbabilityManager._clamp_probability(
+            initial_probability, 0.0, f"会话 {chat_key} 的 initial_probability"
+        )
+        base_source = "initial_probability"
 
         async with ProbabilityManager._lock:
-            if chat_key in ProbabilityManager._probability_status:
-                status = ProbabilityManager._probability_status[chat_key]
-                boosted_until = status.get("boosted_until", 0)
+            status = ProbabilityManager._probability_status.get(chat_key)
+            if status:
+                migrated = ProbabilityManager._migrate_legacy_status(status, chat_key)
+                if migrated != status:
+                    ProbabilityManager._probability_status[chat_key] = migrated
+                status = migrated
 
-                # 检查是否还在提升期内
-                if current_time < boosted_until:
-                    base_probability = status.get("probability", initial_probability)
-                    if DEBUG_MODE:
-                        logger.info(
-                            f"会话 {chat_key} 使用常规提升概率: {base_probability:.2f}"
+                base_until = status.get("base_until")
+                if base_until is not None:
+                    try:
+                        base_until = float(base_until)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            f"[概率管理器] 会话 {chat_key} 的基础概率到期时间无效，已清理该状态"
                         )
-                else:
-                    # 超时了，清理记录
+                        status.pop("base_probability", None)
+                        status.pop("base_until", None)
+                        status.pop("base_source", None)
+                        base_until = None
+
+                if base_until is not None:
+                    if base_until < 0:
+                        logger.warning(
+                            f"[概率管理器] 会话 {chat_key} 的基础概率到期时间为负值，已清理该状态"
+                        )
+                        status.pop("base_probability", None)
+                        status.pop("base_until", None)
+                        status.pop("base_source", None)
+                    elif current_time < base_until:
+                        base_probability = ProbabilityManager._clamp_probability(
+                            status.get("base_probability", base_probability),
+                            base_probability,
+                            f"会话 {chat_key} 的基础概率状态",
+                        )
+                        base_source = status.get("base_source", "base_probability")
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"会话 {chat_key} 使用基础概率覆盖: {base_probability:.2f} (来源: {base_source})"
+                            )
+                    else:
+                        status.pop("base_probability", None)
+                        status.pop("base_until", None)
+                        status.pop("base_source", None)
+                        if DEBUG_MODE:
+                            logger.info(
+                                f"会话 {chat_key} 的基础概率覆盖已超时，恢复为初始概率: {base_probability:.2f}"
+                            )
+
+                reply_boost_until = status.get("reply_boost_until")
+                if reply_boost_until is not None:
+                    try:
+                        reply_boost_until = float(reply_boost_until)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            f"[概率管理器] 会话 {chat_key} 的传统回复后提升到期时间无效，已清理该状态"
+                        )
+                        status.pop("reply_boost_probability", None)
+                        status.pop("reply_boost_until", None)
+                        status.pop("reply_boost_source", None)
+                        reply_boost_until = None
+
+                if reply_boost_until is not None:
+                    if reply_boost_until < 0:
+                        logger.warning(
+                            f"[概率管理器] 会话 {chat_key} 的传统回复后提升到期时间为负值，已清理该状态"
+                        )
+                        status.pop("reply_boost_probability", None)
+                        status.pop("reply_boost_until", None)
+                        status.pop("reply_boost_source", None)
+                    elif current_time < reply_boost_until:
+                        boosted_probability = ProbabilityManager._clamp_probability(
+                            status.get("reply_boost_probability", base_probability),
+                            base_probability,
+                            f"会话 {chat_key} 的传统回复后提升概率",
+                        )
+                        base_probability = boosted_probability
+                        base_source = status.get(
+                            "reply_boost_source", "after_reply_probability"
+                        )
+                        logger.info(
+                            f"[传统回复后提升] 会话 {chat_key} 当前使用临时提升概率: {base_probability:.2f}"
+                        )
+                    else:
+                        status.pop("reply_boost_probability", None)
+                        status.pop("reply_boost_until", None)
+                        status.pop("reply_boost_source", None)
+                        logger.info(
+                            f"[传统回复后提升] 会话 {chat_key} 的临时提升已过期，恢复到基础概率层"
+                        )
+
+                compacted = ProbabilityManager._compact_status(status)
+                if compacted is None:
                     del ProbabilityManager._probability_status[chat_key]
-                    if DEBUG_MODE:
-                        logger.info(
-                            f"会话 {chat_key} 概率提升已超时，恢复为初始概率: {initial_probability:.2f}"
-                        )
+                else:
+                    ProbabilityManager._probability_status[chat_key] = compacted
 
         # ========== 第二步：应用动态时间段调整 ==========
         if ProbabilityManager._enable_dynamic_reply_probability:
@@ -220,12 +388,11 @@ class ProbabilityManager:
                     base_probability = adjusted_probability
 
                     if abs(time_factor - 1.0) > 1e-9:
-                        if DEBUG_MODE:
-                            logger.info(
-                                f"[动态时间调整-普通回复] 会话 {chat_key} "
-                                f"原始概率={original_base:.4f}, 时间系数={time_factor:.2f}, "
-                                f"调整后概率={time_adjusted_probability:.4f}"
-                            )
+                        logger.info(
+                            f"[动态时间调整-普通回复] 会话 {chat_key} "
+                            f"原始概率={original_base:.4f}, 时间系数={time_factor:.2f}, "
+                            f"调整后概率={time_adjusted_probability:.4f}"
+                        )
             except ImportError:
                 logger.warning(
                     "[动态时间调整-普通回复] TimePeriodManager未导入，跳过时间调整"
@@ -269,11 +436,10 @@ class ProbabilityManager:
                         min_limit, min(max_limit, final_probability)
                     )
                     if abs(original_final - final_probability) > 1e-9:
-                        if DEBUG_MODE:
-                            logger.info(
-                                f"[临时概率提升+硬性限制] 会话 {chat_key} "
-                                f"应用硬性限制: {original_final:.2f} → {final_probability:.2f}"
-                            )
+                        logger.info(
+                            f"[临时概率提升+硬性限制] 会话 {chat_key} "
+                            f"应用硬性限制: {original_final:.2f} → {final_probability:.2f}"
+                        )
 
                 return final_probability
         except ImportError:
@@ -335,17 +501,29 @@ class ProbabilityManager:
         """
         chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
         current_time = time.time()
-        boosted_until = current_time + duration
+        safe_probability = ProbabilityManager._clamp_probability(
+            boosted_probability,
+            0.8,
+            f"会话 {chat_key} 的传统回复后提升概率",
+        )
+        safe_duration = ProbabilityManager._normalize_duration(
+            duration,
+            120,
+            f"会话 {chat_key} 的传统回复后提升持续时间",
+        )
+        boosted_until = current_time + safe_duration
 
         async with ProbabilityManager._lock:
-            ProbabilityManager._probability_status[chat_key] = {
-                "probability": boosted_probability,
-                "boosted_until": boosted_until,
-            }
+            status = ProbabilityManager._probability_status.get(chat_key, {})
+            status = ProbabilityManager._migrate_legacy_status(status, chat_key)
+            status["reply_boost_probability"] = safe_probability
+            status["reply_boost_until"] = boosted_until
+            status["reply_boost_source"] = "after_reply_probability"
+            ProbabilityManager._probability_status[chat_key] = status
 
         logger.info(
-            f"会话 {chat_key} 概率已提升至 {boosted_probability}, "
-            f"持续 {duration} 秒 (至 {time.strftime('%H:%M:%S', time.localtime(boosted_until))})"
+            f"[传统回复后提升] 会话 {chat_key} 已启用临时提升: {safe_probability:.2f}, "
+            f"持续 {safe_duration} 秒 (至 {time.strftime('%H:%M:%S', time.localtime(boosted_until))})"
         )
 
     @staticmethod
@@ -392,15 +570,27 @@ class ProbabilityManager:
         """
         chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
         current_time = time.time()
-        boosted_until = current_time + duration
+        safe_probability = ProbabilityManager._clamp_probability(
+            new_probability,
+            0.0,
+            f"会话 {chat_key} 的基础概率覆盖值",
+        )
+        safe_duration = ProbabilityManager._normalize_duration(
+            duration,
+            600,
+            f"会话 {chat_key} 的基础概率覆盖持续时间",
+        )
+        boosted_until = current_time + safe_duration
 
         async with ProbabilityManager._lock:
-            ProbabilityManager._probability_status[chat_key] = {
-                "probability": new_probability,
-                "boosted_until": boosted_until,
-            }
+            status = ProbabilityManager._probability_status.get(chat_key, {})
+            status = ProbabilityManager._migrate_legacy_status(status, chat_key)
+            status["base_probability"] = safe_probability
+            status["base_until"] = boosted_until
+            status["base_source"] = "frequency_adjuster"
+            ProbabilityManager._probability_status[chat_key] = status
 
         logger.info(
-            f"[频率调整] 会话 {chat_key} 基础概率已调整为 {new_probability:.2f}, "
-            f"持续 {duration} 秒"
+            f"[频率调整] 会话 {chat_key} 基础概率已调整为 {safe_probability:.2f}, "
+            f"持续 {safe_duration} 秒"
         )

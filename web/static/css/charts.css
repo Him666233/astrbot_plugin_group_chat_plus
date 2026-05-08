@@ -1,4 +1,4 @@
-/* ========== Charts Grid ========== */
+/* ========== 图表网格布局 ========== */
 #charts-grid {
     flex: 1;
     overflow-y: auto;
@@ -216,4 +216,56 @@
     display: flex;
     gap: 8px;
     justify-content: center;
+}
+
+/* ========== File Editor ========== */
+.file-editor {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 12px;
+}
+.file-editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+.file-editor.textarea {
+    width: 100%;
+    min-height: 400px;
+    padding: 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+}
+.file-editor.textarea:focus {
+    border-color: var(--accent-red);
+}
+
+/* ========== Mobile Session Detail Keyboard Handling ========== */
+@media (max-width: 767px) {
+    #session-detail {
+        transition: transform 0.3s ease;
+        will-change: transform;
+    }
+    
+    .file-editor.textarea {
+        /* 在移动端增大触控区域 */
+        font-size: 14px;
+        min-height: 300px;
+    }
+    
+    /* 确保 session-detail 可以被滚动 */
+    #session-detail.tab-history-active {
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+    }
 }

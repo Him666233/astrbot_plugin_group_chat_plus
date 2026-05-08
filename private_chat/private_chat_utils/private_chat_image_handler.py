@@ -12,10 +12,12 @@
 """
 
 import asyncio
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from astrbot.api.all import *
 from astrbot.api.message_components import Face, At, Reply
 from .private_chat_image_description_cache import ImageDescriptionCache
+from ...utils.ai_error_formatter import format_ai_error
+from ...utils.image_handler import ImageHandler as _GroupImageHandler
 
 # 详细日志开关
 DEBUG_MODE: bool = False
@@ -31,6 +33,11 @@ class ImageHandler:
     3. 图片转文字模式：调用AI将图片转为文字描述（含省钱缓存）
     4. 串行处理多张图片，缓存命中不计入AI调用限制
     """
+
+    @staticmethod
+    def _coerce_plain_text(value: Any) -> str:
+        return _GroupImageHandler._coerce_plain_text(value)
+
 
     @staticmethod
     async def process_message_images(
@@ -189,7 +196,7 @@ class ImageHandler:
                 has_image = True
                 image_components.append(component)
             elif isinstance(component, Plain):
-                if component.text and component.text.strip():
+                if ImageHandler._coerce_plain_text(component.text).strip():
                     has_text = True
             elif isinstance(component, Reply):
                 has_text = True
@@ -260,7 +267,7 @@ class ImageHandler:
 
         for component in message_chain:
             if isinstance(component, Plain):
-                text_parts.append(component.text)
+                text_parts.append(ImageHandler._coerce_plain_text(component.text))
             elif isinstance(component, Image):
                 continue
             else:
@@ -428,7 +435,7 @@ class ImageHandler:
                     ai_call_count += 1  # 超时也计入 AI 调用计数（消耗了时间）
                     continue
                 except Exception as e:
-                    logger.error(f"[私信图片处理] 转换图片 {idx} 时发生错误: {e}")
+                    logger.error(f"{format_ai_error(e, f'私信图片转文字-{idx}')}")
                     continue
 
             # 如果没有成功转换任何图片，返回 None
@@ -440,7 +447,7 @@ class ImageHandler:
             result_parts = []
             for chain_idx, component in enumerate(message_chain):
                 if isinstance(component, Plain):
-                    result_parts.append(component.text)
+                    result_parts.append(ImageHandler._coerce_plain_text(component.text))
                 elif isinstance(component, Image):
                     if chain_idx in image_chain_to_idx:
                         img_idx = image_chain_to_idx[chain_idx]
@@ -463,5 +470,5 @@ class ImageHandler:
             return result_text
 
         except Exception as e:
-            logger.error(f"[私信图片处理] 图片转文字过程发生错误: {e}")
+            logger.error(f"{format_ai_error(e, '私信图片转文字')}")
             return None

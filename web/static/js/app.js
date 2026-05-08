@@ -6,24 +6,28 @@
 const App = {
     _currentView: 'tech-tree',
     _initialized: false,
+    _authMonitor: null,
+    _configFileName: '',
 
     /** 应用入口（面板页面加载时调用） */
     async start() {
-        // 面板页已由服务端验证 token，这里做一次客户端 token 检查
-        if (!Api._token) {
-            window.location.href = '/';
-            return;
+        const configMeta = await Api.getConfig();
+        if (configMeta && configMeta.ok) {
+            this._configFileName = configMeta.config_file_name || '';
         }
 
-        // 验证 token 有效性
+        const heartbeatConfig = this._buildHeartbeatConfig(
+            configMeta && configMeta.ok ? (configMeta.config || {}) : {}
+        );
+        this._installAuthMonitor(heartbeatConfig);
+
         const verify = await Api.verify();
         if (!verify.ok) {
-            Api.clearToken();
-            window.location.href = '/';
+            this._redirectToLogin(verify.reason || 'expired', verify.msg || '登录已失效，请重新登录');
             return;
         }
 
-        // 进入主界面
+        this._authMonitor?.markAuthenticated?.(verify);
         this.showPage('main');
         await this._initMain();
     },
@@ -46,6 +50,8 @@ const App = {
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
         const nav = document.querySelector(`.nav-item[data-view="${name}"]`);
         if (nav) nav.classList.add('active');
+
+        this._updateConfigBadgeVisibility();
 
         // 按需初始化视图
         this._activateView(name);
@@ -96,13 +102,27 @@ const App = {
             });
         });
 
+        this._ensureConfigBadge();
+        this._updateConfigBadgeVisibility();
+
         // 退出登录
         const btnLogout = document.getElementById('btn-logout');
         if (btnLogout) {
             btnLogout.addEventListener('click', async () => {
                 await Api.logout();
-                Api.clearToken();
-                window.location.href = '/';
+                this._authMonitor?.broadcast?.('logout');
+                this._redirectToLogin('logout', '您已退出登录', { showAlert: false });
+            });
+        }
+
+        // 支持作者
+        const btnSupportAuthor = document.getElementById('btn-support-author');
+        if (btnSupportAuthor) {
+            btnSupportAuthor.addEventListener('click', async () => {
+                const ok = await Utils.supportAuthorDialog();
+                if (ok) {
+                    window.open('https://afdian.com/a/chat_plus', '_blank');
+                }
             });
         }
 
@@ -157,7 +177,7 @@ const App = {
             {
                 id: 'reset',
                 name: '全局重置 (gcp_reset)',
-                desc: '重置所有插件数据（注意力、情绪、概率等运行时状态）。不影响聊天记录和配置文件。',
+                desc: '重置所有插件数据（注意力、情绪、概率等运行时状态）并清除所有会话的聊天记录缓存。不影响配置文件。',
                 icon: '🔄',
                 color: 'orange',
                 exec: async (mode) => {
@@ -587,6 +607,7 @@ const App = {
                 <span class="security-readonly-banner-icon">🔒</span>
                 <span class="security-readonly-banner-text">
                     以下配置属于安全敏感项，出于安全考虑不允许在 Web 端修改。<br>
+                    其中也包括心跳探测频率/重试策略，这些参数会直接影响会话失效探测与防护行为。<br>
                     如需调整，请前往 <strong>AstrBot 平台 → 插件配置</strong> 中对应的传统配置项进行修改。
                 </span>
             </div>
@@ -594,6 +615,16 @@ const App = {
             <div id="sec-readonly-content" class="hidden" style="display:flex;flex-direction:column;gap:8px;"></div>`;
         container.appendChild(secSection);
         this._loadSecReadonly();
+
+        // ---- 会话心跳状态区 ----
+        const heartbeatSection = document.createElement('div');
+        heartbeatSection.className = 'settings-section';
+        heartbeatSection.innerHTML = `
+            <h3>💓 会话心跳状态</h3>
+            <div id="heartbeat-status-loading" class="chart-empty" style="padding:12px;">加载中...</div>
+            <div id="heartbeat-status-content" class="hidden" style="display:flex;flex-direction:column;gap:8px;"></div>`;
+        container.appendChild(heartbeatSection);
+        this._loadHeartbeatStatus();
 
         // ---- 修改密码区 ----
         const pwSection = document.createElement('div');
@@ -799,6 +830,20 @@ const App = {
             });
         }
 
+        // ---- 桌面端兼容区 ----
+        const desktopSection = document.createElement('div');
+        desktopSection.className = 'settings-section';
+        desktopSection.innerHTML = `
+            <h3>🖥️ 桌面端兼容</h3>
+            <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;line-height:1.7;">
+                AstrBot 桌面端（Desktop Edition）使用 Tauri 托管后端进程，重启机制与标准版不同。<br>
+                插件支持自动检测运行环境，也可手动指定。修改后需 <strong>保存并重启插件</strong> 生效。
+            </p>
+            <div id="desktop-loading" class="chart-empty" style="padding:12px;">加载中...</div>
+            <div id="desktop-content" class="hidden" style="display:flex;flex-direction:column;gap:12px;max-width:500px;"></div>`;
+        container.appendChild(desktopSection);
+        this._loadDesktopConfig();
+
         // ---- Web 面板可调配置区 ----
         const webCfgSection = document.createElement('div');
         webCfgSection.className = 'settings-section';
@@ -827,7 +872,7 @@ const App = {
                 <br>
                 <strong>总开关 / 端口 / 监听地址 / 密码重置</strong>：这些配置出于安全考虑只能通过 AstrBot 插件配置页修改，上方「安全敏感配置」区展示了其当前值供参考。<br>
                 <br>
-                <strong>日志清理 / 防爬虫 / 信任反向代理</strong>：在「Web 面板运行配置」区可直接修改，修改后需保存并重启插件。
+                <strong>日志清理 / 防爬虫 / 已登录请求限速</strong>：在「Web 面板运行配置」区可直接修改，修改后需保存并重启插件。
             </p>`;
         container.appendChild(infoSection);
     },
@@ -856,6 +901,11 @@ const App = {
             'web_panel_port',
             'web_panel_host',
             'web_panel_reset_password',
+            'web_panel_trust_proxy',
+            'web_panel_heartbeat_visible_interval_seconds',
+            'web_panel_heartbeat_hidden_interval_seconds',
+            'web_panel_heartbeat_retry_base_seconds',
+            'web_panel_heartbeat_retry_max_seconds',
         ];
 
         readonlyKeys.forEach(key => {
@@ -869,12 +919,143 @@ const App = {
                 ? (val ? '已开启' : '已关闭')
                 : (val === '' ? '（空）' : String(val));
             const desc = (s.description || key).replace(/^[^\s]+\s/, '');
+            const readonlyNote = key.startsWith('web_panel_heartbeat_')
+                ? '⚠️ 心跳探测频率属于安全敏感配置，请在 AstrBot 平台插件配置页修改'
+                : '⚠️ 此项为安全敏感配置，请在 AstrBot 平台插件配置页修改';
             row.innerHTML = `
                 <div class="config-field-label">🔒 ${desc}</div>
                 <div class="config-field-readonly-value">当前值：${displayVal}</div>
-                <div class="config-field-readonly-note">⚠️ 此项为安全敏感配置，请在 AstrBot 平台插件配置页修改</div>`;
+                <div class="config-field-readonly-note">${readonlyNote}</div>`;
             content.appendChild(row);
         });
+    },
+
+    /** 加载桌面端兼容配置 */
+    async _loadDesktopConfig() {
+        const loading = document.getElementById('desktop-loading');
+        const content = document.getElementById('desktop-content');
+        if (!loading || !content) return;
+
+        const res = await Api.getConfig();
+        if (!res.ok) {
+            loading.textContent = '加载失败';
+            return;
+        }
+
+        loading.classList.add('hidden');
+        content.classList.remove('hidden');
+        content.style.display = 'flex';
+
+        const cfg = res.config || {};
+        const schema = res.schema || {};
+        const desktopInfo = res.desktop_info || {};
+
+        // 当前检测状态指示
+        const statusRow = document.createElement('div');
+        statusRow.style.cssText = 'padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.6;';
+        if (desktopInfo.is_desktop) {
+            statusRow.style.background = 'rgba(59,130,246,0.08)';
+            statusRow.style.border = '1px solid rgba(59,130,246,0.25)';
+            statusRow.innerHTML = `
+                <strong>🖥️ 当前环境：桌面端</strong><br>
+                <span style="font-size:12px;color:var(--text-secondary);">
+                    检测模式：${desktopInfo.mode_setting || 'auto'}<br>
+                    检测依据：${desktopInfo.detected_env || '—'}
+                </span>`;
+        } else {
+            statusRow.style.background = 'rgba(34,197,94,0.08)';
+            statusRow.style.border = '1px solid rgba(34,197,94,0.25)';
+            statusRow.innerHTML = `
+                <strong>📦 当前环境：标准版</strong><br>
+                <span style="font-size:12px;color:var(--text-secondary);">
+                    检测模式：${desktopInfo.mode_setting || 'auto'}<br>
+                    检测结果：未检测到桌面端特征
+                </span>`;
+        }
+        content.appendChild(statusRow);
+
+        // desktop_mode 可编辑选择
+        const modeSchema = schema['desktop_mode'];
+        if (modeSchema) {
+            const modeRow = document.createElement('div');
+            modeRow.className = 'config-field';
+            modeRow.style.maxWidth = '500px';
+            const currentMode = cfg['desktop_mode'] || 'auto';
+            const modeLabels = {
+                'auto': 'auto — 自动检测（推荐）',
+                'force_desktop': 'force_desktop — 强制桌面端模式',
+                'force_standard': 'force_standard — 强制标准版模式'
+            };
+            const label = document.createElement('div');
+            label.className = 'config-field-label';
+            label.textContent = '桌面端模式';
+            modeRow.appendChild(label);
+
+            const hint = document.createElement('div');
+            hint.className = 'config-field-hint';
+            hint.textContent = '控制插件如何识别运行环境。auto=多重策略自动检测，force_desktop=强制桌面端，force_standard=强制标准版';
+            modeRow.appendChild(hint);
+
+            const select = document.createElement('select');
+            select.className = 'config-select';
+            select.style.marginTop = '6px';
+            (modeSchema.options || ['auto', 'force_desktop', 'force_standard']).forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt;
+                o.textContent = modeLabels[opt] || opt;
+                if (opt === currentMode) o.selected = true;
+                select.appendChild(o);
+            });
+            modeRow.appendChild(select);
+            content.appendChild(modeRow);
+
+            // desktop_detected_env 只读
+            const detectedRow = document.createElement('div');
+            detectedRow.className = 'config-field config-field-readonly';
+            detectedRow.style.maxWidth = '500px';
+            const detectedVal = cfg['desktop_detected_env'] || '（未检测）';
+            detectedRow.innerHTML = `
+                <div class="config-field-label">🔒 自动检测结果</div>
+                <div class="config-field-readonly-value">当前值：${detectedVal}</div>
+                <div class="config-field-readonly-note">此项由插件自动检测并写入，无需手动修改</div>`;
+            content.appendChild(detectedRow);
+
+            // 保存按钮
+            const saveRow = document.createElement('div');
+            saveRow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:4px;';
+            const saveBtn = document.createElement('button');
+            saveBtn.className = 'btn btn-primary btn-sm';
+            saveBtn.textContent = '保存并重启插件';
+            const statusEl = document.createElement('span');
+            statusEl.style.cssText = 'font-size:12px;color:var(--text-secondary);';
+            saveRow.appendChild(saveBtn);
+            saveRow.appendChild(statusEl);
+            content.appendChild(saveRow);
+
+            saveBtn.addEventListener('click', async () => {
+                const newMode = select.value;
+                saveBtn.disabled = true;
+                statusEl.textContent = '保存中...';
+                const saveRes = await Api.putConfig({ desktop_mode: newMode });
+                if (!saveRes.ok) {
+                    Utils.toast('保存失败：' + (saveRes.msg || '未知错误'), 'error');
+                    statusEl.textContent = '保存失败';
+                    saveBtn.disabled = false;
+                    return;
+                }
+                statusEl.textContent = '已保存，正在重启...';
+                const reloadRes = await Api.reloadPlugin();
+                if (reloadRes && reloadRes.ok) {
+                    Utils.toast('桌面端模式已更新，插件正在重启...', 'success');
+                    statusEl.textContent = '重启中...';
+                    statusEl.style.color = 'var(--accent)';
+                } else {
+                    Utils.toast('配置已保存，但触发重启失败，请手动重启', 'warning');
+                    statusEl.textContent = '请手动重启';
+                    saveBtn.disabled = false;
+                }
+            });
+        }
     },
 
     /** 加载 Web 面板可调配置（日志清理、防爬虫、信任代理） */
@@ -897,13 +1078,13 @@ const App = {
 
         // 可调项定义（key → 覆盖标签，留空则用 schema.description）
         const editableKeys = [
-            'web_panel_trust_proxy',
             'web_panel_log_auto_clean',
             'web_panel_log_retention_days',
             'web_panel_log_clean_interval_hours',
             'web_panel_anti_spider',
             'web_panel_anti_spider_rate_limit',
             'web_panel_anti_spider_ban_duration',
+            'web_panel_authenticated_rate_limit',
         ];
 
         const pending = {};
@@ -1016,8 +1197,7 @@ const App = {
             saveBtn.textContent = '保存中...';
             statusEl.textContent = '';
 
-            const merged = { ...cfg, ...pending };
-            const res = await Api.reloadPlugin(merged);
+            const res = await Api.reloadPlugin(pending);
             saveBtn.disabled = false;
             saveBtn.textContent = '保存并重启插件';
 
@@ -1096,7 +1276,7 @@ const App = {
         editorPanel.innerHTML = `
             <div class="file-editor-header">
                 <span id="file-editor-title" style="font-size:14px;font-weight:600;">选择文件查看内容</span>
-                <div id="file-editor-actions" class="hidden" style="display:flex;gap:6px;">
+                <div id="file-editor-actions" class="file-editor-actions hidden">
                     <span id="file-editor-size" style="font-size:12px;color:var(--text-secondary);align-self:center;"></span>
                     <button class="btn btn-sm btn-primary" id="btn-save-file">保存</button>
                     <button class="btn btn-sm btn-danger" id="btn-delete-file">删除</button>
@@ -1307,8 +1487,377 @@ const App = {
             section.style.opacity = '1';
             label.textContent = '黑名单 IP';
         }
+    },
+
+    _ensureConfigBadge() {
+        if (document.getElementById('config-file-badge')) return;
+        const badge = document.createElement('div');
+        badge.id = 'config-file-badge';
+        badge.className = 'config-file-badge hidden';
+        badge.innerHTML = `
+            <span class="config-file-badge__label">配置文件</span>
+            <span class="config-file-badge__value"></span>`;
+        document.body.appendChild(badge);
+    },
+
+    _updateConfigBadgeVisibility() {
+        const badge = document.getElementById('config-file-badge');
+        if (!badge) return;
+        const visibleViews = new Set(['tech-tree', 'settings']);
+        const shouldShow = visibleViews.has(this._currentView) && !!this._configFileName;
+        badge.classList.toggle('hidden', !shouldShow);
+        const valueEl = badge.querySelector('.config-file-badge__value');
+        if (valueEl) valueEl.textContent = this._configFileName || '—';
+    },
+
+    _normalizeHeartbeatSeconds(value, fallback, minValue) {
+        const num = Number(value);
+        if (!Number.isFinite(num) || num < minValue) return fallback;
+        return Math.round(num) * 1000;
+    },
+
+    _buildHeartbeatConfig(config) {
+        return {
+            visibleIntervalMs: this._normalizeHeartbeatSeconds(
+                config.web_panel_heartbeat_visible_interval_seconds,
+                300,
+                30,
+            ),
+            hiddenIntervalMs: this._normalizeHeartbeatSeconds(
+                config.web_panel_heartbeat_hidden_interval_seconds,
+                1200,
+                60,
+            ),
+            retryBaseIntervalMs: this._normalizeHeartbeatSeconds(
+                config.web_panel_heartbeat_retry_base_seconds,
+                15,
+                5,
+            ),
+            retryMaxIntervalMs: this._normalizeHeartbeatSeconds(
+                config.web_panel_heartbeat_retry_max_seconds,
+                120,
+                15,
+            ),
+        };
+    },
+
+    _createHeartbeatReadonlyRows(cfg, schema) {
+        const readonlyKeys = [
+            'web_panel_heartbeat_visible_interval_seconds',
+            'web_panel_heartbeat_hidden_interval_seconds',
+            'web_panel_heartbeat_retry_base_seconds',
+            'web_panel_heartbeat_retry_max_seconds',
+        ];
+        const rows = [];
+        readonlyKeys.forEach((key) => {
+            const s = schema[key];
+            if (!s) return;
+            const val = key in cfg ? cfg[key] : (s.default !== undefined ? s.default : '—');
+            const displayVal = val === '' ? '（空）' : String(val);
+            const desc = (s.description || key).replace(/^[^\s]+\s/, '');
+            rows.push(`
+                <div class="config-field config-field-readonly" style="max-width:500px;">
+                    <div class="config-field-label">🔒 ${desc}</div>
+                    <div class="config-field-readonly-value">当前值：${displayVal}</div>
+                    <div class="config-field-readonly-note">⚠️ 心跳探测频率属于安全敏感配置，请在 AstrBot 平台插件配置页修改</div>
+                </div>`);
+        });
+        return rows.join('');
+    },
+
+    async _loadHeartbeatStatus() {
+        const loading = document.getElementById('heartbeat-status-loading');
+        const content = document.getElementById('heartbeat-status-content');
+        if (!loading || !content) return;
+
+        const verify = await Api.verify();
+        if (!verify.ok) {
+            loading.textContent = '加载失败';
+            return;
+        }
+
+        const cfgRes = await Api.getConfig();
+        const cfg = cfgRes && cfgRes.ok ? (cfgRes.config || {}) : {};
+        const heartbeatCfg = this._buildHeartbeatConfig(cfg);
+
+        loading.classList.add('hidden');
+        content.classList.remove('hidden');
+        content.style.display = 'flex';
+
+        const statusBadgeMap = {
+            idle: '<span class="heartbeat-status-badge heartbeat-status-badge--idle">idle（尚未开始）</span>',
+            ok: '<span class="heartbeat-status-badge heartbeat-status-badge--ok">ok（正常）</span>',
+            retrying: '<span class="heartbeat-status-badge heartbeat-status-badge--retrying">retrying（重试中）</span>',
+            invalid: '<span class="heartbeat-status-badge heartbeat-status-badge--invalid">invalid（会话失效）</span>',
+            stopped: '<span class="heartbeat-status-badge heartbeat-status-badge--stopped">stopped（已停止）</span>',
+        };
+
+        const rows = [
+            ['当前会话 ID', verify.session_id || '—'],
+            ['当前设备 ID', verify.device_id || '—'],
+            ['前台心跳间隔', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`],
+            ['后台心跳间隔', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`],
+            ['失败重试基准', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`],
+            ['失败重试上限', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`],
+            ['当前标签页角色', this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>'],
+            ['当前心跳状态', statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle],
+            ['最近一次心跳成功', this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功'],
+            ['缓冲重试期', (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>'],
+            ['会话剩余时间', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—'],
+        ];
+
+        content.innerHTML = rows.map(([label, value]) => `
+            <div class="config-field config-field-readonly" style="max-width:500px;">
+                <div class="config-field-label">${label}</div>
+                <div class="config-field-readonly-value heartbeat-status-value">${value}</div>
+            </div>`).join('');
+    },
+
+    _redirectToLogin(reason, message, options = {}) {
+        Api.clearToken();
+        this._authMonitor?.stop?.();
+        const { showAlert = true } = options;
+        const redirect = () => {
+            window.location.href = '/';
+        };
+        if (!showAlert || !message || typeof Utils === 'undefined') {
+            redirect();
+            return;
+        }
+        Utils.alert(message).then(redirect).catch(redirect);
+    },
+
+    _installAuthMonitor(config = {}) {
+        if (this._authMonitor) return;
+        const channelName = 'gcp-auth';
+        const tabId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const leaderKey = 'gcp_auth_leader';
+        const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(channelName) : null;
+        const heartbeatConfig = {
+            visibleIntervalMs: config.visibleIntervalMs || 5 * 60 * 1000,
+            hiddenIntervalMs: config.hiddenIntervalMs || 20 * 60 * 1000,
+            retryBaseIntervalMs: config.retryBaseIntervalMs || 15 * 1000,
+            retryMaxIntervalMs: config.retryMaxIntervalMs || 2 * 60 * 1000,
+        };
+        const monitor = {
+            timer: null,
+            leaderTimer: null,
+            leader: false,
+            running: false,
+            authenticated: false,
+            inFlight: false,
+            lastHeartbeatSuccessAt: 0,
+            lastHeartbeatStatus: 'idle',
+            // 正常巡检频率允许由传统配置项控制；这里只负责应用当前生效值。
+            visibleInterval: heartbeatConfig.visibleIntervalMs,
+            hiddenInterval: heartbeatConfig.hiddenIntervalMs,
+            jitter: 30 * 1000,
+            // 网络异常时启用短周期重试，避免一次超时就误判断线。
+            retryBaseInterval: heartbeatConfig.retryBaseIntervalMs,
+            retryMaxInterval: heartbeatConfig.retryMaxIntervalMs,
+            consecutiveNetworkFailures: 0,
+            broadcast(type, detail = {}) {
+                const payload = { type, detail, tabId, ts: Date.now() };
+                if (channel) channel.postMessage(payload);
+                try {
+                    localStorage.setItem('gcp_auth_event', JSON.stringify(payload));
+                } catch (e) {
+                    console.warn('广播会话事件失败:', e);
+                }
+            },
+            // 只有 leader 标签页会真正发起心跳；其余标签页只监听结果广播，
+            // 避免同一浏览器多标签重复探活、重复重试。
+            schedule(immediate = false) {
+                clearTimeout(this.timer);
+                if (!this.running || !this.leader || !this.authenticated) return;
+                let delay;
+                if (immediate) {
+                    delay = 0;
+                } else if (this.consecutiveNetworkFailures > 0) {
+                    const retryDelay = this.retryBaseInterval * Math.pow(2, this.consecutiveNetworkFailures - 1);
+                    delay = Math.min(retryDelay, this.retryMaxInterval);
+                } else {
+                    const base = document.visibilityState === 'visible' ? this.visibleInterval : this.hiddenInterval;
+                    const jitter = Math.floor(Math.random() * this.jitter);
+                    delay = base + jitter;
+                }
+                this.timer = setTimeout(() => this.ping(), delay);
+            },
+            startLeaderElection() {
+                const renew = () => {
+                    const lease = { tabId, expiresAt: Date.now() + 90 * 1000 };
+                    try {
+                        const raw = localStorage.getItem(leaderKey);
+                        const current = raw ? JSON.parse(raw) : null;
+                        if (!current || current.expiresAt < Date.now() || current.tabId === tabId) {
+                            localStorage.setItem(leaderKey, JSON.stringify(lease));
+                            this.becomeLeader();
+                        } else if (this.leader) {
+                            this.becomeFollower();
+                        }
+                    } catch (e) {
+                        this.becomeLeader();
+                    }
+                };
+                renew();
+                this.leaderTimer = setInterval(renew, 30 * 1000);
+            },
+            becomeLeader() {
+                if (this.leader) return;
+                this.leader = true;
+                this.schedule(true);
+            },
+            becomeFollower() {
+                this.leader = false;
+                clearTimeout(this.timer);
+            },
+            // 心跳失败分两类：
+            // 1) 401/会话失效：立即广播并跳登录；
+            // 2) 网络/超时：进入缓冲期，按 15s/30s/60s/120s 退避重试，不直接登出。
+            async ping() {
+                if (!this.running || !this.leader || !this.authenticated || this.inFlight) return;
+                this.inFlight = true;
+                try {
+                    const res = await Api.heartbeat();
+                    if (res && res.network_error) {
+                        throw new Error(res.msg || 'network_error');
+                    }
+                    if (!res.ok) {
+                        this.lastHeartbeatStatus = 'invalid';
+                        this.broadcast('session-invalid', res);
+                        App._redirectToLogin(res.reason || 'expired', res.msg || '登录已失效，请重新登录');
+                        return;
+                    }
+                    this.consecutiveNetworkFailures = 0;
+                    this.lastHeartbeatSuccessAt = Date.now();
+                    this.lastHeartbeatStatus = 'ok';
+                    this.broadcast('session-ok', res);
+                } catch (error) {
+                    this.consecutiveNetworkFailures += 1;
+                    this.lastHeartbeatStatus = 'retrying';
+                    if (navigator.onLine === false) {
+                        Utils.toast('网络已离线，稍后会自动重试', 'warning', 2500);
+                    } else if (this.consecutiveNetworkFailures <= 2) {
+                        Utils.toast('与服务器连接异常，正在重试', 'warning', 2500);
+                    } else if (this.consecutiveNetworkFailures === 3) {
+                        Utils.toast('心跳连续失败，已进入缓冲重试期', 'warning', 3000);
+                    }
+                } finally {
+                    this.inFlight = false;
+                    this.schedule();
+                }
+            },
+            handleExternalEvent(payload) {
+                if (!payload || payload.tabId === tabId) return;
+                if (payload.type === 'session-invalid') {
+                    const detail = payload.detail || {};
+                    App._redirectToLogin(detail.reason || 'expired', detail.msg || '登录已失效，请重新登录');
+                }
+                if (payload.type === 'logout') {
+                    App._redirectToLogin('logout', '您已退出登录', { showAlert: false });
+                }
+            },
+            markAuthenticated() {
+                this.authenticated = true;
+                this.running = true;
+                this.lastHeartbeatStatus = 'ok';
+                this.startLeaderElection();
+            },
+            stop() {
+                this.running = false;
+                this.authenticated = false;
+                this.lastHeartbeatStatus = 'stopped';
+                clearTimeout(this.timer);
+                clearInterval(this.leaderTimer);
+                if (this.leader) {
+                    try {
+                        const raw = localStorage.getItem(leaderKey);
+                        const current = raw ? JSON.parse(raw) : null;
+                        if (current && current.tabId === tabId) {
+                            localStorage.removeItem(leaderKey);
+                        }
+                    } catch (e) {
+                        console.warn('清理 leader 租约失败:', e);
+                    }
+                }
+                this.leader = false;
+            },
+        };
+
+        Api.onAuthEvent((event) => {
+            if (event.type === 'unauthorized') {
+                monitor.broadcast('session-invalid', event);
+                App._redirectToLogin(event.reason || 'expired', event.msg || '登录已失效，请重新登录');
+            }
+        });
+
+        if (channel) {
+            channel.onmessage = (event) => monitor.handleExternalEvent(event.data);
+        }
+        window.addEventListener('storage', (event) => {
+            if (event.key === 'gcp_auth_event' && event.newValue) {
+                try {
+                    monitor.handleExternalEvent(JSON.parse(event.newValue));
+                } catch (e) {
+                    console.warn('解析跨标签认证事件失败:', e);
+                }
+            }
+            if (event.key === leaderKey && event.newValue) {
+                try {
+                    const current = JSON.parse(event.newValue);
+                    if (current.tabId !== tabId && monitor.leader) {
+                        monitor.becomeFollower();
+                    }
+                } catch (e) {
+                    console.warn('解析 leader 租约失败:', e);
+                }
+            }
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && monitor.leader && monitor.authenticated) {
+                monitor.schedule(true);
+            }
+        });
+        window.addEventListener('online', () => {
+            if (monitor.leader && monitor.authenticated) {
+                monitor.schedule(true);
+            }
+        });
+        window.addEventListener('beforeunload', () => {
+            if (monitor.authenticated) {
+                monitor.broadcast('tab-leave');
+            }
+        });
+        this._authMonitor = monitor;
     }
 };
 
 // 启动应用
 document.addEventListener('DOMContentLoaded', () => App.start());
+
+// 移动端：虚拟键盘弹出时确保焦点元素可见
+(function() {
+    if (!window.visualViewport) return;
+
+    let pendingScroll = null;
+    window.visualViewport.addEventListener('resize', () => {
+        if (window.innerWidth >= 768) return;
+        const active = document.activeElement;
+        if (!active) return;
+        const tag = active.tagName.toLowerCase();
+        if (tag !== 'textarea' && tag !== 'input') return;
+
+        clearTimeout(pendingScroll);
+        pendingScroll = setTimeout(() => {
+            // visualViewport.height 是键盘弹出后的可视高度
+            const vpH = window.visualViewport.height;
+            const rect = active.getBoundingClientRect();
+            // 如果元素在可视区域下半部（被键盘遮挡），强制滚动到顶部区域
+            if (rect.top > vpH * 0.35) {
+                // 需要滚动的距离：把元素移到可视区域 10% 位置
+                const scrollDelta = rect.top - vpH * 0.1;
+                window.scrollBy({ top: scrollDelta, behavior: 'smooth' });
+            }
+        }, 200);
+    });
+})();

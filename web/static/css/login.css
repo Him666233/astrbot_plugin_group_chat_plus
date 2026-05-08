@@ -1,4 +1,4 @@
-/* ========== Login Page — Cyberpunk ========== */
+/* ========== 登录页赛博风格 ========== */
 #page-login, #page-password-change {
     display: flex;
     flex-direction: column;
@@ -9,7 +9,7 @@
     position: relative;
 }
 
-/* Circuit board grid texture */
+/* 电路板网格纹理 */
 #page-login::before, #page-password-change::before {
     content: '';
     position: absolute;
@@ -69,6 +69,11 @@
     z-index: 1;
 }
 
+.login-container:has(.login-upgrade-notice) {
+    width: auto;
+    min-width: 380px;
+}
+
 .login-logo {
     width: 80px;
     height: 80px;
@@ -108,6 +113,53 @@
     color: var(--text-muted);
     font-size: 12px;
     margin-top: 4px;
+}
+
+.login-hint--password-req {
+    text-align: left;
+    margin: 0 0 4px;
+}
+
+.login-upgrade-notice {
+    margin-top: 6px;
+    padding: 12px 14px;
+    background: rgba(232, 168, 56, 0.08);
+    border: 1px solid rgba(232, 168, 56, 0.25);
+    border-radius: 8px;
+    text-align: left;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-secondary);
+    width: fit-content;
+    min-width: 100%;
+    max-width: 520px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+.login-upgrade-notice strong {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--accent-orange);
+}
+
+.login-upgrade-notice p {
+    margin: 6px 0 0;
+}
+
+.login-upgrade-notice code {
+    color: var(--text-primary);
+    background: rgba(255,255,255,0.06);
+    padding: 1px 4px;
+    border-radius: 4px;
+    font-size: 11px;
+    word-break: break-all;
+}
+
+.login-upgrade-notice .legacy-warn-delete {
+    color: #e53935;
+    font-weight: 600;
+    margin-top: 10px !important;
 }
 
 /* 开源声明 - 登录页 */

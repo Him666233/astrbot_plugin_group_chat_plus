@@ -35,6 +35,9 @@ from astrbot.core.message.components import Plain, At, BaseMessageComponent
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.api.all import AstrBotMessage, MessageType, MessageMember
 
+from .context_manager import ContextManager
+from .ai_error_formatter import format_ai_error
+
 # 🆕 v1.2.0: 导入钩子调用相关模块
 from astrbot.core.star.star_handler import EventType
 
@@ -120,6 +123,9 @@ class ProactiveChatManager:
     _proactive_max_consecutive_failures: int = 2
     _proactive_failure_threshold_perturbation: float = 0.0
     _proactive_failure_sequence_probability: float = -1.0
+    _proactive_normal_reply_cooldown: int = (
+        60  # 🆕 v1.2.2: 普通对话后的主动对话冷静期（秒）
+    )
     _proactive_require_user_activity: bool = True
     _proactive_min_user_messages: int = 3
     _proactive_probability: float = 0.3
@@ -156,7 +162,8 @@ class ProactiveChatManager:
     _enable_memory_injection: bool = False
     _memory_plugin_mode: str = "legacy"
     _livingmemory_top_k: int = 5
-    _livingmemory_version: str = "v1"
+    _livingmemory_version: str = "auto"
+    _livingmemory_persona_compat_mode: str = "auto"
     # 工具提醒配置
     _enable_tools_reminder: bool = False
     _tools_reminder_persona_filter: bool = False
@@ -180,8 +187,15 @@ class ProactiveChatManager:
     _enable_proactive_at_conversion: bool = False
     # 🆕 主动对话AI预判断配置
     _enable_proactive_ai_judge: bool = False
+    _proactive_ai_judge_include_persona: bool = True
+    _proactive_ai_judge_persona_name: str = ""
     _proactive_ai_judge_prompt: str = ""
     _proactive_ai_judge_timeout: int = 15
+    _enable_proactive_ai_reasoning: bool = False
+    _proactive_ai_reasoning_log: bool = False
+    _proactive_ai_reasoning_log_mode: str = "processed"
+    _judgment_reasoning_start_marker: str = ""
+    _judgment_reasoning_end_marker: str = ""
     _decision_ai_provider_id: str = ""
     # 🔄 共享的AI回复缓存引用（由 main.py 传入，用于重复检测）
     # 格式: {chat_id: [{"content": "回复内容", "timestamp": 时间戳}]}
@@ -269,6 +283,9 @@ class ProactiveChatManager:
         cls._proactive_failure_sequence_probability = config[
             "proactive_failure_sequence_probability"
         ]
+        cls._proactive_normal_reply_cooldown = config.get(
+            "proactive_normal_reply_cooldown", 60
+        )  # 🆕 v1.2.2: 普通对话后的主动对话冷静期
         cls._proactive_require_user_activity = config["proactive_require_user_activity"]
         cls._proactive_min_user_messages = config["proactive_min_user_messages"]
         cls._proactive_probability = config["proactive_probability"]
@@ -319,7 +336,10 @@ class ProactiveChatManager:
         cls._enable_memory_injection = config["enable_memory_injection"]
         cls._memory_plugin_mode = config["memory_plugin_mode"]
         cls._livingmemory_top_k = config["livingmemory_top_k"]
-        cls._livingmemory_version = config.get("livingmemory_version", "v1")
+        cls._livingmemory_version = config.get("livingmemory_version", "auto")
+        cls._livingmemory_persona_compat_mode = config.get(
+            "livingmemory_persona_compat_mode", "auto"
+        )
         # 工具提醒配置
         cls._enable_tools_reminder = config["enable_tools_reminder"]
         cls._tools_reminder_persona_filter = config.get(
@@ -348,8 +368,29 @@ class ProactiveChatManager:
         cls._enable_proactive_at_conversion = config["enable_proactive_at_conversion"]
         # 🆕 主动对话AI预判断配置
         cls._enable_proactive_ai_judge = config.get("enable_proactive_ai_judge", False)
+        cls._proactive_ai_judge_include_persona = config.get(
+            "proactive_ai_judge_include_persona", True
+        )
+        cls._proactive_ai_judge_persona_name = config.get(
+            "proactive_ai_judge_persona_name", ""
+        )
         cls._proactive_ai_judge_prompt = config.get("proactive_ai_judge_prompt", "")
         cls._proactive_ai_judge_timeout = config.get("proactive_ai_judge_timeout", 15)
+        cls._enable_proactive_ai_reasoning = config.get(
+            "enable_proactive_ai_reasoning", False
+        )
+        cls._proactive_ai_reasoning_log = config.get(
+            "proactive_ai_reasoning_log", False
+        )
+        cls._proactive_ai_reasoning_log_mode = config.get(
+            "proactive_ai_reasoning_log_mode", "processed"
+        )
+        cls._judgment_reasoning_start_marker = config.get(
+            "judgment_reasoning_start_marker", ""
+        )
+        cls._judgment_reasoning_end_marker = config.get(
+            "judgment_reasoning_end_marker", ""
+        )
         cls._decision_ai_provider_id = config.get("decision_ai_provider_id", "")
         # 🔄 获取共享的AI回复缓存引用（与普通对话共享，用于跨模式重复检测）
         if hasattr(plugin_instance, "recent_replies_cache"):
@@ -1030,6 +1071,8 @@ class ProactiveChatManager:
             "last_complaint_decay_time": time.time(),  # 上次吐槽衰减检查时间
             # 🆕 扰动因子相关字段（在开始新一轮连续尝试时计算一次）
             "current_effective_max_failures": -1,  # 当前轮次的有效最大失败阈值（-1表示未设置，使用配置值）
+            # 🆕 v1.2.2: 普通对话时间追踪
+            "last_normal_reply_time": 0,  # 上次普通对话（非主动）回复时间（用于冷静期和吐槽感知）
         }
 
     @classmethod
@@ -1134,6 +1177,12 @@ class ProactiveChatManager:
                         )
                     state["proactive_active"] = False
                     # 注意：不设置 outcome_recorded，因为这不是一个判定，只是关闭
+                # 🆕 v1.2.2: 记录普通对话回复时间（用于冷静期和吐槽感知）
+                state["last_normal_reply_time"] = current_time
+                if cls._debug_mode:
+                    logger.info(
+                        f"[普通回复记录] 群{chat_key} - 已记录普通对话回复时间，用于主动对话冷静期"
+                    )
 
             state["silent_failures"] = 0  # 重置连续失败计数
             # 重置用户消息计数（这是"距离上次AI回复后的用户消息数"）
@@ -2000,6 +2049,16 @@ class ProactiveChatManager:
         total_failures = state.get("total_proactive_failures", 0)
         score = state.get("interaction_score", 50)
 
+        # 🆕 v1.2.2: 感知普通对话活跃度
+        # 若近10分钟内有普通对话回复，说明群里并不冷清，应调整吐槽概率和文案
+        _normal_recent_threshold = 600  # 10分钟
+        _last_normal_reply_time = state.get("last_normal_reply_time", 0)
+        _normal_reply_recency = time.time() - _last_normal_reply_time
+        group_is_actively_chatting = (
+            _last_normal_reply_time > 0
+            and _normal_reply_recency < _normal_recent_threshold
+        )
+
         # 根据配置的阈值决定是否触发吐槽
 
         complaint_threshold = cls._complaint_trigger_threshold
@@ -2017,62 +2076,99 @@ class ProactiveChatManager:
         if total_failures >= strong_threshold:
             # 强烈吐槽
             complaint_prob = cls._complaint_probability_strong
+            # 🆕 v1.2.2: 群里普通对话活跃时降低概率（群没冷清，只是没理主动话）
+            if group_is_actively_chatting:
+                complaint_prob *= 0.7
             roll = random.random()
             if (
                 roll > complaint_prob
             ):  # 🔧 修复：roll > prob 表示不触发，roll <= prob 表示触发
                 default_result["failure_count"] = total_failures
                 return default_result
-            return {
-                "triggered": True,
-                "level": "strong",
-                "prompt": (
+            # 🆕 v1.2.2: 根据群活跃状态切换文案
+            if group_is_actively_chatting:
+                strong_prompt = (
+                    "\n\n【情绪提示】你已经主动说了{0}次话都没人回你，但群里其实还有人在聊别的。"
+                    "你可以用有点委屈或者自嘲的方式表达出「感觉被忽视了」，"
+                    "而不是说群里冷清——因为明显群里有人，只是没来找你聊。"
+                    "保持你的性格特点，可以稍微委屈或幽默，但不要过于消极。"
+                ).format(total_failures)
+            else:
+                strong_prompt = (
                     "\n\n【情绪提示】你已经连续主动说了{0}次话都没人回复，感觉有些受伤。"
                     "你可以用比较明显的方式表达委屈或无奈，"
                     "比如说要安静一段时间、反思自己、或者干脆潜水。"
                     "保持你的性格特点，可以幽默自嘲，也可以稍微委屈，但不要过于消极。"
-                ).format(total_failures),
+                ).format(total_failures)
+            return {
+                "triggered": True,
+                "level": "strong",
+                "prompt": strong_prompt,
                 "priority": True,  # 🔧 修复：强烈吐槽优先发送
                 "failure_count": total_failures,
             }
         elif total_failures >= medium_threshold:
             # 明显吐槽
             complaint_prob = cls._complaint_probability_medium
+            # 🆕 v1.2.2: 群里普通对话活跃时降低概率
+            if group_is_actively_chatting:
+                complaint_prob *= 0.5
             roll = random.random()
             if (
                 roll > complaint_prob
             ):  # 🔧 修复：roll > prob 表示不触发，roll <= prob 表示触发
                 default_result["failure_count"] = total_failures
                 return default_result
-            return {
-                "triggered": True,
-                "level": "medium",
-                "prompt": (
+            # 🆕 v1.2.2: 根据群活跃状态切换文案
+            if group_is_actively_chatting:
+                medium_prompt = (
+                    "\n\n【情绪提示】你已经主动说了{0}次话了，但没有人回你——不过群里有人在聊天。"
+                    "你可以稍微感慨一下感觉大家都在聊，但没有人来找你，语气可以带一点小撒娇或者幽默。"
+                    "不要说群里没人，因为明显有人，只是没理你。"
+                ).format(total_failures)
+            else:
+                medium_prompt = (
                     "\n\n【情绪提示】你已经连续主动说了{0}次话都没人理会。"
                     "你可以用稍微明显一点的方式表达出被忽视的感觉，"
                     "但仍然保持幽默感，不要太过严肃或负面。"
                     "可以用玩笑的方式吐槽一下，或者假装不在意地换个新话题。"
-                ).format(total_failures),
+                ).format(total_failures)
+            return {
+                "triggered": True,
+                "level": "medium",
+                "prompt": medium_prompt,
                 "priority": True,  # 🔧 修复：明显吐槽优先发送
                 "failure_count": total_failures,
             }
         elif total_failures >= light_threshold:
             # 轻度吐槽
             complaint_prob = cls._complaint_probability_light
+            # 🆕 v1.2.2: 群里普通对话活跃时降低概率
+            if group_is_actively_chatting:
+                complaint_prob *= 0.5
             roll = random.random()
             if (
                 roll > complaint_prob
             ):  # 🔧 修复：roll > prob 表示不触发，roll <= prob 表示触发
                 default_result["failure_count"] = total_failures
                 return default_result
-            return {
-                "triggered": True,
-                "level": "light",
-                "prompt": (
+            # 🆕 v1.2.2: 根据群活跃状态切换文案
+            if group_is_actively_chatting:
+                light_prompt = (
+                    "\n\n【情绪提示】你刚才主动说了一句话，但似乎没什么人回应——不过群里其实有人在聊。"
+                    "你可以用轻松的语气稍微说一下感觉大家都在聊但没来找你，或者自然换个话题。"
+                    "不要过度戏剧化，保持轻松自然的感觉。"
+                )
+            else:
+                light_prompt = (
                     "\n\n【情绪提示】你刚才主动说了一句话，但似乎没什么人回应。"
                     "你可以用轻松幽默的语气稍微提一下这件事，或者自然地换个话题。"
                     "不要过度戏剧化，保持轻松自然的感觉。"
-                ),
+                )
+            return {
+                "triggered": True,
+                "level": "light",
+                "prompt": light_prompt,
                 "priority": True,  # 🔧 修复：轻度吐槽也优先发送
                 "failure_count": total_failures,
             }
@@ -2236,6 +2332,20 @@ class ProactiveChatManager:
         if cls.is_in_cooldown(chat_key):
             remaining = int(state["cooldown_until"] - current_time)
             return False, f"在冷却期（剩余{remaining}秒）"
+
+        # 🆕 v1.2.2: 普通对话冷静期检查
+        # 若AI刚刚通过普通对话流程回复了群里，则跳过本次主动对话触发
+        # 避免「刚回完消息又主动发言」的奇怪体验
+        _normal_reply_cooldown = cls._proactive_normal_reply_cooldown
+        if _normal_reply_cooldown > 0:
+            _last_normal_reply = state.get("last_normal_reply_time", 0)
+            if _last_normal_reply > 0:
+                _normal_elapsed = int(current_time - _last_normal_reply)
+                if _normal_elapsed < _normal_reply_cooldown:
+                    return (
+                        False,
+                        f"普通对话冷静期未到（{_normal_elapsed}/{_normal_reply_cooldown}秒）",
+                    )
 
         # 🆕 v1.2.0 获取自适应参数（根据互动评分调整）
         adaptive_params = cls.calculate_adaptive_parameters(chat_key)
@@ -3100,6 +3210,10 @@ class ProactiveChatManager:
                 for loop_count in range(max_wait_loops):
                     # 🔒 获取锁进行原子性检查和标记
                     async with plugin_instance.concurrent_lock:
+                        flow_owner = getattr(plugin_instance, "_chat_flow_owners", {}).get(
+                            chat_id
+                        )
+                        flow_owner_busy = bool(flow_owner)
                         # 检查是否有普通对话正在处理此会话
                         processing_in_chat = [
                             msg_id
@@ -3107,7 +3221,7 @@ class ProactiveChatManager:
                             if cid == chat_id
                         ]
 
-                        if not processing_in_chat:
+                        if not processing_in_chat and not flow_owner_busy:
                             # 没有普通对话在处理，立即标记主动对话并退出
                             if hasattr(
                                 plugin_instance, "proactive_processing_sessions"
@@ -3115,10 +3229,20 @@ class ProactiveChatManager:
                                 plugin_instance.proactive_processing_sessions[
                                     chat_id
                                 ] = time.time()
+                            if hasattr(plugin_instance, "_chat_flow_owners"):
+                                plugin_instance._chat_flow_owners[chat_id] = {
+                                    "owner": "proactive",
+                                    "processing_id": f"proactive_{chat_id}_{int(time.time() * 1000)}",
+                                    "started_at": time.time(),
+                                }
                                 if debug_mode:
                                     logger.info(
-                                        f"🔒 [主动对话-并发保护] 已标记会话 {chat_id} 为主动对话处理中"
+                                        f"🔒 [主动对话-并发保护] 已注册会话 {chat_id} 的 flow owner=proactive"
                                     )
+                            if debug_mode:
+                                logger.info(
+                                    f"🔒 [主动对话-并发保护] 已标记会话 {chat_id} 为主动对话处理中"
+                                )
                             break
 
                     # 🔓 释放锁后再进行等待（避免阻塞其他消息）
@@ -3183,6 +3307,10 @@ class ProactiveChatManager:
 3. **避免低质量开场** - 禁止"在吗"、"干嘛呢"、"有人吗"等无聊开场
 4. **与上下文相关** - 最好与之前的聊天内容（特别是近期未回复消息）或群氛围相关
 5. **保持你的人设和语气** - 遵循你的性格设定
+6. **你当前是在直接生成一条要发出去的话** - 不是在判断“现在该不该开口”
+7. **不要输出判断腔** - 禁止说"我觉得现在不该说话"、"我不应该回复"、"现在不适合开口"、"我决定先不说"之类的话
+8. **不要外显内部取舍过程** - 即使你觉得某个方向不适合延续，也要直接换成自然表达，而不是把“该不该说”的判断说出来
+9. **保持中性** - 不要因为这条要求改变你原本的人格、语气和说话方式
 
 ⚠️ **【关于背景信息和记忆】重要说明** ⚠️：
 - 如果在背景信息中看到记忆内容（=== 背景信息 === 部分）：
@@ -3226,7 +3354,9 @@ class ProactiveChatManager:
 
 特殊标记说明：
 - 历史消息中的[表情包图片]标记表示那些图片是表情包/贴纸，不是普通照片。理解其传达的情绪即可，不要描述图片内容，也不要在发言中提及"表情包"标记本身。
-- 如果历史中出现"[转发消息]"，那是用户分享的合并转发消息，理解其内容即可，不要主动提起"之前那条转发消息"。
+- 如果历史中出现"[转发消息]"，那是用户分享的 QQ / OneBot 合并转发消息；系统可能已经把其中可展开的嵌套转发整理进同一段文本里，理解内容即可，不要主动提起"之前那条转发消息"。
+- 历史中你的回复末尾可能带有"[追加消息上下文]"标记，表示那次回复时你已参考了紧随其后保存的追加消息，
+  这些追加消息虽然在历史中排在你的回复之后，但实际上是在你回复之前收到的，不要对此感到困惑。
 
 记住：就像是你自己突然想到了什么，很自然地说出来，不要有任何关于"主动发起"的痕迹。
 """
@@ -3336,8 +3466,7 @@ class ProactiveChatManager:
                         f"[{current_time_str}] {proactive_system_prompt}"
                     )
                 except Exception as e:
-                    if debug_mode:
-                        logger.warning(f"[主动对话] 生成时间戳失败: {e}")
+                    logger.warning(f"[主动对话] 生成时间戳失败: {e}")
 
             # ========== 步骤1.5: 🆕 注入注意力用户信息（如果启用）==========
 
@@ -3628,6 +3757,13 @@ class ProactiveChatManager:
                 )
 
             history_messages = []
+            platform_name = platform_id
+            self_id = ""
+            if hasattr(context, "get_self_id"):
+                try:
+                    self_id = context.get_self_id() or ""
+                except Exception:
+                    self_id = ""
 
             # 🔧 修复：确保 platform_id 是字符串类型（防御性编程）
             if isinstance(platform_id, list):
@@ -3762,7 +3898,11 @@ class ProactiveChatManager:
                                         and "content" in msg
                                     ):
                                         msg_obj = AstrBotMessage()
-                                        msg_obj.message_str = msg["content"]
+                                        msg_obj.message_str = (
+                                            ContextManager._content_to_safe_text(
+                                                msg.get("content")
+                                            )
+                                        )
                                         msg_obj.platform_name = (
                                             platform_id  # 🔧 修复：使用platform_id
                                         )
@@ -3872,7 +4012,11 @@ class ProactiveChatManager:
                         if isinstance(cached_msg, dict):
                             try:
                                 msg_obj = AstrBotMessage()
-                                msg_obj.message_str = cached_msg.get("content", "")
+                                msg_obj.message_str = (
+                                    ContextManager._content_to_safe_text(
+                                        cached_msg.get("content", "")
+                                    )
+                                )
                                 msg_obj.platform_name = platform_name
                                 msg_obj.timestamp = cached_msg.get(
                                     "message_timestamp"
@@ -3897,8 +4041,7 @@ class ProactiveChatManager:
                                     )
                                 cached_astrbot_messages_for_fallback.append(msg_obj)
                             except Exception as e:
-                                if debug_mode:
-                                    logger.warning(f"[主动对话] 转换缓存消息失败: {e}")
+                                logger.warning(f"[主动对话] 转换缓存消息失败: {e}")
                         elif isinstance(cached_msg, AstrBotMessage):
                             cached_astrbot_messages_for_fallback.append(cached_msg)
 
@@ -3996,15 +4139,24 @@ class ProactiveChatManager:
                                     if raw_content:
                                         history_contents.add(raw_content)
                         elif isinstance(msg, dict) and "content" in msg:
-                            history_contents.add(msg["content"])
+                            history_contents.add(
+                                ContextManager._make_content_hashable(msg["content"])
+                            )
 
                     # 检查缓存消息是否已在历史中（去重
                     for cached_msg in cached_messages:
                         if isinstance(cached_msg, dict) and "content" in cached_msg:
-                            cached_content = cached_msg.get("content", "").strip()
+                            cached_content = ContextManager._content_to_safe_text(
+                                cached_msg.get("content", "")
+                            ).strip()
                             if cached_content:
                                 # 检查是否重复
-                                if cached_content not in history_contents:
+                                if (
+                                    ContextManager._make_content_hashable(
+                                        cached_msg.get("content", "")
+                                    )
+                                    not in history_contents
+                                ):
                                     cached_messages_to_merge.append(cached_msg)
                                 elif debug_mode:
                                     logger.info(
@@ -4040,7 +4192,9 @@ class ProactiveChatManager:
                     if isinstance(cached_msg, dict):
                         try:
                             msg_obj = AstrBotMessage()
-                            msg_obj.message_str = cached_msg.get("content", "")
+                            msg_obj.message_str = ContextManager._content_to_safe_text(
+                                cached_msg.get("content", "")
+                            )
                             msg_obj.platform_name = (
                                 platform_id  # 🔧 修复：使用platform_id
                             )
@@ -4191,9 +4345,20 @@ class ProactiveChatManager:
                 memory_mode = cls._memory_plugin_mode
                 livingmemory_top_k = cls._livingmemory_top_k
                 livingmemory_version = cls._livingmemory_version
+                livingmemory_persona_compat_mode = cls._livingmemory_persona_compat_mode
+
+                # auto模式：自动检测可用的记忆插件
+                memory_mode, livingmemory_version = MemoryInjector.resolve_mode(
+                    context, memory_mode, livingmemory_version
+                )
 
                 # 使用新的 get_memories_by_session 方法获取记忆（无需 event 对象）
-                if MemoryInjector.check_memory_plugin_available(
+                if memory_mode is None:
+                    if debug_mode:
+                        logger.info(
+                            "[主动对话] auto模式未检测到可用的记忆插件，跳过记忆注入"
+                        )
+                elif MemoryInjector.check_memory_plugin_available(
                     context, mode=memory_mode, version=livingmemory_version
                 ):
                     try:
@@ -4203,6 +4368,7 @@ class ProactiveChatManager:
                             mode=memory_mode,
                             top_k=livingmemory_top_k,
                             version=livingmemory_version,
+                            persona_compat_mode=livingmemory_persona_compat_mode,
                         )
                         if memories:
                             old_len = len(final_message)
@@ -4233,44 +4399,92 @@ class ProactiveChatManager:
                     # 保存原始完整提示词（判断完成后直接用于生成，不经过判断AI的提示词污染）
                     saved_final_message = final_message
 
-                    # 提取当前人格（每次重新提取，避免用户中途切换人格）
-                    judge_persona_prompt = ""
-                    try:
-                        judge_persona = (
-                            await context.persona_manager.get_default_persona_v3(
-                                unified_msg_origin
-                            )
-                        )
-                        judge_persona_prompt = judge_persona.get("prompt", "")
-                        if debug_mode:
-                            logger.info(
-                                f"[主动对话-AI预判断] 已提取人格: {judge_persona.get('name', 'default')}"
-                            )
-                    except Exception as e:
-                        if debug_mode:
-                            logger.warning(f"[主动对话-AI预判断] 提取人格失败: {e}")
+                    from .decision_ai import DecisionAI
 
-                    # 构建判断AI的提示词（静态部分在前，利于缓存命中）
+                    protocol_builder = DecisionAI
+
+                    persona_result = await protocol_builder.resolve_judgment_persona(
+                        context=context,
+                        unified_msg_origin=unified_msg_origin,
+                        include_persona=cls._proactive_ai_judge_include_persona,
+                        configured_persona_name=cls._proactive_ai_judge_persona_name,
+                        log_prefix="[主动对话-AI预判断]",
+                    )
+                    judge_persona_prompt = (
+                        persona_result.get("system_prompt", "") or ""
+                    )
+
                     default_judge_prompt = (
-                        "你是一个对话场景判断助手。你当前扮演的人格信息已通过系统提示词提供，请以该人格的视角进行判断。\n\n"
-                        "你的任务是根据以下对话上下文，判断当前是否适合以你的人格身份主动发起一条新消息。\n\n"
+                        "你当前的任务是做‘是否适合主动开口’的判断，不是直接生成最终要发出去的话。\n\n"
+                        + protocol_builder.build_judgment_persona_notice("主动对话预判断")
+                        + "\n"
+                        + "【主动对话预判断条件说明】\n"
+                        + "- 你主要根据当前对话上下文、最近是否有人接话、距离你上次发言的间隔、当前时间段和整体氛围来判断。\n"
+                        + "- 这里不是关键词直接唤起型流程；即使某些上下文里出现触发词，也不代表你必须主动开口。\n"
+                        + "- 你的职责是判断‘现在这个时机是否适合主动发起一条新消息’，而不是设计回复内容本身。\n\n"
+                        + "你的任务是根据以下对话上下文，判断当前是否适合以你的人格身份主动发起一条新消息。\n\n"
                         "判断标准：\n"
                         "1. 对话氛围是否适合你插入新话题（如果大家正在热聊某个与你无关的话题，可能不适合打断）\n"
                         "2. 是否有你可以自然接入的话题点或未回应的内容\n"
                         "3. 距离你上次发言是否已经过了合理的时间间隔\n"
                         "4. 当前时间段是否适合主动发言（深夜可能不太合适）\n"
                         "5. 结合你的人格特点，判断你这个角色在当前情境下是否会主动说话\n\n"
-                        "请只回答 yes 或 no：\n"
-                        "- yes = 适合现在主动发起对话\n"
-                        "- no = 现在不适合，跳过这次\n\n"
-                        "只需回答 yes 或 no，不要解释原因。"
+                        "历史标记说明：\n"
+                        '- 历史中你的回复末尾可能带有"[追加消息上下文]"标记，表示那次回复时你已参考了紧随其后保存的追加消息，\n'
+                        "  这些追加消息虽然在历史中排在你的回复之后，但实际上是在你回复之前收到的，不要对此感到困惑\n\n"
+                        "【默认输出要求】：\n"
+                        "- 适合现在主动发起对话：输出 yes\n"
+                        "- 现在不适合，跳过这次：输出 no\n"
+                        "- 默认情况下只需回答 yes 或 no，不要解释原因\n"
+                        "- 如果系统通过【额外推理协议】要求先输出推理过程，则必须先输出推理块\n"
+                        "- 推理块结束后，最后一行必须且只能是 yes 或 no\n"
+                        "- 最终结论不得附带解释、标点或前后缀。"
                     )
+
+                    # 根据是否启用额外推理，附加不同的输出协议
+                    _use_reasoning = cls._enable_proactive_ai_reasoning
+                    _r_start = (
+                        cls._judgment_reasoning_start_marker if _use_reasoning else ""
+                    )
+                    _r_end = (
+                        cls._judgment_reasoning_end_marker if _use_reasoning else ""
+                    )
+
+                    if _use_reasoning and _r_start and _r_end:
+                        default_judge_prompt += (
+                            protocol_builder._build_reasoning_protocol(
+                                _r_start,
+                                _r_end,
+                                allowed_answers=["yes", "no"],
+                            )
+                        )
+                    else:
+                        default_judge_prompt += (
+                            "请只回答 yes 或 no：\n"
+                            "- yes = 适合现在主动发起对话\n"
+                            "- no = 现在不适合，跳过这次\n\n"
+                            "只需回答 yes 或 no，不要解释原因。"
+                        )
 
                     judge_prompt_text = (
                         cls._proactive_ai_judge_prompt.strip()
                         if cls._proactive_ai_judge_prompt
                         else ""
                     )
+                    # 稳妥兼容：开启额外推理时，保留用户提示词本体，仅在缺少推理协议时自动补充。
+                    judge_prompt_text, _protocol_injected = (
+                        protocol_builder._ensure_reasoning_protocol(
+                            judge_prompt_text,
+                            enable_reasoning=_use_reasoning,
+                            reasoning_start_marker=_r_start,
+                            reasoning_end_marker=_r_end,
+                            allowed_answers=["yes", "no"],
+                        )
+                    )
+                    if _protocol_injected and debug_mode:
+                        logger.info(
+                            "[主动对话-AI预判断] 已保留用户自定义提示词，并自动补充额外推理协议"
+                        )
                     if not judge_prompt_text:
                         judge_prompt_text = default_judge_prompt
 
@@ -4302,8 +4516,9 @@ class ProactiveChatManager:
                         logger.warning(
                             "[主动对话-AI预判断] 未找到可用的AI提供商，跳过本次主动对话"
                         )
-                        state = cls.get_chat_state(chat_key)
-                        state["last_bot_reply_time"] = time.time()
+                        logger.info(
+                            "[主动对话-AI预判断] 无可用AI提供商，跳过本次（不影响打分/概率/冷淡期/沉默计时器机制）"
+                        )
                         return
 
                     # 调用AI判断（带超时控制）
@@ -4323,16 +4538,37 @@ class ProactiveChatManager:
                         _call_judge_ai(), timeout=judge_timeout
                     )
 
-                    # 过滤思考链
+                    # 🆕 统一解析协议：支持额外推理块提取
                     from .ai_response_filter import AIResponseFilter
 
-                    judge_response = AIResponseFilter.filter_thinking_chain(
-                        judge_response
+                    _use_reasoning = cls._enable_proactive_ai_reasoning
+                    _r_start = (
+                        cls._judgment_reasoning_start_marker if _use_reasoning else ""
+                    )
+                    _r_end = (
+                        cls._judgment_reasoning_end_marker if _use_reasoning else ""
                     )
 
-                    # 解析判断结果
-                    judge_result = judge_response.strip().lower().rstrip(".,!?。，！？")
-                    judge_pass = judge_result in (
+                    parse_result = AIResponseFilter.parse_decision_response(
+                        judge_response,
+                        start_marker=_r_start,
+                        end_marker=_r_end,
+                    )
+
+                    # 如果启用了额外推理且开启了日志，按配置输出推理信息
+                    if _use_reasoning:
+                        protocol_builder.log_reasoning_output(
+                            log_prefix="[主动对话-AI预判断-额外推理]",
+                            raw_response=judge_response,
+                            parse_result=parse_result,
+                            log_enabled=cls._proactive_ai_reasoning_log,
+                            log_mode=cls._proactive_ai_reasoning_log_mode,
+                        )
+
+                    judge_answer = (
+                        (parse_result.get("normalized_answer") or "").strip().lower()
+                    )
+                    judge_pass = judge_answer in (
                         "yes",
                         "y",
                         "是",
@@ -4364,17 +4600,19 @@ class ProactiveChatManager:
 
                 except asyncio.TimeoutError:
                     logger.warning(
-                        f"[主动对话-AI预判断] 群{chat_key} - AI判断超时（{cls._proactive_ai_judge_timeout}秒），默认不触发"
+                        f"[主动对话-AI预判断] 群{chat_key} - AI判断超时（{cls._proactive_ai_judge_timeout}秒），跳过本次主动对话"
                     )
-                    state = cls.get_chat_state(chat_key)
-                    state["last_bot_reply_time"] = time.time()
+                    logger.info(
+                        "[主动对话-AI预判断] 超时跳过，不影响打分/概率/冷淡期/沉默计时器机制，快速进入下一次"
+                    )
                     return
                 except Exception as e:
-                    logger.warning(
-                        f"[主动对话-AI预判断] 群{chat_key} - AI判断调用失败: {e}，默认不触发"
+                    logger.error(
+                        f"[主动对话-AI预判断] 群{chat_key} - {format_ai_error(e, '主动对话预判断')}"
                     )
-                    state = cls.get_chat_state(chat_key)
-                    state["last_bot_reply_time"] = time.time()
+                    logger.info(
+                        "[主动对话-AI预判断] AI调用失败，跳过本次主动对话（不影响打分/概率/冷淡期/沉默计时器机制）"
+                    )
                     return
 
             # 注入情绪状态（如果启用，放在AI预判断之后避免影响判断）
@@ -4437,8 +4675,7 @@ class ProactiveChatManager:
                             f"[主动对话-人格获取] 已获取begin_dialogs并转换为文本，长度: {len(begin_dialogs_text)} 字符"
                         )
             except Exception as e:
-                if debug_mode:
-                    logger.warning(f"[主动对话-人格获取] 获取失败: {e}，使用空人格")
+                logger.warning(f"[主动对话-人格获取] 获取失败: {e}，使用空人格")
 
             # 如果有begin_dialogs，将其添加到prompt开头
             if begin_dialogs_text:
@@ -4462,11 +4699,13 @@ class ProactiveChatManager:
 
             # 🆕 v1.2.0: 创建 ProviderRequest 并尝试触发 on_llm_request 钩子
             # 这样可以让其他插件（如 emotionai）注入提示词
+            # 主动对话不需要工具调用：保留 on_llm_request 钩子用于其他插件注入提示词，
+            # 但显式不向模型传递工具集，避免无意义的工具调用与额外 token 开销。
             req = ProviderRequest(
                 prompt="",
                 session_id=f"{platform_id}_{chat_id}",
                 image_urls=[],
-                func_tool=func_tools_mgr,
+                func_tool=None,
                 contexts=[],
                 system_prompt=system_prompt,
                 conversation=None,
@@ -4494,7 +4733,8 @@ class ProactiveChatManager:
                     #    main.py 的 on_llm_request 钩子（priority=-1）会把
                     #    req.prompt 换回 final_message 供 AI 推理使用。
                     virtual_event.set_extra(PLUGIN_CURRENT_MESSAGE, "")
-                    virtual_event.set_extra(PLUGIN_FUNC_TOOL, func_tools_mgr)
+                    # 主动对话链路明确禁用工具调用，这里不要向 on_llm_request 传递 PLUGIN_FUNC_TOOL，
+                    # 否则 main.py 会再次把工具集恢复到 req.func_tool 中。
 
                     # 触发 on_llm_request 钩子
                     await call_event_hook(
@@ -4509,50 +4749,53 @@ class ProactiveChatManager:
                             f"  - system_prompt 长度变化: {len(system_prompt)} -> {len(req.system_prompt)}"
                         )
                 else:
-                    if debug_mode:
-                        logger.warning("[主动对话] 无法创建虚拟 event，跳过钩子触发")
+                    logger.warning("[主动对话] 无法创建虚拟 event，跳过钩子触发")
             except ImportError as e:
-                if debug_mode:
-                    logger.warning(f"[主动对话] 无法导入钩子模块: {e}，跳过钩子触发")
+                logger.warning(f"[主动对话] 无法导入钩子模块: {e}，跳过钩子触发")
             except Exception as e:
-                if debug_mode:
-                    logger.warning(f"[主动对话] 触发钩子失败: {e}，继续使用原始请求")
+                logger.warning(f"[主动对话] 触发钩子失败: {e}，继续使用原始请求")
 
             # 调用AI生成
-            _generation_start = time.time()
-            completion_result = await provider.text_chat(
-                prompt=req.prompt,
-                session_id=req.session_id,
-                contexts=req.contexts,
-                system_prompt=req.system_prompt,
-                image_urls=req.image_urls,
-                func_tool_manager=req.func_tool,
-            )
-            _generation_elapsed = time.time() - _generation_start
-
-            if not completion_result or not hasattr(
-                completion_result, "completion_text"
-            ):
-                logger.warning("[主动对话生成] AI未生成有效内容")
-                return
-
-            generated_content = completion_result.completion_text.strip()
-            # 🆕 v1.2.0: 保存原始内容用于保存过滤（与普通回复流程一致的冗余设计）
-            original_generated_content = generated_content
-
-            # 耗时监控和警告
-            # 🔧 使用类变量替代 config.get()
-            timeout_warning = cls._proactive_generation_timeout_warning
-            if _generation_elapsed > timeout_warning:
-                logger.warning(
-                    f"⚠️ [主动对话生成] AI生成耗时异常: {_generation_elapsed:.2f}秒（超过{timeout_warning}秒）"
+            try:
+                _generation_start = time.time()
+                completion_result = await provider.text_chat(
+                    prompt=req.prompt,
+                    session_id=req.session_id,
+                    contexts=req.contexts,
+                    system_prompt=req.system_prompt,
+                    image_urls=req.image_urls,
+                    func_tool_manager=None,
                 )
-            elif debug_mode:
-                logger.info(f"[主动对话生成] AI生成耗时: {_generation_elapsed:.2f}秒")
+                _generation_elapsed = time.time() - _generation_start
 
-            logger.info(
-                f"✅ [主动对话生成] AI成功生成内容，长度: {len(generated_content)} 字符"
-            )
+                if not completion_result or not hasattr(
+                    completion_result, "completion_text"
+                ):
+                    logger.warning("[主动对话生成] AI未生成有效内容")
+                    return
+
+                generated_content = completion_result.completion_text.strip()
+                original_generated_content = generated_content
+
+                timeout_warning = cls._proactive_generation_timeout_warning
+                if _generation_elapsed > timeout_warning:
+                    logger.warning(
+                        f"⚠️ [主动对话生成] AI生成耗时异常: {_generation_elapsed:.2f}秒（超过{timeout_warning}秒）"
+                    )
+                elif debug_mode:
+                    logger.info(
+                        f"[主动对话生成] AI生成耗时: {_generation_elapsed:.2f}秒"
+                    )
+
+                logger.info(
+                    f"✅ [主动对话生成] AI成功生成内容，长度: {len(generated_content)} 字符"
+                )
+            except Exception as e:
+                logger.error(f"{format_ai_error(e, '主动对话生成')}")
+                logger.info(
+                    "[主动对话] AI调用失败，跳过本次主动对话（不影响打分/概率/冷淡期机制）"
+                )
+                return
 
             # ========== 🆕 v1.2.0: 应用输出内容过滤（独立于保存过滤，与普通回复流程一致）==========
             # 输出过滤：控制发送给用户的内容
@@ -5029,17 +5272,24 @@ class ProactiveChatManager:
                 existing_contents = set()
                 for msg in history_list:
                     if isinstance(msg, dict) and "content" in msg:
-                        content = msg["content"]
-                        if isinstance(content, str):
+                        content = ContextManager._make_content_hashable(msg["content"])
+                        if content is not None:
                             existing_contents.add(content)
 
                 # 处理每条缓存消息，转换为官方格式并去重
                 for cached_msg in cached_messages_raw:
                     if isinstance(cached_msg, dict) and "content" in cached_msg:
-                        raw_content = cached_msg.get("content", "")
+                        raw_content = ContextManager._content_to_safe_text(
+                            cached_msg.get("content", "")
+                        )
 
                         # 去重检查
-                        if raw_content in existing_contents:
+                        if (
+                            ContextManager._make_content_hashable(
+                                cached_msg.get("content", "")
+                            )
+                            in existing_contents
+                        ):
                             if debug_mode:
                                 logger.info(
                                     f"[主动对话保存] 跳过重复的缓存消息: {raw_content[:50]}..."
@@ -5127,7 +5377,11 @@ class ProactiveChatManager:
                                 {"role": "user", "content": formatted_content}
                             )
 
-                        existing_contents.add(formatted_content)
+                        existing_contents.add(
+                            ContextManager._make_content_hashable(
+                                cached_msg.get("content", "")
+                            )
+                        )
 
                 if debug_mode:
                     logger.info(
@@ -5234,10 +5488,9 @@ class ProactiveChatManager:
                                     )
                                     history.append(cached_astrbot_msg)
                                 except Exception as e:
-                                    if debug_mode:
-                                        logger.warning(
-                                            f"[主动对话保存] 转换缓存消息到自定义历史失败: {e}"
-                                        )
+                                    logger.warning(
+                                        f"[主动对话保存] 转换缓存消息到自定义历史失败: {e}"
+                                    )
 
                     # 保存主动对话系统提示
                     system_msg = AstrBotMessage()
@@ -5350,7 +5603,13 @@ class ProactiveChatManager:
             cls.activate_temp_probability_boost(chat_key, boost_value, boost_duration)
 
         except Exception as e:
-            logger.error(f"[主动对话处理] 发生错误: {e}", exc_info=True)
+            logger.error(
+                f"{format_ai_error(e, '主动对话-发送/保存')}",
+                exc_info=True,
+            )
+            logger.info(
+                "[主动对话] 发送或保存阶段出错，跳过本次主动对话（不影响打分/概率/冷淡期机制）"
+            )
         finally:
             # ========== 🆕 并发保护：清除主动对话处理标记 ==========
             # 🔒 使用锁保护删除操作，避免与并发检测冲突
@@ -5364,6 +5623,15 @@ class ProactiveChatManager:
                             logger.info(
                                 f"🔓 [主动对话-并发保护] 已清除会话 {chat_id} 的主动对话处理标记"
                             )
+                    flow_owner = getattr(plugin_instance, "_chat_flow_owners", {}).get(
+                        chat_id
+                    )
+                    if flow_owner and flow_owner.get("owner") == "proactive":
+                        plugin_instance._chat_flow_owners.pop(chat_id, None)
+                        if cls._debug_mode:
+                            logger.info(
+                                f"🔓 [主动对话-并发保护] 已清除会话 {chat_id} 的 flow owner=proactive"
+                            )
             elif hasattr(plugin_instance, "proactive_processing_sessions"):
                 # 兜底：如果没有 concurrent_lock（旧版本），直接删除（不安全但保持兼容）
                 if chat_id in plugin_instance.proactive_processing_sessions:
@@ -5372,6 +5640,10 @@ class ProactiveChatManager:
                         logger.info(
                             f"🔓 [主动对话-并发保护] 已清除会话 {chat_id} 的主动对话处理标记（无锁）"
                         )
+                if hasattr(plugin_instance, "_chat_flow_owners"):
+                    flow_owner = plugin_instance._chat_flow_owners.get(chat_id)
+                    if flow_owner and flow_owner.get("owner") == "proactive":
+                        plugin_instance._chat_flow_owners.pop(chat_id, None)
 
     # ========== 状态持久化 ==========
 

@@ -29,14 +29,20 @@
         <!-- 移动端：顶部栏 -->
         <div id="mobile-topbar">
             <button id="btn-mobile-menu" class="btn-icon" aria-label="打开菜单">☰</button>
-            <span id="mobile-topbar-title">配置流程图</span>
+            <div class="mobile-topbar-brand">
+                <span id="mobile-topbar-title">配置流程图</span>
+                <span class="mobile-topbar-version">__PLUGIN_VERSION__</span>
+            </div>
         </div>
 
         <!-- 侧边栏 -->
         <nav id="sidebar">
             <div class="sidebar-header">
                 <img src="/api/logo" alt="Logo" class="sidebar-logo">
-                <span class="sidebar-title">GCP 面板</span>
+                <div class="sidebar-brand">
+                    <span class="sidebar-title">GCP 面板</span>
+                    <span class="sidebar-version">__PLUGIN_VERSION__</span>
+                </div>
             </div>
             <ul class="nav-list">
                 <li class="nav-item active" data-view="tech-tree">
@@ -55,7 +61,7 @@
                     <span class="nav-icon">📋</span> 访问日志
                 </li>
                 <li class="nav-item" data-view="settings">
-                    <span class="nav-icon">⚙️</span> Web 核心设置
+                    <span class="nav-icon">⚙️</span> 核心设置
                 </li>
                 <li class="nav-item" data-view="files">
                     <span class="nav-icon">📁</span> 文件管理
@@ -69,6 +75,7 @@
                     <span> · QQ群 1021544792</span>
                 </div>
                 <button id="btn-theme-toggle" class="btn btn-sm">🌙 切换主题</button>
+                <button id="btn-support-author" class="btn btn-sm">❤️ 支持作者</button>
                 <button id="btn-feedback" class="btn btn-sm">🐛 反馈BUG</button>
                 <button id="btn-logout" class="btn btn-sm">退出登录</button>
             </div>
@@ -80,6 +87,13 @@
             <div id="view-tech-tree" class="view active">
                 <div class="view-header">
                     <h2>消息处理流程图</h2>
+                    <div id="flow-search-wrap" class="flow-search-wrap">
+                        <span class="flow-search-icon">🔍</span>
+                        <input id="flow-search-input" type="text"
+                               placeholder="搜索配置项、步骤名称..."
+                               autocomplete="off">
+                        <div id="flow-search-results" class="flow-search-results hidden"></div>
+                    </div>
                     <div class="view-actions">
                         <button id="btn-save-config" class="btn btn-primary btn-sm hidden">
                             💾 保存并重启插件

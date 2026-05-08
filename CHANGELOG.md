@@ -1,5 +1,105 @@
 ## 📝 更新日志
 
+### Unreleased
+
+**Web 面板会话与安全配置增强**
+
+- Web 面板登录态升级为 **JWT + HttpOnly Cookie + 服务端会话表**，支持多设备/多浏览器并存登录，默认不会互踢
+- 新增会话心跳检测与前端缓冲重试机制：前台/后台心跳、失败退避重试、Leader/Follower 多标签协同
+- Web 面板新增会话心跳状态展示区，可查看当前会话 ID、设备 ID、心跳间隔、重试策略、最近一次心跳成功时间、是否处于缓冲重试期
+- 新增右下角配置文件名浮层，仅显示实际配置文件名，不显示路径；当前只在「配置流程图」和「核心设置」页面显示
+- Web 面板左上角现已显示插件版本号：服务端直接从 `metadata.yaml` 读取并注入模板，自动兼容深色/浅色主题与桌面/平板/手机布局，不向前端暴露插件绝对路径
+- 新增配置项：
+  - `web_panel_authenticated_rate_limit`
+  - `web_panel_heartbeat_visible_interval_seconds`
+  - `web_panel_heartbeat_hidden_interval_seconds`
+  - `web_panel_heartbeat_retry_base_seconds`
+  - `web_panel_heartbeat_retry_max_seconds`
+- `web_panel_trust_proxy` 现已归类为安全边界配置：只能通过 AstrBot 传统配置界面修改，Web 面板中只读显示
+- `web_panel_ip_bind_check` 与新的心跳频率/重试策略同样按安全敏感配置处理：前端只读，后端 `/api/config` 与 `/api/config/reload` 同步拦截绕过写入
+- 已登录请求不再完全跳过防护，现新增独立的已登录请求速率阈值；心跳请求不会触发封禁，但仍会记录会话活跃状态
+- 文档已同步更新配置参考、架构说明和桌面端代理补充说明
+
+**system_prompt 兼容增强与保守回退**
+
+- `on_llm_request` 中最脆弱的 system_prompt 重写逻辑已升级为保守增强版：优先沿用旧版精确命中路径，兼容 AstrBot 平台 persona 包装和空白轻微变化，并补充已知平台 LTM 模式表
+- 当平台或第三方插件的提示词结构变化到无法高置信度识别时，插件不再静默假设“已经成功替换”，而是进入显式的保守兼容模式：优先保留当前 `req.system_prompt`，并输出 warning 日志，但不阻断回复链
+- 其他插件追加到 `system_prompt` 的内容现在会尽量按 persona 前后顺序保留；若无法可靠保序，则仍以“不断链、尽量保留内容”为第一目标
+- 普通群聊、私聊回复、主动对话、私聊主动对话继续复用同一套 marker + `on_llm_request` 恢复机制；`req.prompt` / `req.contexts` / `req.func_tool` 主语义保持不变
+- README、架构说明、消息流程、配置参考、项目结构文档已同步更新，明确说明兼容边界、失败回退和排查方式
+
+**戳一戳历史语义保留**
+
+- 对本插件**最终实际接手处理**的真实 poke 事件，新增可持久化的历史事件文本，后续 AI 可从历史中继续区分“谁戳了谁”
+- 该能力不新增独立配置项，直接复用现有 `poke_message_mode`、平台/协议限制与群白名单过滤结果
+- 当前轮运行时 `[戳一戳提示]` 仍然保留；保存历史时继续过滤运行时提示，仅保留新的历史事件文本
+- AI 回复后戳一戳、收到 poke 后反戳在动作真实成功时，会额外单独保存一条 AI 视角的戳一戳历史事件，不与正文回复拼接
+- `_conf_schema.json`、README、配置参考与消息流程文档已同步补充该自动生效行为及 Web 端展示文案
+
+### v1.2.2 (2026-03-26)
+
+**🔐 Web 面板密码哈希升级：PBKDF2 → Argon2id**
+
+- **默认新哈希算法改为 Argon2id** — Web 面板密码不再默认使用 PBKDF2-SHA256，新生成/修改/重置后的密码统一写入 Argon2id 哈希，提升抗 GPU 暴力破解能力
+- **旧密码自动透明迁移** — 若现有 `auth.json` 仍为旧版 PBKDF2 哈希，用户使用原密码首次登录成功后会自动升级为 Argon2id，无需手动改密；兼容用户自定义密码与重置后的默认随机密码
+- **新增 `hash_version` 字段** — `web_data/auth.json` 会记录当前哈希类型，便于后续排查与跨版本兼容判断
+
+**🧠 判断型AI额外推理协议 + 统一解析架构**
+
+**补充说明（Web 面板密码文件路径）**：当前版本 Web 面板固定使用 `web_data/auth.json` 保存认证信息。若从更早版本升级，且旧密码文件仍位于插件数据根目录 `auth.json`，升级前请先移动到 `web_data/auth.json`，否则新版本会生成新的默认密码。若目录下同时存在两个 `auth.json`，在确认 `web_data/auth.json` 正常可用后，可删除根目录旧文件以避免混淆。
+
+**核心升级：三个判断型AI全面支持"额外推理输出"协议**
+
+- **统一解析架构** — 新增 `parse_decision_response()` / `parse_frequency_response()` 两个结构化解析方法，替代原来分散的手写解析逻辑。分层处理：① 过滤模型原生思考链（`<think>/<thinking>`等）→ ② 剥离自定义推理块 → ③ 归一化最终判定
+- **读空气AI额外推理** — 新增 `enable_decision_ai_reasoning` + `decision_ai_reasoning_log`。开启后AI先输出推理过程再给出 yes/no，推理块由起止标志符包裹，系统自动剥离不影响判定逻辑
+- **主动对话判断AI额外推理** — 新增 `enable_proactive_ai_reasoning` + `proactive_ai_reasoning_log`。对主动对话时机判断同样支持额外推理模式，AI不通过/解析失败时继续保持"跳过本次但不进入冷却"的行为
+- **频率判断AI额外推理** — 新增 `enable_frequency_ai_reasoning` + `frequency_ai_reasoning_log`。频率判断AI在给出「正常/过于频繁/过少」结论前可先输出推理块，解析失败时保守处理不调整概率
+- **共享标志符配置** — 新增 `judgment_reasoning_start_marker` / `judgment_reasoning_end_marker`，三个判断型AI共享同一套起止标志符，默认 `[[GCP_REASONING_START]]` / `[[GCP_REASONING_END]]`
+
+**后续补强（协议严格化 + 日志模式）**：
+- 三个判断型AI的额外推理协议已升级为严格格式：必须先输出推理块，再在最后一行单独输出最终结论；最终结论不得附带解释、前后缀或标点
+- 解析器已改为优先读取“推理块外最后一个非空行”作为最终答案；若模型未严格遵守协议，会回退到兼容解析并在日志中给出告警
+- 三个判断型AI现已支持独立的推理日志输出模式：`processed`（处理后的推理块）或 `raw`（模型原始完整文本）
+
+**推理日志机制说明**：
+- 「额外推理块」= 我们额外要求模型输出、由标志符包裹的推理内容，可按配置决定是否写日志
+- 「模型原生思考链」= 模型自带的 `<think>` / `<thinking>` 等标签，无论是否开启推理日志，都直接过滤掉
+
+**兼容性**：
+- 三个判断型AI默认值均为 `false`（关闭额外推理），完全向后兼容，旧版配置无需任何修改
+- 非思考模型也可通过此机制获得推理能力；思考模型开启后先过模型自带思考链过滤，再过自定义推理块剥离，两层处理互不干扰
+- 解析失败时所有判断型AI统一走保守路径：读空气 → 不回复，主动对话判断 → 跳过，频率判断 → 不调整概率
+
+**新增配置项汇总**：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `judgment_reasoning_start_marker` | `[[GCP_REASONING_START]]` | 三个判断型AI共享的推理起始符 |
+| `judgment_reasoning_end_marker` | `[[GCP_REASONING_END]]` | 三个判断型AI共享的推理截止符 |
+| `enable_decision_ai_reasoning` | `false` | 读空气AI额外推理开关 |
+| `decision_ai_reasoning_log` | `false` | 读空气AI推理过程输出到日志 |
+| `decision_ai_reasoning_log_mode` | `processed` | 读空气AI推理日志输出模式（处理后推理块 / 原始模型文本） |
+| `enable_proactive_ai_reasoning` | `false` | 主动对话判断AI额外推理开关 |
+| `proactive_ai_reasoning_log` | `false` | 主动对话判断AI推理过程输出到日志 |
+| `proactive_ai_reasoning_log_mode` | `processed` | 主动对话判断AI推理日志输出模式（处理后推理块 / 原始模型文本） |
+| `enable_frequency_ai_reasoning` | `false` | 频率判断AI额外推理开关 |
+| `frequency_ai_reasoning_log` | `false` | 频率判断AI推理过程输出到日志 |
+| `frequency_ai_reasoning_log_mode` | `processed` | 频率判断AI推理日志输出模式（处理后推理块 / 原始模型文本） |
+
+**Web 面板适配**：所有新配置项已添加到对应节点，提示词预览文案同步更新。`flow-data.js` 三处判断节点说明已更新，`prompt-data.js` 读空气AI和主动对话判断AI描述已更新。
+
+---
+
+### v1.2.1-patch1 (2026-03-23)
+
+**冷群缓存自动转正**
+
+- **新增 `enable_idle_cache_flush`** — 开启后，当群聊静默超过 `idle_cache_flush_delay_seconds` 秒没有任何新消息时，自动将待处理池中的缓存消息转正写入历史记录（官方对话历史 + 自定义存储），避免因过期被丢弃造成的上下文断裂。每收到一条新消息自动重置计时器（滑动窗口）。转正内容与普通回复触发的转正完全一致：按消息原始时间戳排序，携带发送者ID/昵称/时间戳等完整元数据，由 `include_timestamp` / `include_sender_info` 开关控制注入内容。
+- **新增 `idle_cache_flush_delay_seconds`** — 独立配置冷群转正的触发延迟（秒，默认600，范围60-7200），与 `pending_cache_ttl_seconds`（缓存过期时间）完全解耦，各自独立控制。
+- **Web 面板适配** — 两个新配置项已添加到「上下文构建」节点，可在 Web 面板直接编辑。
+
+---
+
 ### v1.2.1 (2026-03-13)
 
 **新增 Web 管理面板 + 多项拟人化与智能化增强**
@@ -22,7 +122,7 @@
 - **多工具调用兼容** — AI 在单次推理中调用多个工具或发生多轮工具调用时，按实际执行顺序将 AI 中间文本与工具调用记录（调用名称+参数+返回值）交错保存到对话历史；兼容 ToolCall 对象和 dict 两种格式，支持无最终文本输出时的兜底保存
 
 **🔧 兼容性**:
-- 完全向下兼容 v1.2.0 配置，零成本升级
+- v1.2.0 的大部分行为保持兼容；如仍保留冷却相关旧键，请按新键名迁移配置
 - 所有新功能均有合理默认值，不影响现有行为
 
 **修改文件**:
@@ -52,7 +152,7 @@
 - **群聊等待窗口** — 同一用户连续发消息时合并处理，避免消息碎片化
 - **拟人增强模式** — 沉默状态机、决策历史追踪、兴趣话题匹配、动态消息阈值
 - **对话疲劳机制** — 三级疲劳(轻/中/重)，连续对话越多回复倾向越低
-- **转发消息解析** — 自动解析QQ合并转发消息为可读文本
+- **转发消息解析** — 面向 QQ / OneBot 场景解析合并转发消息，并支持嵌套转发展开
 - **图片描述缓存** — 本地缓存图片转文字结果，相同URL不重复调用
 - **注意力冷却机制** — AI不回复时智能降低注意力，带保护阈值
 - **表情包概率衰减** — QQ表情包消息自动降低触发概率
@@ -105,11 +205,12 @@
   - 让AI像真人一样：越聊越开心，冷场自动收敛
 
 - 🎯 **注意力机制增强** - 智能衰减与情感检测
-  - 新增 `attention_decrease_on_no_reply_step` 配置项（默认0.15）
-    - AI判断不回复时，智能降低对该用户的注意力
-    - 表示用户可能在跟别人聊天，AI应减少关注
+  - 新增 `attention_decay_on_no_reply_step` 配置项（默认0.2）
+    - 当普通概率路径消息通过概率筛选但被读空气AI判定不回复时，智能降低对该用户的注意力
+    - 若未开启注意力冷却，则每次普通 no-reply 都可独立触发
+    - 若开启注意力冷却，则只有该用户正式进入冷却后才会触发此衰减
     - 只对高注意力用户生效，避免过度惩罚
-  - 新增 `attention_decrease_threshold` 配置项（默认0.3）
+  - 新增 `attention_decay_on_no_reply_min_threshold` 配置项（默认0.3）
     - 保护机制：注意力低于此值时不再衰减
     - 给用户保留一定关注度，避免完全忽视
   - 新增 `enable_attention_emotion_detection` 配置项（默认关闭）
@@ -301,8 +402,9 @@
   "enable_attention_mechanism": true,
   "attention_increased_probability": 0.9,
   "attention_decreased_probability": 0.05,
-  "attention_decrease_on_no_reply_step": 0.15,
-  "attention_decrease_threshold": 0.3,
+  "enable_attention_decay_on_no_reply": true,
+  "attention_decay_on_no_reply_step": 0.2,
+  "attention_decay_on_no_reply_min_threshold": 0.3,
   "enable_attention_emotion_detection": true,
   "trigger_keywords": ["帮助", "机器人"],
   "keyword_smart_mode": true,
@@ -377,6 +479,7 @@
 **戳一戳追踪与互动细化**：
 - 新增戳一戳追踪提示开关及相关配置：
   - `enable_poke_trace_prompt`, `poke_trace_max_tracked_users`, `poke_trace_ttl_seconds`。
+  - 其中 `poke_trace_max_tracked_users` 用于限制每个群聊同时追踪的用户数量；超过上限时，会移除当前最早登记的记录。
 - 当启用时，AI在对某用户执行戳一戳后，会在一段时间内看到 `[戳过对方提示]`，更自然地延续这段互动；提示仅对AI可见，不写入官方历史。
 - `MessageCleaner` 新增对应清理规则，确保这些内部提示不会污染正式聊天记录。
 
@@ -413,6 +516,10 @@
   - 强化“只关注当前新消息”的判断原则
   - 内置“防重复”与“禁元信息”规则，禁止提及系统提示或内部机制
   - 对【戳一戳】与【@指向说明】的理解更自然
+- 🔧 **主动对话生成提示词**补充职责边界
+  - 明确主动对话生成AI是在“直接生成一条要发出去的话”，不是做“现在该不该开口”的判断
+  - 补充“不要输出判断腔”约束，减少“我不该回复/现在不适合开口”这类元判断句
+  - 这类提示词属于运行时生成提示，不作为普通历史正文保存
 
 **戳一戳增强**:
 - 🆕 **回复后戳一戳**: 主动回复后可按概率轻微戳一下对方（延迟可配）
@@ -888,6 +995,7 @@
   - 要求逐条对比历史回复，相似度>50%必须换角度
   - 绝对禁止重复相同句式、观点陈述、回应模式
   - 强调即使话题相关也要用新方式表达
+  - 回复AI属于“直接生成要发出去的话”的运行时提示层，不是 yes/no 判断器；相关提示词不会作为普通历史正文保存
 - 🔧 **严禁元叙述规则**: 
   - 新增"【严禁元叙述】特别重要"章节
   - 绝对禁止说"看到你@我了"、"注意到你在说XXX"等元信息
@@ -1082,6 +1190,7 @@
 - 🔧 **提示词模式选择**: 新增 `decision_ai_prompt_mode` 和 `reply_ai_prompt_mode` 配置
   - `append` 模式：拼接在默认系统提示词后面（推荐）
   - `override` 模式：完全覆盖默认系统提示词（需填写完整提示词）
+  - 其中 `reply_ai_prompt_mode` / `reply_ai_extra_prompt` 对应的是“生成最终回复内容”的运行时提示层，不是 yes/no 判断器；这类提示词只参与当次生成，不作为普通历史正文保存
   
 **工作流程优化**:
 - 📋 完整处理流程新增"步骤5：注意力机制调整"

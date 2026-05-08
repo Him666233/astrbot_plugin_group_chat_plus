@@ -2,17 +2,20 @@
 Web 配置面板 - aiohttp 服务器核心
 """
 
+import html
 import os
 import re
 import json
+import shutil
 import socket
 import asyncio
 from pathlib import Path
 from aiohttp import web
 from astrbot.api import logger
 
-from .auth import AuthManager
+from .auth import AuthFailureReason, AuthManager
 from .security import SecurityManager
+from ..utils.probability_manager import ProbabilityManager
 
 # 合法 session 名称：仅允许字母、数字、下划线、短横线、点号、感叹号
 # 禁止 .. / \ 等路径遍历字符
@@ -22,18 +25,20 @@ _SAFE_SESSION_RE = re.compile(r"^[A-Za-z0-9_\-!.]+$")
 class WebPanelServer:
     """Web 配置面板服务器"""
 
-    def __init__(self, plugin, host="0.0.0.0", port=1451):
+    def __init__(self, plugin, host="0.0.0.0", port=1451, data_dir: str | None = None):
         self.plugin = plugin
         self.host = host
         self.port = port
         self.runner = None
         self._task = None
 
-        # 获取插件数据目录
-        self.data_dir = self._get_data_dir()
+        # 使用主插件已确定的 canonical 数据目录，避免不同重启路径漂移
+        self.data_dir = self._resolve_data_dir(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_web_data()
 
         # 初始化认证管理器
-        self.auth_mgr = AuthManager(self.data_dir)
+        self.auth_mgr = AuthManager(str(self.data_dir))
 
         # 每次插件重载/重启时轮换 JWT secret（web端发起的除外）
         skipped = self.auth_mgr.rotate_jwt_secret()
@@ -43,7 +48,7 @@ class WebPanelServer:
         # 初始化安全管理器
         self.security = SecurityManager(
             config=self._read_security_config(),
-            data_dir=self.data_dir,
+            data_dir=str(self.data_dir),
         )
 
         # 启动日志自动清理（异步任务）
@@ -57,26 +62,99 @@ class WebPanelServer:
         self.app = web.Application(middlewares=[self._auth_middleware])
         self._setup_routes()
 
-    def _get_data_dir(self) -> str:
-        """获取插件数据目录"""
+    def _resolve_data_dir(self, data_dir: str | None) -> Path:
+        """解析 Web 面板使用的 canonical 插件数据目录"""
+        if data_dir:
+            return Path(data_dir).resolve()
+
+        plugin_data_dir = getattr(self.plugin, "plugin_data_dir", None)
+        if plugin_data_dir:
+            return Path(plugin_data_dir).resolve()
+
         try:
             from astrbot.core.star.star_tools import StarTools
 
-            return StarTools.get_data_dir("astrbot_plugin_group_chat_plus")
+            return Path(StarTools.get_data_dir()).resolve()
         except Exception:
-            # 回退：使用插件目录下的 data 子目录
-            fallback = Path(__file__).parent.parent / "web_data"
-            fallback.mkdir(parents=True, exist_ok=True)
-            return str(fallback.parent)
+            fallback = Path(__file__).parent.parent / "data"
+            return fallback.resolve()
 
-    def _get_data_path(self) -> Path:
-        """获取插件数据目录 Path 对象"""
+    def _get_legacy_data_dirs(self) -> list[Path]:
+        """收集历史版本可能使用过的数据目录，用于一次性迁移"""
+        candidates: list[Path] = []
+
         try:
             from astrbot.core.star.star_tools import StarTools
 
-            return Path(StarTools.get_data_dir("astrbot_plugin_group_chat_plus"))
+            legacy_named = Path(
+                StarTools.get_data_dir("astrbot_plugin_group_chat_plus")
+            ).resolve()
+            candidates.append(legacy_named)
         except Exception:
-            return Path(__file__).parent.parent / "web_data"
+            pass
+
+        candidates.append((Path(__file__).parent.parent / "web_data").resolve())
+
+        unique_candidates: list[Path] = []
+        seen: set[str] = set()
+        canonical = self.data_dir.resolve()
+        for path in candidates:
+            normalized = str(path)
+            if normalized in seen or path == canonical:
+                continue
+            seen.add(normalized)
+            unique_candidates.append(path)
+        return unique_candidates
+
+    def _migrate_legacy_web_data(self):
+        """迁移历史路径中的 web_data 认证文件到 canonical 数据目录"""
+        canonical_web_data = self.data_dir / "web_data"
+        canonical_web_data.mkdir(parents=True, exist_ok=True)
+        canonical_auth_file = canonical_web_data / "auth.json"
+        if canonical_auth_file.exists():
+            self._warn_legacy_root_auth_file(canonical_auth_file)
+            return
+
+        for legacy_dir in self._get_legacy_data_dirs():
+            legacy_auth_file = legacy_dir / "web_data" / "auth.json"
+            if not legacy_auth_file.exists():
+                continue
+
+            shutil.copy2(legacy_auth_file, canonical_auth_file)
+            logger.info(
+                f"🌐 已迁移 Web 认证数据到当前插件数据目录: {legacy_auth_file} -> {canonical_auth_file}"
+            )
+            legacy_jwt_file = legacy_dir / "web_data" / "jwt_secret.json"
+            canonical_jwt_file = canonical_web_data / "jwt_secret.json"
+            if legacy_jwt_file.exists() and not canonical_jwt_file.exists():
+                shutil.copy2(legacy_jwt_file, canonical_jwt_file)
+                logger.info(
+                    f"🌐 已迁移 JWT 密钥文件到当前插件数据目录: {legacy_jwt_file} -> {canonical_jwt_file}"
+                )
+            self._warn_legacy_root_auth_file(canonical_auth_file)
+            return
+
+        self._warn_legacy_root_auth_file(canonical_auth_file)
+
+    def _warn_legacy_root_auth_file(self, canonical_auth_file: Path):
+        """提示旧版本遗留的根目录 auth.json 处理建议"""
+        legacy_root_auth = self.data_dir / "auth.json"
+        if not legacy_root_auth.exists() or legacy_root_auth == canonical_auth_file:
+            return
+
+        if canonical_auth_file.exists():
+            logger.warning(
+                "🌐 检测到旧版本遗留的根目录 auth.json：当前版本实际使用 web_data/auth.json。"
+                f"如旧版本密码保存在 {legacy_root_auth}，升级前请先将其移动到 {canonical_auth_file}，"
+                "否则升级后可能需要重新设置 Web 面板密码。"
+                "若当前目录同时存在两个 auth.json，且已确认 web_data/auth.json 正常可用，可手动删除根目录旧文件以避免混淆。"
+            )
+        else:
+            logger.warning(
+                "🌐 检测到旧版本遗留的根目录 auth.json，但当前 web_data/auth.json 不存在。"
+                f"如需沿用旧密码，请先将 {legacy_root_auth} 移动到 {canonical_auth_file} 再升级/启动，"
+                "否则系统会生成新的默认密码。"
+            )
 
     def _read_security_config(self) -> dict:
         """从插件配置文件读取安全相关配置"""
@@ -92,8 +170,39 @@ class WebPanelServer:
             "web_panel_anti_spider_ban_duration": file_config.get(
                 "web_panel_anti_spider_ban_duration", 300
             ),
+            "web_panel_authenticated_rate_limit": file_config.get(
+                "web_panel_authenticated_rate_limit",
+                max(240, file_config.get("web_panel_anti_spider_rate_limit", 60) * 4),
+            ),
             "web_panel_ip_bind_check": file_config.get("web_panel_ip_bind_check", True),
         }
+
+    def _get_panel_version_text(self) -> str:
+        """读取面板显示用插件版本号。"""
+        metadata_file = Path(__file__).parent.parent / "metadata.yaml"
+        try:
+            raw = metadata_file.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+        match = re.search(r"^\s*version\s*:\s*(.+?)\s*$", raw, re.MULTILINE)
+        if not match:
+            return ""
+
+        value = match.group(1).split("#", 1)[0].strip().strip("'\"")
+        if not value:
+            return ""
+        if not value.lower().startswith("v"):
+            value = f"v{value}"
+        return html.escape(value, quote=True)
+
+    def _render_panel_page(self) -> str | None:
+        """渲染面板页并注入安全版本文本。"""
+        panel_file = self.template_dir / "panel.html"
+        if not panel_file.exists():
+            return None
+        content = panel_file.read_text(encoding="utf-8")
+        return content.replace("__PLUGIN_VERSION__", self._get_panel_version_text())
 
     # ---- 获取客户端 IP ----
 
@@ -117,16 +226,43 @@ class WebPanelServer:
         ) or peer_ip.startswith("127.")
 
         if trust_proxy or is_loopback:
-            # X-Real-IP 优先（单层代理更准确）
             real_ip = request.headers.get("X-Real-IP", "").strip()
             if real_ip:
                 return real_ip
-            # X-Forwarded-For 取第一个（最原始客户端）
             xff = request.headers.get("X-Forwarded-For", "").strip()
             if xff:
                 return xff.split(",")[0].strip()
 
         return peer_ip
+
+    def _is_request_secure(self, request: web.Request) -> bool:
+        """判断当前请求是否处于 HTTPS 安全上下文。"""
+        if request.secure or request.scheme == "https":
+            return True
+        if self._trust_proxy_cached:
+            proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
+            if proto.lower() == "https":
+                return True
+        return False
+
+    def _set_auth_cookie(self, request: web.Request, response: web.StreamResponse, token: str):
+        response.set_cookie(
+            "gcp_token",
+            token,
+            httponly=True,
+            samesite="Strict",
+            secure=self._is_request_secure(request),
+            path="/",
+            max_age=24 * 60 * 60,
+        )
+
+    def _clear_auth_cookie(self, request: web.Request, response: web.StreamResponse):
+        response.del_cookie(
+            "gcp_token",
+            path="/",
+            samesite="Strict",
+            secure=self._is_request_secure(request),
+        )
 
     @property
     def _trust_proxy_cached(self) -> bool:
@@ -162,7 +298,6 @@ class WebPanelServer:
         "/favicon.ico",
         "/robots.txt",
         "/error",  # 统一错误/拦截页（公开，无需认证）
-        "/api/auth/change-password",  # 首次登录改密（需携带 token，但允许在此白名单以支持登录页 fetch）
     }
 
     # ---- 面板专用静态资源路径（需要 JWT 认证才能访问） ----
@@ -170,6 +305,21 @@ class WebPanelServer:
 
     # ---- 面板主页（需要 JWT 认证） ----
     _PANEL_PAGE = "/panel"
+
+    # ---- 仅允许在 AstrBot 传统配置界面修改的 Web 面板安全底线配置 ----
+    _WEB_CONFIG_READONLY_KEYS = {
+        "enable_web_panel",
+        "web_panel_port",
+        "web_panel_host",
+        "web_panel_reset_password",
+        "web_panel_protected_ips",
+        "web_panel_ip_bind_check",
+        "web_panel_trust_proxy",
+        "web_panel_heartbeat_visible_interval_seconds",
+        "web_panel_heartbeat_hidden_interval_seconds",
+        "web_panel_heartbeat_retry_base_seconds",
+        "web_panel_heartbeat_retry_max_seconds",
+    }
 
     # ---- 安全响应头 ----
     _SECURITY_HEADERS = {
@@ -181,23 +331,34 @@ class WebPanelServer:
         "Cache-Control": "no-store, no-cache, must-revalidate, private",
     }
 
-    # ---- 登录页允许的宽松 CSP（只含基础样式和登录逻辑）----
-    _CSP_LOGIN = (
+    # ---- 登录页 CSP 模板（script-src 使用 nonce，不再使用 unsafe-inline）----
+    _CSP_LOGIN_TEMPLATE = (
         "default-src 'none'; "
-        "style-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
-        "script-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'nonce-{nonce}'; "
         "connect-src 'self'; "
         "form-action 'none'; "
         "frame-ancestors 'none';"
     )
 
-    # ---- 面板页 CSP（允许内联脚本/样式供现有 JS 正常运行）----
-    _CSP_PANEL = (
+    # ---- 面板页 CSP 模板（script-src 使用 nonce，style-src 保留 unsafe-inline 供动态 UI）----
+    _CSP_PANEL_TEMPLATE = (
         "default-src 'none'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
-        "script-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'nonce-{nonce}'; "
+        "connect-src 'self'; "
+        "form-action 'none'; "
+        "frame-ancestors 'none';"
+    )
+
+    # ---- 错误页 CSP 模板（script-src 使用 nonce）----
+    _CSP_ERROR_TEMPLATE = (
+        "default-src 'none'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "script-src 'self' 'nonce-{nonce}'; "
         "connect-src 'self'; "
         "form-action 'none'; "
         "frame-ancestors 'none';"
@@ -213,14 +374,45 @@ class WebPanelServer:
             response.headers["Content-Security-Policy"] = csp
         return response
 
+    @staticmethod
+    def _generate_nonce() -> str:
+        """生成 CSP nonce（每次请求唯一，Base64 编码）"""
+        import base64 as _b64
+        return _b64.b64encode(os.urandom(24)).decode("ascii")
+
+    def _build_csp(self, nonce: str, template: str) -> str:
+        """根据模板和 nonce 构建 CSP 字符串"""
+        return template.format(nonce=nonce)
+
+    @staticmethod
+    def _inject_nonce(html: str, nonce: str) -> str:
+        """将 nonce 注入到 HTML 中所有内联 <script> 和 <style> 标签
+
+        仅对不含 src 属性的 <script> 标签注入 nonce（内联脚本）。
+        对所有 <style> 标签注入 nonce（内联样式）。
+        外部脚本（<script src="...">）由 CSP 的 'self' 指令放行，无需 nonce。
+        """
+        import re as _re
+        html = _re.sub(
+            r"<script(?!\s+src=)(?!\s+nonce=)",
+            f'<script nonce="{nonce}"',
+            html,
+        )
+        html = _re.sub(
+            r"<style(?!\s+nonce=)",
+            f'<style nonce="{nonce}"',
+            html,
+        )
+        return html
+
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
-        """安全中间件：路径校验 → robots.txt → 防爬虫 → IP 过滤 → JWT 认证（含 IP 绑定）"""
+        """安全中间件：路径校验 → robots.txt → 防爬虫 → IP 过滤 → 会话认证"""
         ip = self._get_client_ip(request)
         path = request.path
         user_agent = request.headers.get("User-Agent", "")
+        is_heartbeat = path == "/api/auth/heartbeat"
 
-        # 0. 路径安全校验：拒绝包含路径遍历序列的请求
         if (
             ".." in path
             or "//" in path
@@ -233,7 +425,6 @@ class WebPanelServer:
             )
             return web.json_response({"ok": False, "msg": "非法请求"}, status=400)
 
-        # 1. 登录页公开静态资源（仅 main.css、login.css、utils.js、api.js）直接放行
         _LOGIN_PUBLIC_STATIC = (
             "/static/css/main.css",
             "/static/css/login.css",
@@ -242,9 +433,8 @@ class WebPanelServer:
         )
         if path in _LOGIN_PUBLIC_STATIC:
             response = await handler(request)
-            return self._add_security_headers(response, self._CSP_LOGIN)
+            return self._add_security_headers(response)
 
-        # 2. 面板专用静态资源（JS/CSS）—— 需要 Bearer token 或从 /panel 页跳转
         if path.startswith(self._PANEL_STATIC_PREFIX):
             token = self._extract_token(request)
             if not token:
@@ -253,138 +443,145 @@ class WebPanelServer:
                 )
                 return web.Response(status=403, text="Forbidden")
             verify_ip = ip if self._ip_bind_check_cached else None
-            payload = self.auth_mgr.verify_token(token, current_ip=verify_ip)
-            if payload is None:
+            auth_result = self.auth_mgr.verify_token(token, current_ip=verify_ip)
+            if not auth_result.ok:
                 self.security.log_access(
                     ip, request.method, path, 403, note="无效 token 访问面板静态资源"
                 )
                 return web.Response(status=403, text="Forbidden")
-            request["user"] = payload
+            request["user"] = auth_result.payload
             request["client_ip"] = ip
             response = await handler(request)
             self.security.log_access(ip, request.method, path, response.status)
             return self._add_security_headers(response)
 
-        # 3. 其余 /static/ 路径（登录页以外）一律拒绝直接访问
         if path.startswith("/static/") and path not in _LOGIN_PUBLIC_STATIC:
             self.security.log_access(
                 ip, request.method, path, 403, note="拒绝直接访问内部静态资源"
             )
             return web.Response(status=403, text="Forbidden")
 
-        # 4. robots.txt - 直接返回，无需认证、无需 IP 检查
         if path == "/robots.txt":
             return web.Response(
                 text=self.security.get_robots_txt(),
                 content_type="text/plain",
             )
 
-        # 5. IP 访问控制（黑白名单 + 封禁检查）
-        # 优先级：① 受保护 IP → ② 黑白名单 → ③ 封禁列表
-        # 白名单命中的 IP 直接放行，不再经过封禁检查（封禁对白名单 IP 无效）
         allowed, reason = self.security.check_ip_allowed(ip)
         if not allowed:
             self.security.log_access(ip, request.method, path, 403)
-            # 对非 API 请求返回友好的错误页面
             if not path.startswith("/api/"):
-                return web.Response(
-                    text=self._load_error_page("blocked", reason),
+                nonce = self._generate_nonce()
+                html = self._inject_nonce(self._load_error_page("blocked", reason), nonce)
+                csp = self._build_csp(nonce, self._CSP_ERROR_TEMPLATE)
+                response = web.Response(
+                    text=html,
                     content_type="text/html",
                     status=403,
                 )
+                return self._add_security_headers(response, csp)
             return web.json_response(
                 {"ok": False, "msg": reason, "blocked": True}, status=403
             )
 
-        # 6. 防爬虫检测（在 IP 放行后执行，受保护 IP 和白名单 IP 已在上一步被放行）
-        # 已认证用户（持有有效 JWT）跳过防爬虫检测，避免自动刷新轮询被误判
-        _skip_spider = False
+        auth_token = self._extract_token(request)
+        verify_ip = ip if self._ip_bind_check_cached else None
+        auth_result = None
+        if auth_token:
+            auth_result = self.auth_mgr.verify_token(
+                auth_token,
+                current_ip=verify_ip,
+                touch=not is_heartbeat,
+            )
+
         if self.security.anti_spider_enabled:
-            token = self._extract_token(request)
-            if token:
-                payload = self.auth_mgr.verify_token(token, current_ip=ip)
-                if payload is not None:
-                    _skip_spider = True
-
-        if self.security.anti_spider_enabled and not _skip_spider:
-            is_spider, spider_reason = self.security.check_spider(ip, path, user_agent)
-            if is_spider:
-                note = self.security.get_auto_ban_note(spider_reason)
-                self.security.auto_ban_spider(ip, spider_reason)
-                self.security.log_access(ip, request.method, path, 403, note=note)
-                if not path.startswith("/api/"):
-                    return web.Response(
-                        text=self._load_error_page(
-                            "blocked", f"[防爬虫] {spider_reason}"
-                        ),
-                        content_type="text/html",
-                        status=403,
-                    )
-                return web.json_response(
-                    {"ok": False, "msg": "访问被拒绝", "blocked": True}, status=403
+            if auth_result and auth_result.ok:
+                session_id = auth_result.session.get("sid") if auth_result.session else ""
+                hit_limit, limit_reason = self.security.check_authenticated_rate_limit(
+                    ip,
+                    session_id,
+                    path,
+                    is_heartbeat=is_heartbeat,
                 )
+                if hit_limit:
+                    note = self.security.get_auto_ban_note(limit_reason)
+                    self.security.auto_ban_spider(ip, limit_reason)
+                    self.security.log_access(ip, request.method, path, 403, note=note)
+                    return web.json_response(
+                        {"ok": False, "msg": "访问被拒绝", "blocked": True}, status=403
+                    )
+            else:
+                is_spider, spider_reason = self.security.check_spider(ip, path, user_agent)
+                if is_spider:
+                    note = self.security.get_auto_ban_note(spider_reason)
+                    self.security.auto_ban_spider(ip, spider_reason)
+                    self.security.log_access(ip, request.method, path, 403, note=note)
+                    if not path.startswith("/api/"):
+                        nonce = self._generate_nonce()
+                        html = self._inject_nonce(
+                            self._load_error_page("blocked", f"[防爬虫] {spider_reason}"),
+                            nonce,
+                        )
+                        csp = self._build_csp(nonce, self._CSP_ERROR_TEMPLATE)
+                        response = web.Response(
+                            text=html,
+                            content_type="text/html",
+                            status=403,
+                        )
+                        return self._add_security_headers(response, csp)
+                    return web.json_response(
+                        {"ok": False, "msg": "访问被拒绝", "blocked": True}, status=403
+                    )
 
-        # 7. 公开路径 - 记录日志但不需认证
         if path in self._PUBLIC_PATHS:
             response = await handler(request)
             self.security.log_access(ip, request.method, path, response.status)
-            # 登录页附加安全头
-            if path == "/":
-                return self._add_security_headers(response, self._CSP_LOGIN)
+            if path in {"/", "/error"}:
+                return self._add_security_headers(response)
             return response
 
-        # 8. 面板页（/panel）- 需要 JWT 认证，认证失败重定向到登录页
         if path == self._PANEL_PAGE:
-            token = self._extract_token(request)
-            if not token:
-                return web.HTTPFound("/")
-            verify_ip = ip if self._ip_bind_check_cached else None
-            payload = self.auth_mgr.verify_token(token, current_ip=verify_ip)
-            if payload is None:
-                return web.HTTPFound("/")
-            request["user"] = payload
+            if not auth_result or not auth_result.ok:
+                response = web.HTTPFound("/")
+                self._clear_auth_cookie(request, response)
+                return response
+            request["user"] = auth_result.payload
             request["client_ip"] = ip
             response = await handler(request)
             self.security.log_access(ip, request.method, path, response.status)
-            return self._add_security_headers(response, self._CSP_PANEL)
+            return self._add_security_headers(response)
 
-        # 9. 其他所有路径 - JWT 认证（含 IP 绑定校验）
-        token = self._extract_token(request)
-        if not token:
+        if not auth_token:
             self.security.log_access(ip, request.method, path, 401)
-            # HTML 页面请求重定向到登录页
             if not path.startswith("/api/"):
                 return web.HTTPFound("/")
             return web.json_response({"ok": False, "msg": "未登录"}, status=401)
 
-        verify_ip = ip if self._ip_bind_check_cached else None
-        payload = self.auth_mgr.verify_token(token, current_ip=verify_ip)
-        if payload is None:
+        if not auth_result or not auth_result.ok:
             self.security.log_access(ip, request.method, path, 401)
-            # 区分 IP 变更和 token 过期/失效两种情况
-            token_payload_no_ip = self.auth_mgr.verify_token(token, current_ip=None)
             if not path.startswith("/api/"):
-                return web.HTTPFound("/")
-            if token_payload_no_ip is not None:
-                return web.json_response(
-                    {
-                        "ok": False,
-                        "msg": "您的 IP 地址已变更，为安全起见请重新登录",
-                        "reason": "ip_changed",
-                    },
-                    status=401,
-                )
-            else:
-                return web.json_response(
-                    {
-                        "ok": False,
-                        "msg": "登录已过期，请重新登录",
-                        "reason": "token_expired",
-                    },
-                    status=401,
-                )
+                response = web.HTTPFound("/")
+                self._clear_auth_cookie(request, response)
+                return response
+            reason_code = auth_result.reason if auth_result else AuthFailureReason.SIGNATURE_INVALID
+            msg = "登录已失效，请重新登录"
+            if reason_code == AuthFailureReason.IP_CHANGED:
+                msg = "您的 IP 地址已变更，为安全起见请重新登录"
+            elif reason_code == AuthFailureReason.SERVER_RESTART:
+                msg = "服务已重启，请重新登录"
+            elif reason_code == AuthFailureReason.PASSWORD_CHANGED:
+                msg = "密码已修改，请重新登录"
+            elif reason_code == AuthFailureReason.PASSWORD_RESET:
+                msg = "密码已重置，请重新登录"
+            response = web.json_response(
+                {"ok": False, "msg": msg, "reason": reason_code},
+                status=401,
+            )
+            self._clear_auth_cookie(request, response)
+            return response
 
-        request["user"] = payload
+        request["user"] = auth_result.payload
+        request["auth_session"] = auth_result.session
         request["client_ip"] = ip
         response = await handler(request)
         self.security.log_access(ip, request.method, path, response.status)
@@ -393,13 +590,14 @@ class WebPanelServer:
         return response
 
     def _extract_token(self, request: web.Request) -> str | None:
-        """从 Authorization 头或 Cookie 中提取 JWT token"""
+        """从 HttpOnly Cookie 优先提取 JWT token，兼容 Authorization 头。"""
+        token = request.cookies.get("gcp_token", "")
+        if token:
+            return token
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             return auth_header[7:]
-        # 从 Cookie 中读取（面板页跳转时用）
-        token = request.cookies.get("gcp_token", "")
-        return token if token else None
+        return None
 
     def _setup_routes(self):
         """注册所有路由"""
@@ -420,6 +618,7 @@ class WebPanelServer:
         r.add_get("/api/auth/status", self._handle_auth_status)
         r.add_post("/api/auth/change-password", self._handle_change_password)
         r.add_get("/api/auth/verify", self._handle_verify)
+        r.add_get("/api/auth/heartbeat", self._handle_heartbeat)
         r.add_post("/api/auth/logout", self._handle_logout)
 
         # 配置
@@ -618,20 +817,79 @@ class WebPanelServer:
 
     # ==================== 页面 Handler ====================
 
-    async def _handle_login_page(self, request: web.Request):
-        """返回登录页（公开，无需认证）"""
+    def _render_login_page(self) -> str:
+        """渲染登录页，按需注入旧版密码文件升级提醒"""
         login_file = self.template_dir / "login.html"
-        if login_file.exists():
-            response = web.FileResponse(login_file)
-            return self._add_security_headers(response, self._CSP_LOGIN)
+        try:
+            content = login_file.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+        legacy_root_auth = self.data_dir / "auth.json"
+        canonical_auth = self.data_dir / "web_data" / "auth.json"
+        notice_html = ""
+        if legacy_root_auth.exists() and canonical_auth.exists():
+            legacy_rel = self._safe_display_path(legacy_root_auth)
+            canonical_rel = self._safe_display_path(canonical_auth)
+            notice_html = (
+                '<div class="login-upgrade-notice">'
+                '<strong>⚠️ 旧版本升级提醒</strong>'
+                '<p>检测到插件数据根目录仍存在旧版 <code>auth.json</code>，当前 Web 面板实际使用的是 <code>web_data/auth.json</code>。</p>'
+                '<p>旧版本密码加密方式较弱（PBKDF2-SHA256），且新版本自动升级加密规则对旧文件无效。</p>'
+                f'<p>旧文件位置：<code>{legacy_rel}</code><br>当前使用位置：<code>{canonical_rel}</code></p>'
+                '<p class="legacy-warn-delete">建议直接手动删除旧版本密码文件</p>'
+                '</div>'
+            )
+        elif legacy_root_auth.exists():
+            legacy_rel = self._safe_display_path(legacy_root_auth)
+            canonical_rel = self._safe_display_path(canonical_auth)
+            notice_html = (
+                '<div class="login-upgrade-notice">'
+                '<strong>⚠️ 旧版本升级提醒</strong>'
+                '<p>检测到插件数据根目录仍存在旧版 <code>auth.json</code>，但当前 <code>web_data/auth.json</code> 还不存在。</p>'
+                f'<p>如需沿用旧密码，请先将 <code>{legacy_rel}</code> '
+                f'移动到 <code>{canonical_rel}</code> 后再升级/启动，否则系统会重新生成默认密码。</p>'
+                '</div>'
+            )
+
+        return content.replace("__LEGACY_AUTH_NOTICE__", notice_html)
+
+    @staticmethod
+    def _safe_display_path(full_path: Path) -> str:
+        """将绝对路径转换为安全的相对显示路径（基于 astrBot 数据目录起点）"""
+        try:
+            rel = full_path.relative_to(Path(full_path.anchor))
+            parts = rel.parts
+            for i, part in enumerate(parts):
+                if part.lower() in ("astrbot", "data"):
+                    return str(Path(*parts[i:])).replace("\\", "/")
+            return full_path.name
+        except ValueError:
+            return full_path.name
+
+    async def _handle_login_page(self, request: web.Request):
+        """返回登录页（公开，无需认证），使用 nonce-based CSP"""
+        content = self._render_login_page()
+        if content:
+            nonce = self._generate_nonce()
+            content = self._inject_nonce(content, nonce)
+            csp = self._build_csp(nonce, self._CSP_LOGIN_TEMPLATE)
+            response = web.Response(text=content, content_type="text/html")
+            return self._add_security_headers(response, csp)
         return web.Response(text="登录页文件缺失", status=500)
 
     async def _handle_panel_page(self, request: web.Request):
-        """返回面板页（需要认证，中间件已验证）"""
-        panel_file = self.template_dir / "panel.html"
-        if panel_file.exists():
-            response = web.FileResponse(panel_file)
-            return self._add_security_headers(response, self._CSP_PANEL)
+        """返回面板页（需要认证，中间件已验证），使用 nonce-based CSP"""
+        try:
+            content = self._render_panel_page()
+        except Exception:
+            return web.Response(text="面板文件读取失败", status=500)
+        if content is not None:
+            nonce = self._generate_nonce()
+            content = self._inject_nonce(content, nonce)
+            csp = self._build_csp(nonce, self._CSP_PANEL_TEMPLATE)
+            response = web.Response(text=content, content_type="text/html")
+            return self._add_security_headers(response, csp)
         return web.Response(text="面板文件缺失", status=500)
 
     async def _handle_favicon(self, request: web.Request):
@@ -691,7 +949,6 @@ class WebPanelServer:
             return content
         except Exception as e:
             logger.debug(f"🌐 加载 error.html 失败: {e}，使用内联备用页面")
-            # 备用内联页面（error.html 不存在时的兜底）
             safe_reason = html_mod.escape(reason)
             return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -700,24 +957,25 @@ class WebPanelServer:
 background:#0f0f1a;color:#e8e8f0;font-family:sans-serif;}}
 .box{{text-align:center;max-width:480px;padding:48px 32px;background:#1a1a2e;
 border-radius:16px;border:1px solid rgba(255,80,80,0.3);}}
-h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
-<body><div class="box"><div style="font-size:64px">🚫</div>
+h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
+.icon{{font-size:64px;}}</style></head>
+<body><div class="box"><div class="icon">🚫</div>
 <h1>访问出错</h1><p>{safe_reason or "请联系管理员。"}</p></div></body></html>"""
 
     async def _handle_error_page(self, request: web.Request):
-        """
-        统一错误/拦截页面（公开路由，无需认证）。
-        通过 URL 参数 code 区分错误类型，reason 说明具体原因。
-        页面内容不含任何内部代码结构信息，保障安全性。
-        """
+        """统一错误/拦截页面（公开路由，无需认证），使用 nonce-based CSP"""
         code = request.rel_url.query.get("code", "error")
         reason = request.rel_url.query.get("reason", "")
         html_content = self._load_error_page(code, reason)
-        return web.Response(
+        nonce = self._generate_nonce()
+        html_content = self._inject_nonce(html_content, nonce)
+        csp = self._build_csp(nonce, self._CSP_ERROR_TEMPLATE)
+        response = web.Response(
             text=html_content,
             content_type="text/html",
             status=403 if code == "blocked" else (404 if code == "404" else 400),
         )
+        return self._add_security_headers(response, csp)
 
     def _blocked_page_html(self, ip: str, reason: str) -> str:
         """生成被封禁/拒绝访问的友好 HTML 页面（复用统一错误页模板）"""
@@ -761,7 +1019,6 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         """登录（含暴力破解防护）"""
         ip = self._get_client_ip(request)
 
-        # 暴力破解检查
         locked, wait_seconds = self.security.check_brute_force(ip)
         if locked:
             logger.warning(
@@ -786,10 +1043,14 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if not password:
             return web.json_response({"ok": False, "msg": "请输入密码"}, status=400)
 
-        token = self.auth_mgr.login(
-            password, client_ip=ip if self._ip_bind_check_cached else None
+        device_id = request.cookies.get("gcp_device_id", "") or body.get("device_id", "")
+        login_result = self.auth_mgr.login(
+            password,
+            client_ip=ip if self._ip_bind_check_cached else None,
+            device_id=device_id,
+            user_agent=request.headers.get("User-Agent", ""),
         )
-        if token is None:
+        if login_result is None:
             self.security.record_login_failure(ip)
             tracker = self.security.brute_force.get(ip)
             attempts = tracker.attempts if tracker else 0
@@ -797,15 +1058,27 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                 logger.warning(f"🔒 IP {ip} 密码错误第 {attempts} 次，可能遭受暴力破解")
             return web.json_response({"ok": False, "msg": "密码错误"}, status=401)
 
-        # 登录成功，重置失败计数
         self.security.reset_login_failures(ip)
-        return web.json_response(
+        response = web.json_response(
             {
                 "ok": True,
-                "token": token,
                 "password_changed": self.auth_mgr.password_changed,
+                "expires_at": login_result["expires_at"],
+                "session_id": login_result["session_id"],
+                "device_id": login_result["device_id"],
             }
         )
+        self._set_auth_cookie(request, response, login_result["token"])
+        response.set_cookie(
+            "gcp_device_id",
+            login_result["device_id"],
+            httponly=False,
+            samesite="Strict",
+            secure=self._is_request_secure(request),
+            path="/",
+            max_age=365 * 24 * 60 * 60,
+        )
+        return response
 
     async def _handle_auth_status(self, request: web.Request):
         """检查密码是否已修改"""
@@ -817,14 +1090,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         )
 
     async def _handle_change_password(self, request: web.Request):
-        """修改密码（需要持有有效 token，通过 Authorization 头传入）"""
-        ip = self._get_client_ip(request)
-
-        # 验证调用者持有有效 token（防止无 token 时调用）
-        token = self._extract_token(request)
-        if not token or not self.auth_mgr.verify_token(token, current_ip=ip):
-            return web.json_response({"ok": False, "msg": "请先登录"}, status=401)
-
+        """修改密码（需要持有有效 token）"""
         try:
             body = await request.json()
         except Exception:
@@ -844,23 +1110,62 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if not self.auth_mgr.change_password(old_pw, new_pw):
             return web.json_response({"ok": False, "msg": "旧密码错误"}, status=401)
 
-        # 密码修改成功，auth_mgr内部已轮换 jwt_secret，导致所有其他端或旧 token 失效
-        # 此时不再直接登录并返回新 token，而是通过清除当前响应的 Cookie 让所有设备都必须重新登录
-        response = web.json_response({"ok": True})
-        response.del_cookie("gcp_token")
+        response = web.json_response(
+            {
+                "ok": True,
+                "msg": "密码修改成功，请重新登录",
+                "force_relogin": True,
+            }
+        )
+        self._clear_auth_cookie(request, response)
         return response
 
     async def _handle_verify(self, request: web.Request):
-        """验证 Token 有效性（已通过中间件即有效）"""
-        return web.json_response({"ok": True})
+        """验证当前会话有效性"""
+        payload = request.get("user") or {}
+        auth_session = request.get("auth_session")
+        if auth_session is None and payload.get("sid"):
+            auth_session = self.auth_mgr._sessions.get(payload.get("sid"))
+        status = self.auth_mgr.build_session_status(
+            type("_VerifyResult", (), {"payload": payload, "session": auth_session})()
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                **status,
+                "ip_bind_check_enabled": self._ip_bind_check_cached,
+            }
+        )
+
+    async def _handle_heartbeat(self, request: web.Request):
+        """低频心跳：刷新最近活跃时间并尽快发现会话失效。"""
+        # 心跳只更新服务端最近活跃时间，不延长 JWT 24 小时绝对过期。
+        # 一旦 token 过期、密码被改、服务端重启或 IP 变化（开启绑定时），
+        # 下一个有效心跳会直接返回 401 reason，由前端统一处理重新登录。
+        payload = request.get("user") or {}
+        sid = payload.get("sid")
+        if sid:
+            self.auth_mgr.touch_session(sid, heartbeat=True, persist=True)
+        auth_session = self.auth_mgr._sessions.get(sid) if sid else None
+        status = self.auth_mgr.build_session_status(
+            type("_HeartbeatResult", (), {"payload": payload, "session": auth_session})()
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                **status,
+                "ip_bind_check_enabled": self._ip_bind_check_cached,
+            }
+        )
 
     async def _handle_logout(self, request: web.Request):
-        """登出（清除客户端 token，服务端记录日志）"""
+        """登出（仅注销当前会话）"""
         ip = self._get_client_ip(request)
+        payload = request.get("user") or {}
+        self.auth_mgr.revoke_session(payload.get("sid"), AuthFailureReason.REVOKED)
         logger.info(f"🔑 用户从 {ip} 主动登出")
         response = web.json_response({"ok": True})
-        # 清除 Cookie（如有设置）
-        response.del_cookie("gcp_token")
+        self._clear_auth_cookie(request, response)
         return response
 
     # ==================== 配置 Handler ====================
@@ -941,6 +1246,13 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                 "schema": schema,
                 "config": current,
                 "config_path": self._get_config_file_path(),
+                "config_file_name": os.path.basename(self._get_config_file_path()),
+                "is_desktop": getattr(self.plugin, "is_desktop_mode", False),
+                "desktop_info": {
+                    "is_desktop": getattr(self.plugin, "is_desktop_mode", False),
+                    "mode_setting": getattr(self.plugin, "desktop_mode_setting", "auto"),
+                    "detected_env": current.get("desktop_detected_env", ""),
+                },
             }
         )
 
@@ -957,6 +1269,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
 
         schema = self._load_schema()
         errors = []
+        forbidden_keys = []
 
         # 校验类型
         validated = {}
@@ -964,11 +1277,24 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
             if key not in schema:
                 errors.append(f"未知配置项: {key}")
                 continue
+            if key in self._WEB_CONFIG_READONLY_KEYS:
+                forbidden_keys.append(key)
+                continue
             expected_type = schema[key].get("type", "string")
             if not self._validate_value(value, expected_type):
                 errors.append(f"{key}: 类型不匹配，期望 {expected_type}")
                 continue
             validated[key] = value
+
+        if forbidden_keys:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "msg": "以下配置仅允许在 AstrBot 传统配置界面修改: "
+                    + ", ".join(forbidden_keys),
+                },
+                status=403,
+            )
 
         if errors:
             return web.json_response(
@@ -1029,9 +1355,39 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if updates:
             schema = self._load_schema()
             file_config = self._read_config_file()
+            forbidden_keys = []
+            validation_errors = []
+            validated_updates = {}
             for key, value in updates.items():
-                if key in schema:
-                    file_config[key] = value
+                if key not in schema:
+                    validation_errors.append(f"未知配置项: {key}")
+                    continue
+                if key in self._WEB_CONFIG_READONLY_KEYS:
+                    forbidden_keys.append(key)
+                    continue
+                expected_type = schema[key].get("type", "string")
+                if not self._validate_value(value, expected_type):
+                    validation_errors.append(f"{key}: 类型不匹配，期望 {expected_type}")
+                    continue
+                validated_updates[key] = value
+
+            if forbidden_keys:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "msg": "以下配置仅允许在 AstrBot 传统配置界面修改: "
+                        + ", ".join(forbidden_keys),
+                    },
+                    status=403,
+                )
+
+            if validation_errors:
+                return web.json_response(
+                    {"ok": False, "msg": "; ".join(validation_errors)},
+                    status=400,
+                )
+
+            file_config.update(validated_updates)
             if not self._write_config_file(file_config):
                 return web.json_response(
                     {"ok": False, "msg": "写入配置文件失败"}, status=500
@@ -1097,7 +1453,9 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                     json={"username": dbc["username"], "password": dbc["password"]},
                 ) as resp:
                     data = await resp.json()
-                    token = data["data"]["token"]
+                    token = data.get("data", {}).get("token") if isinstance(data, dict) else None
+                    if not token:
+                        raise RuntimeError(f"登录响应格式错误: {data}")
 
                 # 调用仪表盘的插件重载 API
                 reload_url = f"http://{host}:{port}/api/plugin/reload"
@@ -1141,8 +1499,18 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         task.add_done_callback(self._deferred_tasks.discard)
 
     async def _do_deferred_restart(self, host, port, dbc):
-        """延迟执行的 AstrBot 重启"""
+        """延迟执行的 AstrBot 重启
+
+        桌面端兼容：桌面端进程由 Tauri 托管，HTTP API 触发的 os.execv() 重启
+        在 Windows 上实际是新建进程+退出当前，可能导致 Tauri 丢失子进程跟踪。
+        """
         await asyncio.sleep(1.0)  # 等待 HTTP 响应完全发出
+        is_desktop = getattr(self.plugin, "is_desktop_mode", False)
+        if is_desktop:
+            logger.warning(
+                "🖥️ [桌面端] 通过 Web 面板触发重启。桌面端进程由 Tauri 托管，"
+                "如重启后无响应，请通过桌面端托盘菜单手动重启后端。"
+            )
         try:
             import aiohttp as _aiohttp
 
@@ -1153,7 +1521,9 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                     json={"username": dbc["username"], "password": dbc["password"]},
                 ) as resp:
                     data = await resp.json()
-                    token = data["data"]["token"]
+                    token = data.get("data", {}).get("token") if isinstance(data, dict) else None
+                    if not token:
+                        raise RuntimeError(f"登录响应格式错误: {data}")
 
                 restart_url = f"http://{host}:{port}/api/stat/restart-core"
                 async with session.post(
@@ -1207,7 +1577,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         """列出所有已知会话"""
         sessions = self._collect_all_sessions()
         # 也从聊天记录文件收集（支持嵌套目录结构）
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         chat_dir = data_dir / "chat_history"
         if chat_dir.exists():
             for f in chat_dir.rglob("*.json"):
@@ -1292,7 +1662,38 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
             "after_reply_probability": self.plugin.config.get(
                 "after_reply_probability", 0.8
             ),
+            "probability_duration": self.plugin.config.get("probability_duration", 120),
+            "attention_mechanism_enabled": self.plugin.config.get(
+                "enable_attention_mechanism", False
+            ),
+            "mode": "attention"
+            if self.plugin.config.get("enable_attention_mechanism", False)
+            else "traditional",
         }
+
+        # 传统回复后提升状态
+        try:
+            probability_status = await ProbabilityManager.get_probability_status_snapshot(
+                session
+            )
+            reply_boost_until = probability_status.get("reply_boost_until", 0)
+            if reply_boost_until > _time.time():
+                prob_data["reply_boost"] = {
+                    "value": probability_status.get("reply_boost_probability", 0),
+                    "remaining_seconds": round(reply_boost_until - _time.time()),
+                    "source": probability_status.get(
+                        "reply_boost_source", "after_reply_probability"
+                    ),
+                }
+            base_until = probability_status.get("base_until", 0)
+            if base_until > _time.time():
+                prob_data["base_override"] = {
+                    "value": probability_status.get("base_probability", 0),
+                    "remaining_seconds": round(base_until - _time.time()),
+                    "source": probability_status.get("base_source", "unknown"),
+                }
+        except Exception as e:
+            logger.debug(f"🌐 概率状态快照读取异常 [{session}]: {e}")
 
         # 频率调整器状态
         if (
@@ -1358,12 +1759,16 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
             active_wait_windows = len(self.plugin._group_wait_windows)
 
         cooldown_users = 0
+        pending_cooldown_users = 0
         try:
             from ..utils.cooldown_manager import CooldownManager
 
             if hasattr(CooldownManager, "_cooldown_map"):
                 for users in CooldownManager._cooldown_map.values():
                     cooldown_users += len(users)
+            if hasattr(CooldownManager, "_pending_cooldown_map"):
+                for users in CooldownManager._pending_cooldown_map.values():
+                    pending_cooldown_users += len(users)
         except Exception:
             pass
 
@@ -1389,6 +1794,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                     "total_cached_messages": total_cached_messages,
                     "active_wait_windows": active_wait_windows,
                     "cooldown_users": cooldown_users,
+                    "pending_cooldown_users": pending_cooldown_users,
                     "seen_messages": seen_count,
                     "duplicate_blocked": duplicate_blocked,
                     "proactive_processing": proactive_processing,
@@ -1529,7 +1935,38 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                 "after_reply_probability": _sn(
                     self.plugin.config.get("after_reply_probability", 0.8)
                 ),
+                "probability_duration": self.plugin.config.get("probability_duration", 120),
+                "attention_mechanism_enabled": self.plugin.config.get(
+                    "enable_attention_mechanism", False
+                ),
+                "mode": "attention"
+                if self.plugin.config.get("enable_attention_mechanism", False)
+                else "traditional",
             }
+            try:
+                probability_status = await ProbabilityManager.get_probability_status_snapshot(
+                    session
+                )
+                reply_boost_until = _sn(probability_status.get("reply_boost_until", 0))
+                if reply_boost_until > now:
+                    prob_data["reply_boost"] = {
+                        "value": _sn(
+                            probability_status.get("reply_boost_probability", 0)
+                        ),
+                        "remaining_seconds": round(reply_boost_until - now),
+                        "source": probability_status.get(
+                            "reply_boost_source", "after_reply_probability"
+                        ),
+                    }
+                base_until = _sn(probability_status.get("base_until", 0))
+                if base_until > now:
+                    prob_data["base_override"] = {
+                        "value": _sn(probability_status.get("base_probability", 0)),
+                        "remaining_seconds": round(base_until - now),
+                        "source": probability_status.get("base_source", "unknown"),
+                    }
+            except Exception as e:
+                logger.debug(f"🌐 会话详情-概率快照异常 [{session}]: {e}")
             if (
                 hasattr(self.plugin, "frequency_adjuster")
                 and self.plugin.frequency_adjuster
@@ -1641,13 +2078,15 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
 
         # 冷却状态
         cooldown_users = []
+        pending_cooldown_users = []
         try:
             from ..utils.cooldown_manager import CooldownManager
+            import time as _time
 
             if hasattr(CooldownManager, "_cooldown_map"):
                 session_cooldowns = CooldownManager._cooldown_map.get(session, {})
                 for uid, cinfo in session_cooldowns.items():
-                    info = CooldownManager.get_cooldown_info(session, uid)
+                    info = await CooldownManager.get_cooldown_info(session, uid)
                     if info:
                         cooldown_users.append(
                             {
@@ -1655,11 +2094,36 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                                 "user_name": cinfo.get("user_name", ""),
                                 "remaining": round(_sn(info.get("remaining_time", 0))),
                                 "reason": cinfo.get("reason", ""),
+                                "phase": "active",
                             }
                         )
+            if hasattr(CooldownManager, "_pending_cooldown_map"):
+                session_pending = CooldownManager._pending_cooldown_map.get(session, {})
+                for uid, pinfo in session_pending.items():
+                    pending_cooldown_users.append(
+                        {
+                            "user_id": str(uid),
+                            "user_name": pinfo.get("user_name", ""),
+                            "remaining": round(
+                                max(
+                                    0,
+                                    _sn(
+                                        CooldownManager.PENDING_COOLDOWN_MAX_WAIT_SECONDS
+                                        - (_time.time() - pinfo.get("pending_start", 0)),
+                                        0,
+                                    ),
+                                )
+                            ),
+                            "reason": pinfo.get("reason", ""),
+                            "grace_message_budget": pinfo.get("grace_message_budget", 0),
+                            "consumed_user_messages": pinfo.get("consumed_user_messages", 0),
+                            "phase": "pending",
+                        }
+                    )
         except Exception:
             pass
         detail["cooldowns"] = cooldown_users
+        detail["pending_cooldowns"] = pending_cooldown_users
 
         # 回复密度
         density_data = {}
@@ -1770,6 +2234,20 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         except Exception as e:
             logger.warning(f"🌐 清除主动对话状态失败: {e}")
 
+        # 清除注意力冷却数据
+        try:
+            from ..utils.cooldown_manager import CooldownManager
+
+            if (
+                session in CooldownManager._cooldown_map
+                or session in CooldownManager._pending_cooldown_map
+            ):
+                CooldownManager._cooldown_map.pop(session, None)
+                CooldownManager._pending_cooldown_map.pop(session, None)
+                cleared.append("cooldown")
+        except Exception as e:
+            logger.warning(f"🌐 清除冷却数据失败: {e}")
+
         # 清除情绪数据
         if hasattr(self.plugin, "mood_tracker") and self.plugin.mood_tracker:
             if hasattr(self.plugin.mood_tracker, "moods"):
@@ -1809,7 +2287,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
             }
 
         # 2. 扫描自定义存储目录的聊天记录文件（支持嵌套目录结构）
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         chat_dir = data_dir / "chat_history"
         if chat_dir.exists():
             for f in chat_dir.rglob("*.json"):
@@ -1895,7 +2373,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
 
     async def _handle_clear_image_cache(self, request: web.Request):
         """清除图片描述缓存"""
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         cache_file = data_dir / "image_description_cache.json"
         if cache_file.exists():
             cache_file.unlink()
@@ -1915,7 +2393,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         """
         if not session or not _SAFE_SESSION_RE.match(session):
             return None
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         safe_dir = (data_dir / "chat_history").resolve()
 
         def _is_safe(p: Path) -> bool:
@@ -2002,7 +2480,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
 
     async def _handle_get_image_cache(self, request: web.Request):
         """查看图片描述缓存"""
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         cache_file = data_dir / "image_description_cache.json"
         if not cache_file.exists():
             return web.json_response({"ok": True, "cache": {}, "count": 0})
@@ -2039,10 +2517,15 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
 
             if restart_mode == "restart":
                 self._create_deferred_restart_task()
+                is_desktop = getattr(self.plugin, "is_desktop_mode", False)
+                msg = "插件已重置，AstrBot 重启中..."
+                if is_desktop:
+                    msg += "（桌面端：如重启后无响应，请通过托盘菜单手动重启）"
                 return web.json_response(
                     {
                         "ok": True,
-                        "msg": "插件已重置，AstrBot 重启中...",
+                        "msg": msg,
+                        "is_desktop": is_desktop,
                     }
                 )
             else:
@@ -2136,7 +2619,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                 self.plugin.image_description_cache.clear()
 
             # 也清除文件
-            cache_file = self._get_data_path() / "image_description_cache.json"
+            cache_file = self.data_dir / "image_description_cache.json"
             if cache_file.exists():
                 cache_file.unlink()
 
@@ -2300,7 +2783,9 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
     _SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_\-!./]+$")
 
     # 敏感文件：禁止在 Web 端读取、编辑、删除
-    _SENSITIVE_FILES = {"auth.json"}
+    _SENSITIVE_FILES = {"auth.json", "jwt_secret.json"}
+
+    _PROTECTED_PATTERNS = ("access_log", "bans.json")
 
     def _validate_file_path(self, rel_path: str) -> Path | None:
         """校验文件路径安全性，返回绝对路径或 None
@@ -2314,7 +2799,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if not self._SAFE_PATH_RE.match(rel_path):
             return None
 
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         target = data_dir / rel_path
         # 解析符号链接后确认仍在数据目录内
         try:
@@ -2326,9 +2811,15 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
             return None
         return target
 
+    def _is_protected_file(self, filename: str) -> bool:
+        """检查文件名是否属于受保护的敏感文件"""
+        if filename in self._SENSITIVE_FILES:
+            return True
+        return any(filename.startswith(p) for p in self._PROTECTED_PATTERNS)
+
     async def _handle_file_list(self, request: web.Request):
         """列出数据目录下所有文件"""
-        data_dir = self._get_data_path()
+        data_dir = self.data_dir
         files = []
 
         if not data_dir.exists():
@@ -2354,7 +2845,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
                             "size": stat.st_size,
                             "modified": stat.st_mtime,
                             "is_json": item.suffix.lower() == ".json",
-                            "protected": item.name in self._SENSITIVE_FILES,
+                            "protected": self._is_protected_file(item.name),
                         }
                     )
                 except OSError as e:
@@ -2374,7 +2865,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if not target.exists():
             return web.json_response({"ok": False, "msg": "文件不存在"}, status=404)
         # 敏感文件禁止在 Web 端读取
-        if target.name in self._SENSITIVE_FILES:
+        if self._is_protected_file(target.name):
             return web.json_response(
                 {
                     "ok": False,
@@ -2436,7 +2927,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if target is None:
             return web.json_response({"ok": False, "msg": "无效的文件路径"}, status=400)
         # 敏感文件禁止在 Web 端修改
-        if target.name in self._SENSITIVE_FILES:
+        if self._is_protected_file(target.name):
             return web.json_response(
                 {"ok": False, "msg": "此文件包含敏感凭据信息，不允许通过 Web 端修改"},
                 status=403,
@@ -2483,8 +2974,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}</style></head>
         if not target.exists():
             return web.json_response({"ok": False, "msg": "文件不存在"}, status=404)
         # 禁止删除认证和封禁文件
-        protected_files = self._SENSITIVE_FILES | {"bans.json"}
-        if target.name in protected_files:
+        if self._is_protected_file(target.name):
             return web.json_response(
                 {"ok": False, "msg": "此文件受保护，不可删除"}, status=403
             )

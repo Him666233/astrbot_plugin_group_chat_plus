@@ -15,6 +15,23 @@ from astrbot.api import logger
 from .message_processor import MessageProcessor
 from .message_cleaner import MessageCleaner
 from .proactive_chat_manager import ProactiveChatManager
+from .context_manager import ContextManager
+
+
+def _append_persistent_poke_event_text(base_text: str, event_text: str) -> str:
+    try:
+        base_text = base_text or ""
+        event_text = (event_text or "").strip()
+        if not event_text:
+            return base_text
+        if event_text in base_text:
+            return base_text
+        if not base_text.strip():
+            return event_text
+        return f"{base_text}\n{event_text}"
+    except Exception as e:
+        logger.warning(f"[消息缓存] 追加戳一戳持久事件文本失败，已回退原文本: {e}")
+        return base_text
 
 
 class MessageCacheManager:
@@ -167,11 +184,10 @@ class MessageCacheManager:
         logger.info(f"📦 [缓存-{source}] 已缓存消息 (共{cache_count}条)")
 
         if self.debug_mode:
-            content_preview = (
-                message_data.get("content", "")[:100]
-                if message_data.get("content")
-                else "(空)"
+            content_preview = ContextManager._content_to_safe_text(
+                message_data.get("content", "")
             )
+            content_preview = content_preview[:100] if content_preview else "(空)"
             logger.info(f"  [缓存管理器] 缓存内容: {content_preview}...")
 
         return cache_count
@@ -316,7 +332,14 @@ class MessageCacheManager:
             if isinstance(cached_msg, dict):
                 try:
                     msg_obj = AstrBotMessage()
-                    msg_obj.message_str = cached_msg.get("content", "")
+                    msg_obj.message_str = MessageProcessor.format_message_for_context_display(
+                        ContextManager._content_to_safe_text(
+                            cached_msg.get("content", "")
+                        ),
+                        cached_msg.get("mention_info"),
+                        cached_msg.get("is_at_all_message", False),
+                        cached_msg.get("persistent_poke_event_text", ""),
+                    )
                     msg_obj.platform_name = event.get_platform_name()
                     msg_obj.timestamp = cached_msg.get(
                         "message_timestamp"
@@ -456,7 +479,7 @@ class MessageCacheManager:
         for cached_msg in raw_cached:
             if isinstance(cached_msg, dict) and "content" in cached_msg:
                 # 获取处理后的消息内容（不含元数据）
-                raw_content = cached_msg["content"]
+                raw_content = ContextManager._content_to_safe_text(cached_msg["content"])
 
                 # 确定触发方式
                 trigger_type = None
@@ -478,10 +501,17 @@ class MessageCacheManager:
                     cached_msg.get("mention_info"),
                     trigger_type,
                     cached_msg.get("poke_info"),
+                    cached_msg.get("is_empty_at", False),
+                    "",
+                    cached_msg.get("is_at_all_message", False),
                 )
 
                 # 清理系统提示
                 msg_content = MessageCleaner.clean_message(msg_content)
+                msg_content = _append_persistent_poke_event_text(
+                    msg_content,
+                    cached_msg.get("persistent_poke_event_text", ""),
+                )
 
                 # 保存图片URL
                 cached_image_urls = cached_msg.get("image_urls", [])
@@ -691,7 +721,7 @@ class MessageCacheManager:
             if msg_id and msg_id in processing_msg_ids:
                 continue
 
-            raw_content = cached_msg["content"]
+            raw_content = ContextManager._content_to_safe_text(cached_msg["content"])
 
             # 确定触发方式
             trigger_type = None
@@ -713,10 +743,17 @@ class MessageCacheManager:
                 cached_msg.get("mention_info"),
                 trigger_type,
                 cached_msg.get("poke_info"),
+                cached_msg.get("is_empty_at", False),
+                "",
+                cached_msg.get("is_at_all_message", False),
             )
 
             # 清理系统提示
             msg_content = MessageCleaner.clean_message(msg_content)
+            msg_content = _append_persistent_poke_event_text(
+                msg_content,
+                cached_msg.get("persistent_poke_event_text", ""),
+            )
 
             # 保存图片URL
             cached_image_urls = cached_msg.get("image_urls", [])
@@ -730,6 +767,18 @@ class MessageCacheManager:
                 convert_entry["image_urls"] = cached_image_urls
 
             cached_messages_to_convert.append(convert_entry)
+
+            if cached_msg.get("smart_merged"):
+                _smart_sender = f"{cached_msg.get('sender_name', '未知用户')}(ID:{cached_msg.get('sender_id', 'unknown')})"
+                _smart_msg_id = cached_msg.get("message_id", "")[:16]
+                smart_merged_reply = f"[Smart合并] {_smart_sender}的消息已与同期消息合并处理，AI已在合并回复中一并回应，无需重复回答（ref:{_smart_msg_id}）"
+                cached_messages_to_convert.append(
+                    {"role": "assistant", "content": smart_merged_reply}
+                )
+                if self.debug_mode:
+                    logger.info(
+                        f"  [缓存管理器] Phase-2 Smart合并消息: 已添加虚拟AI回复标记"
+                    )
 
             if self.debug_mode:
                 sender_info = f"{cached_msg.get('sender_name')}(ID: {cached_msg.get('sender_id')})"
