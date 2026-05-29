@@ -6,6 +6,7 @@ IP 过滤、封禁、暴力破解防护、访问日志（含持久化）、防�
 import time
 import json
 import re
+import ipaddress
 from collections import deque, defaultdict
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple
@@ -100,10 +101,22 @@ class SecurityManager:
     """集中式安全状态管理"""
 
     def __init__(self, config: dict, data_dir: str):
-        # IP 访问控制（从配置读取）
+        # IP 访问控制（从配置读取，规范化所有 IP 为统一格式）
         self.ip_mode: str = config.get("web_panel_ip_mode", "disabled")
-        self.ip_list: List[str] = list(config.get("web_panel_ip_list", []))
-        self.protected_ips: List[str] = list(config.get("web_panel_protected_ips", []))
+        self.ip_list: List[str] = [
+            SecurityManager._normalize_ip(ip)
+            for ip in config.get("web_panel_ip_list", [])
+        ]
+        self.protected_ips: List[str] = [
+            SecurityManager._normalize_ip(ip)
+            for ip in config.get("web_panel_protected_ips", [])
+        ]
+
+        # 配置校验：检查 IP 名单中的潜在错误（无效IP、CIDR网段、未指定地址等）
+        SecurityManager._validate_ip_list_entries(self.ip_list, "web_panel_ip_list")
+        SecurityManager._validate_ip_list_entries(
+            self.protected_ips, "web_panel_protected_ips"
+        )
 
         # 防爬虫配置
         self.anti_spider_enabled: bool = config.get("web_panel_anti_spider", False)
@@ -164,9 +177,104 @@ class SecurityManager:
 
     # ==================== 辅助 ====================
 
+    @staticmethod
+    def _normalize_ip(ip: str) -> str:
+        """将 IP 地址规范化为标准字符串形式。
+
+        对 IPv4 保持点分十进制；对 IPv6 压缩为 RFC 5952 规范形式。
+        这使得同一地址的不同文本表示（如 2001:db8::1 与 2001:db8:0:0:0:0:0:1）
+        在字符串比较时能正确匹配。
+
+        若输入为非法 IP 地址，返回原字符串（防御性降级）。
+        """
+        if not ip:
+            return ip
+        try:
+            return str(ipaddress.ip_address(ip.strip()))
+        except ValueError:
+            return ip.strip()
+
+    @staticmethod
+    def _is_valid_ip(ip: str) -> bool:
+        """检查字符串是否为合法的 IPv4 或 IPv6 地址（不含 CIDR 网段）。"""
+        if not ip:
+            return False
+        try:
+            ipaddress.ip_address(ip.strip())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_network_notation(ip: str) -> bool:
+        """检查字符串是否为 CIDR 网段表示法（如 192.168.0.0/16）。"""
+        if not ip:
+            return False
+        try:
+            ipaddress.ip_network(ip.strip(), strict=False)
+            return "/" in ip  # 只有含 / 才算网段，避免裸 IP 被误判
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _validate_ip_list_entries(ip_list: list, list_name: str):
+        """校验 IP 名单条目，对无效/误导性配置输出警告日志。
+
+        检测以下问题：
+        - 无效 IP 且非 CIDR 网段 → 永远不会匹配任何客户端
+        - CIDR 网段表示法 → 系统不支持子网匹配，不会按预期工作
+        - 未指定地址（0.0.0.0 / ::）→ 永远不会匹配实际对端 IP
+        """
+        _UNSPECIFIED = {
+            "0.0.0.0": "IPv4 未指定地址",
+            "::": "IPv6 未指定地址",
+        }
+        for entry in ip_list:
+            if not entry or not entry.strip():
+                continue
+            entry = entry.strip()
+
+            if entry in _UNSPECIFIED:
+                # 根据名单类型给出针对性说明
+                if list_name == "web_panel_protected_ips":
+                    _hint = "该条目不会匹配任何实际客户端 IP，无法起到保护作用。"
+                else:
+                    _hint = (
+                        "该条目不会匹配任何实际客户端 IP："
+                        "白名单模式 → 全员无法访问；黑名单模式 → 无实际拦截效果。"
+                    )
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含 {entry}"
+                    f"（{_UNSPECIFIED[entry]}）。{_hint}"
+                )
+                continue
+
+            if SecurityManager._is_network_notation(entry):
+                # CIDR 网段在黑/白名单中均无效
+                _hint = (
+                    "系统不支持子网/IP段匹配，该条目不会按网段生效。"
+                    "如需匹配整个网段，请逐条添加各 IP 地址。"
+                )
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含 {entry}，疑似 CIDR 网段表示法。"
+                    f"{_hint}"
+                )
+                continue
+
+            if not SecurityManager._is_valid_ip(entry):
+                # 无效 IP 在黑/白名单中均无效
+                if list_name == "web_panel_protected_ips":
+                    _hint = "无法起到保护作用。"
+                else:
+                    _hint = "白名单模式 → 全员无法访问；黑名单模式 → 无实际拦截效果。"
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含 {entry}，不是合法的 IPv4/IPv6 地址。"
+                    f"该条目永远不会匹配任何客户端 IP，可能是配置错误。{_hint}"
+                )
+
     def _is_protected(self, ip: str) -> bool:
         """检查 IP 是否在受保护名单中"""
-        return ip in self.protected_ips
+        return self._normalize_ip(ip) in self.protected_ips
 
     @staticmethod
     def _parse_tiers(raw_value) -> List[Tuple[int, int]]:
@@ -241,6 +349,8 @@ class SecurityManager:
         Returns:
             (allowed, reason) - 是否允许 及 拒绝原因
         """
+        ip = self._normalize_ip(ip)
+
         # ① 受保护 IP 永远放行（最高优先级）
         if self._is_protected(ip):
             return True, ""
@@ -286,6 +396,8 @@ class SecurityManager:
         if not self.anti_spider_enabled:
             return False, ""
 
+        ip = self._normalize_ip(ip)
+
         # 受保护 IP 豁免
         if self._is_protected(ip):
             return False, ""
@@ -327,15 +439,22 @@ class SecurityManager:
         path: str,
         *,
         is_heartbeat: bool = False,
+        is_auto_refresh: bool = False,
     ) -> Tuple[bool, str]:
-        """检查已登录请求的速率，心跳请求仅记录不触发封禁。"""
+        """检查已登录请求的速率，心跳和自动刷新请求直接放行不计入窗口。"""
         if not self.anti_spider_enabled:
             return False, ""
+        ip = self._normalize_ip(ip)
         if self._is_protected(ip):
             return False, ""
         if self.ip_mode == "whitelist" and ip in self.ip_list:
             return False, ""
         if not session_id:
+            return False, ""
+
+        # 心跳和自动刷新直接放行，不参与速率窗口计数
+        # 放在 window.append 之前以确保不会虚增计数挤压手动操作配额
+        if is_heartbeat or is_auto_refresh:
             return False, ""
 
         now = time.time()
@@ -344,9 +463,6 @@ class SecurityManager:
         while window and window[0] < cutoff:
             window.popleft()
         window.append(now)
-
-        if is_heartbeat:
-            return False, ""
 
         if len(window) > self.authenticated_rate_limit:
             return (
@@ -357,6 +473,7 @@ class SecurityManager:
 
     def auto_ban_spider(self, ip: str, reason: str):
         """防爬虫触发时自动临时封禁（受保护 IP 豁免）"""
+        ip = self._normalize_ip(ip)
         if self._is_protected(ip):
             return
         if ip not in self.ban_map:
@@ -515,7 +632,7 @@ class SecurityManager:
         封禁 IP。受保护 IP 无法封禁，尝试封禁时输出警告日志。
 
         Args:
-            ip: 要封禁的 IP
+            ip: 要封禁的 IP（IPv4/IPv6 均可，自动规范化为标准形式）
             reason: 封禁原因
             duration: 封禁时长（秒），None=永久
 
@@ -524,6 +641,11 @@ class SecurityManager:
         """
         if not ip:
             return False, "IP 地址不能为空"
+
+        ip = self._normalize_ip(ip)
+
+        if not self._is_valid_ip(ip):
+            return False, f"无效的 IP 地址格式: {ip}"
 
         if self._is_protected(ip):
             logger.warning(
@@ -549,6 +671,7 @@ class SecurityManager:
 
     def unban_ip(self, ip: str):
         """解封 IP"""
+        ip = self._normalize_ip(ip)
         self.ban_map.pop(ip, None)
         self._save_bans()
 
@@ -596,8 +719,10 @@ class SecurityManager:
             loaded_count = 0
             expired_count = 0
             for item in data:
+                raw_ip = item.get("ip", "")
+                normalized_ip = self._normalize_ip(raw_ip)
                 ban = BanEntry(
-                    ip=item["ip"],
+                    ip=normalized_ip,
                     reason=item.get("reason", ""),
                     banned_at=item.get("banned_at", 0),
                     expires_at=item.get("expires_at"),
@@ -636,6 +761,7 @@ class SecurityManager:
         Returns:
             (is_locked, wait_seconds) - 是否被锁定及剩余等待秒数
         """
+        ip = self._normalize_ip(ip)
         tracker = self.brute_force.get(ip)
         if tracker is None:
             return False, 0
@@ -663,6 +789,7 @@ class SecurityManager:
             dict with keys: action, attempts, lock_seconds, banned
                 action: 'rate_ban' | 'permanent_ban' | 'tier_lock' | 'recorded'
         """
+        ip = self._normalize_ip(ip)
         now = time.time()
         tracker = self.brute_force.get(ip)
 
@@ -766,6 +893,7 @@ class SecurityManager:
 
     def reset_login_failures(self, ip: str):
         """登录成功后重置失败计数"""
+        ip = self._normalize_ip(ip)
         self.brute_force.pop(ip, None)
 
     # ==================== 内存清理 ====================
@@ -820,9 +948,20 @@ class SecurityManager:
     def update_config(self, config: dict):
         """运行时更新安全配置，并检查受保护 IP 是否与封禁表冲突"""
         self.ip_mode = config.get("web_panel_ip_mode", "disabled")
-        self.ip_list = list(config.get("web_panel_ip_list", []))
+        self.ip_list = [
+            self._normalize_ip(ip) for ip in config.get("web_panel_ip_list", [])
+        ]
         old_protected = set(self.protected_ips)
-        self.protected_ips = list(config.get("web_panel_protected_ips", []))
+        self.protected_ips = [
+            self._normalize_ip(ip) for ip in config.get("web_panel_protected_ips", [])
+        ]
+
+        # 配置校验（与 __init__ 中逻辑一致）
+        SecurityManager._validate_ip_list_entries(self.ip_list, "web_panel_ip_list")
+        SecurityManager._validate_ip_list_entries(
+            self.protected_ips, "web_panel_protected_ips"
+        )
+
         self.anti_spider_enabled = config.get("web_panel_anti_spider", False)
         self.anti_spider_rate_limit = config.get("web_panel_anti_spider_rate_limit", 60)
         self.anti_spider_ban_duration = config.get(

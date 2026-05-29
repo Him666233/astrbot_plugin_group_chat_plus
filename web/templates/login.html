@@ -234,6 +234,12 @@
 
             // 检查是否已登录
             checkExistingSession();
+
+            // :has() 选择器回退（Firefox <121 等不支持 CSS :has 的浏览器）
+            var container = document.querySelector('.login-container');
+            if (container && container.querySelector('.login-upgrade-notice')) {
+                container.classList.add('has-upgrade-notice');
+            }
         });
     })();
     </script>

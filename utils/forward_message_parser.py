@@ -385,10 +385,19 @@ def _build_header(
     parts.append(label)
 
     if include_sender_info and (forwarder_name or forwarder_id):
-        if forwarder_name:
-            sender_str = f"{forwarder_name}(ID:{forwarder_id})"
+        display_name = (
+            forwarder_name
+            if (forwarder_name and forwarder_name != str(forwarder_id))
+            else ""
+        )
+        if display_name:
+            sender_str = (
+                f"{display_name}(ID:{forwarder_id})" if forwarder_id else display_name
+            )
+        elif forwarder_id:
+            sender_str = f"未知用户(ID:{forwarder_id})"
         else:
-            sender_str = f"用户(ID:{forwarder_id})"
+            sender_str = "未知用户"
         parts.append(f"由 {sender_str} 转发的消息：")
     else:
         parts.append("：")
@@ -449,10 +458,10 @@ async def _format_single_node(
             name = seg_data.get("name") or seg_data.get("nickname") or ""
             if qq == "all":
                 text_parts.append("@全体成员")
-            elif name:
+            elif name and name != str(qq):
                 text_parts.append(f"@{name}")
-            else:
-                text_parts.append(f"@{qq}")
+            elif qq:
+                text_parts.append(f"@未知用户(ID:{qq})")
         elif seg_type in ("forward", "forward_msg", "nodes"):
             nested_text = await _handle_nested_forward_segment(
                 seg_data=seg_data,
@@ -491,10 +500,17 @@ async def _format_single_node(
         if time_str:
             line_prefix_parts.append(f"[{time_str}]")
     if include_sender_info and (sender_name or sender_id):
-        if sender_name:
-            line_prefix_parts.append(f"{sender_name}(ID:{sender_id}):")
+        display_name = (
+            sender_name if (sender_name and sender_name != str(sender_id)) else ""
+        )
+        if display_name:
+            line_prefix_parts.append(
+                f"{display_name}(ID:{sender_id}):" if sender_id else f"{display_name}:"
+            )
         elif sender_id:
-            line_prefix_parts.append(f"用户(ID:{sender_id}):")
+            line_prefix_parts.append(f"未知用户(ID:{sender_id}):")
+        else:
+            line_prefix_parts.append("未知用户:")
     line_prefix = " ".join(line_prefix_parts)
 
     result_parts = []

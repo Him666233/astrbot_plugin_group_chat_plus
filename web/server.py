@@ -2,7 +2,9 @@
 Web 配置面板 - aiohttp 服务器核心
 """
 
+import errno
 import html
+import ipaddress
 import os
 import re
 import json
@@ -62,6 +64,15 @@ class WebPanelServer:
         # 创建 aiohttp 应用
         self.app = web.Application(middlewares=[self._auth_middleware])
         self._setup_routes()
+
+        # 重启/重载状态追踪（供前端轮询）
+        self._restart_status = {
+            "operation": None,  # "restart" | "reload" | None
+            "status": "idle",  # "idle" | "pending" | "success" | "failed"
+            "error": None,  # str | None
+            "triggered_at": None,  # float | None
+            "completed_at": None,  # float | None
+        }
 
     def _resolve_data_dir(self, data_dir: str | None) -> Path:
         """解析 Web 面板使用的 canonical 插件数据目录"""
@@ -205,36 +216,82 @@ class WebPanelServer:
         content = panel_file.read_text(encoding="utf-8")
         return content.replace("__PLUGIN_VERSION__", self._get_panel_version_text())
 
-    # ---- 获取客户端 IP ----
+    # ---- 获取客户端 IP / Host 校验 ----
+
+    @staticmethod
+    def _validate_host(host: str) -> tuple[bool, str]:
+        """校验 Web 面板监听地址是否合法。
+
+        Returns:
+            (is_valid, error_message) — 合法时 error_message 为空
+        """
+        if not host or not host.strip():
+            return False, "监听地址不能为空"
+        host = host.strip()
+
+        # 通配地址直接放行
+        if host in ("0.0.0.0", "::"):
+            return True, ""
+
+        # CIDR 网段表示法不是合法的监听地址
+        if "/" in host:
+            try:
+                ipaddress.ip_network(host, strict=False)
+                return False, (
+                    f"监听地址 {host} 是 CIDR 网段格式，不是合法的监听地址。"
+                    f"请使用单个 IP 地址（如 0.0.0.0 监听所有 IPv4 接口，"
+                    f"或 :: 监听所有 IPv6 接口）。"
+                )
+            except ValueError:
+                pass
+
+        # 检查是否为合法 IP 地址（单播）
+        try:
+            ipaddress.ip_address(host)
+            return True, ""
+        except ValueError:
+            pass
+
+        # 非 IP 格式按主机名处理（如 localhost），交由系统解析
+        # 仅拒绝明显非法的字符
+        if any(c in host for c in ("\x00", "\n", "\r", " ")):
+            return False, f"监听地址包含非法字符: {host!r}"
+        return True, ""
 
     def _get_client_ip(self, request: web.Request) -> str:
-        """获取客户端真实 IP
+        """获取客户端真实 IP，并规范化为标准形式（IPv6 压缩、IPv4 点分十进制）。
 
         检测顺序：
         1. 若 peername 本身不是回环地址，直接使用（直连场景）
         2. 若 peername 是回环地址（127.x 或 ::1），说明走了反向代理，
            按顺序尝试 X-Real-IP → X-Forwarded-For 第一段
         3. 若配置了 web_panel_trust_proxy=True，无论 peername 如何都读取代理头
+
+        所有返回的 IP 均经过规范化，确保同一地址的不同文本表示（如
+        2001:db8::1 与 2001:db8:0:0:0:0:0:1）统一为一致的字符串形式。
         """
         peername = request.transport.get_extra_info("peername")
-        peer_ip = peername[0] if peername else "unknown"
+        peer_ip = SecurityManager._normalize_ip(peername[0] if peername else "unknown")
 
         trust_proxy = self._trust_proxy_cached
+        # 规范化后再检测回环（确保 0:0:0:0:0:0:0:1 等变体也能识别为 ::1）
         is_loopback = peer_ip in (
             "127.0.0.1",
             "::1",
             "localhost",
         ) or peer_ip.startswith("127.")
 
+        result = peer_ip
         if trust_proxy or is_loopback:
             real_ip = request.headers.get("X-Real-IP", "").strip()
             if real_ip:
-                return real_ip
-            xff = request.headers.get("X-Forwarded-For", "").strip()
-            if xff:
-                return xff.split(",")[0].strip()
+                result = SecurityManager._normalize_ip(real_ip)
+            else:
+                xff = request.headers.get("X-Forwarded-For", "").strip()
+                if xff:
+                    result = SecurityManager._normalize_ip(xff.split(",")[0].strip())
 
-        return peer_ip
+        return result
 
     def _is_request_secure(self, request: web.Request) -> bool:
         """判断当前请求是否处于 HTTPS 安全上下文。"""
@@ -462,6 +519,28 @@ class WebPanelServer:
             response = await handler(request)
             return self._add_security_headers(response)
 
+        if path == "/robots.txt":
+            return web.Response(
+                text=self.security.get_robots_txt(),
+                content_type="text/plain",
+            )
+
+        # IP 检查前置于面板静态资源和内部路由，确保被封禁/黑名单 IP
+        # 即使持有有效 token 也无法访问面板的任何资源或数据。
+        # /error 路径放行以便渲染统一的拦截页面。
+        if path != "/error":
+            allowed, reason = self.security.check_ip_allowed(ip)
+            if not allowed:
+                self.security.log_access(
+                    ip, request.method, path, 403, note=f"IP 拦截: {reason}"
+                )
+                if not path.startswith("/api/"):
+                    raise web.HTTPFound("/error?code=blocked")
+                else:
+                    return web.json_response(
+                        {"ok": False, "msg": "访问被拒绝", "blocked": True}, status=403
+                    )
+
         if path.startswith(self._PANEL_STATIC_PREFIX):
             token = self._extract_token(request)
             if not token:
@@ -469,7 +548,7 @@ class WebPanelServer:
                     ip, request.method, path, 403, note="未授权访问面板静态资源"
                 )
                 return web.Response(status=403, text="Forbidden")
-            verify_ip = ip if self._ip_bind_check_cached else None
+            verify_ip = self._ip_bind_check_cached and ip or None
             auth_result = self.auth_mgr.verify_token(token, current_ip=verify_ip)
             if not auth_result.ok:
                 self.security.log_access(
@@ -488,31 +567,6 @@ class WebPanelServer:
             )
             return web.Response(status=403, text="Forbidden")
 
-        if path == "/robots.txt":
-            return web.Response(
-                text=self.security.get_robots_txt(),
-                content_type="text/plain",
-            )
-
-        allowed, reason = self.security.check_ip_allowed(ip)
-        if not allowed:
-            self.security.log_access(ip, request.method, path, 403)
-            if not path.startswith("/api/"):
-                nonce = self._generate_nonce()
-                html = self._inject_nonce(
-                    self._load_error_page("blocked", reason), nonce
-                )
-                csp = self._build_csp(nonce, self._CSP_ERROR_TEMPLATE)
-                response = web.Response(
-                    text=html,
-                    content_type="text/html",
-                    status=403,
-                )
-                return self._add_security_headers(response, csp)
-            return web.json_response(
-                {"ok": False, "msg": reason, "blocked": True}, status=403
-            )
-
         auth_token = self._extract_token(request)
         verify_ip = ip if self._ip_bind_check_cached else None
         auth_result = None
@@ -524,6 +578,7 @@ class WebPanelServer:
             )
 
         if self.security.anti_spider_enabled:
+            is_auto_refresh = request.headers.get("X-GCP-Auto-Refresh") == "1"
             if auth_result and auth_result.ok:
                 session_id = (
                     auth_result.session.get("sid") if auth_result.session else ""
@@ -533,6 +588,7 @@ class WebPanelServer:
                     session_id,
                     path,
                     is_heartbeat=is_heartbeat,
+                    is_auto_refresh=is_auto_refresh,
                 )
                 if hit_limit:
                     note = self.security.get_auto_ban_note(limit_reason)
@@ -542,31 +598,23 @@ class WebPanelServer:
                         {"ok": False, "msg": "访问被拒绝", "blocked": True}, status=403
                     )
             else:
-                is_spider, spider_reason = self.security.check_spider(
-                    ip, path, user_agent
-                )
-                if is_spider:
-                    note = self.security.get_auto_ban_note(spider_reason)
-                    self.security.auto_ban_spider(ip, spider_reason)
-                    self.security.log_access(ip, request.method, path, 403, note=note)
-                    if not path.startswith("/api/"):
-                        nonce = self._generate_nonce()
-                        html = self._inject_nonce(
-                            self._load_error_page(
-                                "blocked", f"[防爬虫] {spider_reason}"
-                            ),
-                            nonce,
+                # /error 页面不触发反爬虫检查，避免重定向循环
+                if path != "/error":
+                    is_spider, spider_reason = self.security.check_spider(
+                        ip, path, user_agent
+                    )
+                    if is_spider:
+                        note = self.security.get_auto_ban_note(spider_reason)
+                        self.security.auto_ban_spider(ip, spider_reason)
+                        self.security.log_access(
+                            ip, request.method, path, 403, note=note
                         )
-                        csp = self._build_csp(nonce, self._CSP_ERROR_TEMPLATE)
-                        response = web.Response(
-                            text=html,
-                            content_type="text/html",
+                        if not path.startswith("/api/"):
+                            raise web.HTTPFound("/error?code=blocked")
+                        return web.json_response(
+                            {"ok": False, "msg": "访问被拒绝", "blocked": True},
                             status=403,
                         )
-                        return self._add_security_headers(response, csp)
-                    return web.json_response(
-                        {"ok": False, "msg": "访问被拒绝", "blocked": True}, status=403
-                    )
 
         if path in self._PUBLIC_PATHS:
             response = await handler(request)
@@ -705,6 +753,7 @@ class WebPanelServer:
         r.add_post(
             "/api/commands/clear-image-cache", self._handle_cmd_clear_image_cache
         )
+        r.add_get("/api/commands/restart-status", self._handle_restart_status)
 
         # 安全管理
         r.add_get("/api/security/access-log", self._handle_access_log)
@@ -749,33 +798,83 @@ class WebPanelServer:
 
     async def start(self):
         """启动 Web 服务器，端口被占用时最多重试 MAX_RETRY 次"""
+        # 前置校验：监听地址合法性
+        host_ok, host_err = self._validate_host(self.host)
+        if not host_ok:
+            logger.error(f"🌐 Web 面板监听地址配置错误：{host_err}")
+            logger.error("🌐 Web 配置面板未能启动，请检查 web_panel_host 配置项。")
+            return
+
         for attempt in range(1, self.MAX_RETRY + 1):
             try:
                 self.runner = web.AppRunner(self.app)
                 await self.runner.setup()
-                site = web.TCPSite(self.runner, self.host, self.port)
+                # 监听地址为通配符（0.0.0.0 或 ::）时使用 None 启用双栈，
+                # 同时监听 IPv4 和 IPv6 所有网络接口
+                _host: str | None = self.host
+                if self.host in ("0.0.0.0", "::"):
+                    _host = None
+                site = web.TCPSite(self.runner, _host, self.port)
                 await site.start()
-                # 收集本机所有 IPv4 地址
-                _ips: list[str] = []
+                # 收集本机所有 IPv4 和 IPv6 地址
+                _ips_v4: list[str] = []
+                _ips_v6: list[str] = []
                 try:
                     for _info in socket.getaddrinfo(socket.gethostname(), None):
+                        _ip = _info[4][0]
                         if _info[0] == socket.AF_INET:
-                            _ip = _info[4][0]
-                            if _ip not in _ips:
-                                _ips.append(_ip)
+                            if _ip not in _ips_v4:
+                                _ips_v4.append(_ip)
+                        elif _info[0] == socket.AF_INET6:
+                            # 过滤链路本地地址和重复项
+                            if not _ip.startswith("fe80:") and _ip not in _ips_v6:
+                                _ips_v6.append(_ip)
                 except Exception:
                     pass
-                if not _ips:
-                    _ips = ["127.0.0.1"]
+                if not _ips_v4:
+                    _ips_v4 = ["127.0.0.1"]
                 _lines = [
                     "",
                     "  ✨✨✨",
                     "  Group Chat Plus Web 面板已启动，可访问",
                     "",
                     f"   ➜  本地:  http://localhost:{self.port}",
+                    f"   ➜  本地:  http://127.0.0.1:{self.port}",
                 ]
-                for _ip in _ips:
-                    _lines.append(f"   ➜  网络:  http://{_ip}:{self.port}")
+                for _ip in _ips_v4:
+                    if _ip != "127.0.0.1":
+                        _lines.append(f"   ➜  内网:  http://{_ip}:{self.port}")
+                for _ip in _ips_v6:
+                    # IPv6 URL 必须加方括号
+                    _lines.append(f"   ➜  内网:  http://[{_ip}]:{self.port}")
+
+                # 尝试获取公网 IP（多来源去重）
+                _public_ips: list[str] = []
+                try:
+                    import aiohttp
+
+                    async with aiohttp.ClientSession() as _session:
+                        for _url in (
+                            "https://api.ipify.org",
+                            "https://ifconfig.me/ip",
+                            "https://icanhazip.com",
+                        ):
+                            try:
+                                async with _session.get(
+                                    _url,
+                                    timeout=aiohttp.ClientTimeout(total=3),
+                                ) as _resp:
+                                    if _resp.status == 200:
+                                        _ip = (await _resp.text()).strip()
+                                        if _ip not in _public_ips:
+                                            _public_ips.append(_ip)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+                for _ip in _public_ips:
+                    _lines.append(f"   ➜  公网:  http://{_ip}:{self.port}")
+
                 _lines.append("")
                 logger.info("\n".join(_lines))
                 # 启动日志自动清理任务
@@ -792,18 +891,47 @@ class WebPanelServer:
                         logger.debug(f"🌐 清理 runner 时出错（已忽略）: {cleanup_err}")
                     self.runner = None
 
-                if attempt < self.MAX_RETRY:
-                    logger.warning(
-                        f"🌐 Web 面板启动失败（第 {attempt}/{self.MAX_RETRY} 次），"
-                        f"端口 {self.port} 可能被占用: {e}，"
-                        f"{self.RETRY_DELAY}秒后重试..."
-                    )
-                    await asyncio.sleep(self.RETRY_DELAY)
-                else:
+                # 区分端口占用 vs 地址不可用 vs 其他系统错误
+                _errno = getattr(e, "errno", 0) or 0
+                if _errno == errno.EADDRINUSE:
+                    # 端口被占用 → 重试
+                    if attempt < self.MAX_RETRY:
+                        logger.warning(
+                            f"🌐 Web 面板启动失败（第 {attempt}/{self.MAX_RETRY} 次），"
+                            f"端口 {self.port} 被占用，{self.RETRY_DELAY}秒后重试..."
+                        )
+                        await asyncio.sleep(self.RETRY_DELAY)
+                    else:
+                        logger.error(
+                            f"🌐 Web 面板启动失败（已重试 {self.MAX_RETRY} 次），放弃启动。"
+                            f"端口 {self.port} 被占用: {e}"
+                        )
+                elif _errno == errno.EADDRNOTAVAIL:
+                    # 地址不可用（如填了不属于本机的 IP）→ 不重试，直接放弃
                     logger.error(
-                        f"🌐 Web 面板启动失败（已重试 {self.MAX_RETRY} 次），放弃启动。"
-                        f"端口 {self.port} 被占用: {e}"
+                        f"🌐 Web 面板监听地址 {self.host} 不可用（不属于本机网络接口）。"
+                        f"请检查 web_panel_host 配置是否正确。错误详情: {e}"
                     )
+                    break
+                elif _errno == errno.EAFNOSUPPORT:
+                    # 地址族不支持 → 不重试，直接放弃
+                    logger.error(
+                        f"🌐 系统不支持 Web 面板监听地址 {self.host} 的地址族。"
+                        f"请检查 web_panel_host 配置。错误详情: {e}"
+                    )
+                    break
+                else:
+                    # 其他系统错误 → 重试
+                    if attempt < self.MAX_RETRY:
+                        logger.warning(
+                            f"🌐 Web 面板启动失败（第 {attempt}/{self.MAX_RETRY} 次）: {e}，"
+                            f"{self.RETRY_DELAY}秒后重试..."
+                        )
+                        await asyncio.sleep(self.RETRY_DELAY)
+                    else:
+                        logger.error(
+                            f"🌐 Web 面板启动失败（已重试 {self.MAX_RETRY} 次），放弃启动: {e}"
+                        )
             except Exception as e:
                 # 非端口占用的其他异常，直接放弃，不影响插件主功能
                 if self.runner:
@@ -1039,8 +1167,12 @@ class WebPanelServer:
         保证即使在无法发起额外请求的情况下也能正常显示。
 
         安全考量：reason 仅作为文本内容展示，不含任何内部路由或代码结构信息。
+        blocked 类型强制清空 reason，防止向内网被封禁者泄露封禁机制细节。
         """
         import html as html_mod
+
+        if code == "blocked":
+            reason = ""
 
         error_file = self.template_dir / "error.html"
         try:
@@ -1070,13 +1202,24 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         code = request.rel_url.query.get("code", "error")
         reason = request.rel_url.query.get("reason", "")
 
-        # 若为 blocked 页面，重新检查 IP 是否已解封（直接获取 IP，不依赖中间件注入）
-        if code == "blocked":
-            ip = self._get_client_ip(request)
-            if ip:
-                allowed, _ = self.security.check_ip_allowed(ip)
-                if allowed:
-                    raise web.HTTPFound("/")
+        ip = self._get_client_ip(request)
+        if ip:
+            allowed, block_reason = self.security.check_ip_allowed(ip)
+            if not allowed:
+                # IP 仍被封禁，强制显示 blocked 页面
+                code = "blocked"
+                reason = block_reason
+            elif code == "blocked":
+                # IP 未被封禁但访问了 blocked 页面 → 跳转
+                token = self._extract_token(request)
+                if token:
+                    verify_ip = ip if self._ip_bind_check_cached else None
+                    auth_result = self.auth_mgr.verify_token(
+                        token, current_ip=verify_ip
+                    )
+                    if auth_result.ok:
+                        raise web.HTTPFound("/panel")
+                raise web.HTTPFound("/")
 
         html_content = self._load_error_page(code, reason)
         nonce = self._generate_nonce()
@@ -1088,10 +1231,6 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             status=403 if code == "blocked" else (404 if code == "404" else 400),
         )
         return self._add_security_headers(response, csp)
-
-    def _blocked_page_html(self, ip: str, reason: str) -> str:
-        """生成被封禁/拒绝访问的友好 HTML 页面（复用统一错误页模板）"""
-        return self._load_error_page("blocked", reason)
 
     # ==================== 会话 Key 规范化工具 ====================
 
@@ -1242,7 +1381,20 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                 sessions.add(key)
         except Exception:
             pass
-        return sessions
+
+        # 防御性过滤：排除无效 key（空字符串、None、纯空白等），防止幽灵会话
+        filtered = set()
+        for s in sessions:
+            if not s:
+                continue
+            s_str = str(s)
+            if not s_str.strip():
+                continue
+            if not _SAFE_SESSION_RE.match(s_str):
+                logger.debug(f"🌐 跳过不合规的会话 key: {s_str!r}")
+                continue
+            filtered.add(s_str)
+        return filtered
 
     # ==================== 认证 Handler ====================
 
@@ -1418,8 +1570,22 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         # 心跳只更新服务端最近活跃时间，不延长 JWT 24 小时绝对过期。
         # 一旦 token 过期、密码被改、服务端重启或 IP 变化（开启绑定时），
         # 下一个有效心跳会直接返回 401 reason，由前端统一处理重新登录。
+        # 心跳路径走正常认证中间件，中间件验证通过后会设置 request["user"]；
+        # 以下自行提取 token 的分支为防御性兜底，正常流程不会进入。
         payload = request.get("user") or {}
         sid = payload.get("sid")
+        if not sid:
+            token = self._extract_token(request)
+            if token:
+                verify_ip = (
+                    self._get_client_ip(request) if self._ip_bind_check_cached else None
+                )
+                auth_result = self.auth_mgr.verify_token(
+                    token, current_ip=verify_ip, touch=False, heartbeat=True
+                )
+                if auth_result.ok and auth_result.payload:
+                    payload = auth_result.payload
+                    sid = payload.get("sid")
         if sid:
             self.auth_mgr.touch_session(sid, heartbeat=True, persist=True)
         auth_session = self.auth_mgr._sessions.get(sid) if sid else None
@@ -1916,6 +2082,42 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             }
         )
 
+    # ==================== 重启/重载状态追踪 & JWT 签发 ====================
+
+    def _reset_restart_status(self):
+        self._restart_status = {
+            "operation": None,
+            "status": "idle",
+            "error": None,
+            "triggered_at": None,
+            "completed_at": None,
+        }
+
+    def _set_restart_status(self, operation, status, error=None):
+        now = __import__("time").time()
+        self._restart_status["operation"] = operation
+        self._restart_status["status"] = status
+        if status == "pending":
+            self._restart_status["triggered_at"] = now
+        if status in ("success", "failed"):
+            self._restart_status["completed_at"] = now
+        if error is not None:
+            self._restart_status["error"] = error
+
+    def _generate_jwt_token_from_dbc(self, dbc: dict) -> str:
+        """从 dbc 字典签发 JWT（不依赖 self.plugin，延迟任务中安全使用）。"""
+        import jwt as _jwt
+        import datetime as _dt
+
+        jwt_secret = dbc.get("jwt_secret", "")
+        if not jwt_secret:
+            raise ValueError("jwt_secret 不在 dashboard 配置中")
+        payload = {
+            "username": dbc.get("username", "astrbot"),
+            "exp": _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=7),
+        }
+        return _jwt.encode(payload, jwt_secret, algorithm="HS256")
+
     # ==================== 延迟重载/重启 ====================
 
     def _create_deferred_reload_task(self):
@@ -1929,6 +2131,10 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         host = self.plugin.host
         port = self.plugin.port
         dbc = dict(self.plugin.dbc)
+
+        self._reset_restart_status()
+        self._set_restart_status("reload", "pending")
+
         task = asyncio.ensure_future(self._do_deferred_reload(host, port, dbc))
         # 保持强引用，避免 Python 3.12+ 的 Task GC 警告
         self._deferred_tasks = getattr(self, "_deferred_tasks", set())
@@ -1943,25 +2149,37 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         """
         await asyncio.sleep(1.0)  # 等待 HTTP 响应完全发出
 
+        self._set_restart_status("reload", "in_progress")
+
         # ---- 主路径：通过 AstrBot 仪表盘 REST API ----
         try:
             import aiohttp as _aiohttp
 
             async with _aiohttp.ClientSession() as session:
-                # 获取仪表盘认证 token
-                login_url = f"http://{host}:{port}/api/auth/login"
-                async with session.post(
-                    login_url,
-                    json={"username": dbc["username"], "password": dbc["password"]},
-                ) as resp:
-                    data = await resp.json()
-                    token = (
-                        data.get("data", {}).get("token")
-                        if isinstance(data, dict)
-                        else None
+                # JWT 优先：通过 jwt_secret 直接签发 token
+                token = None
+                try:
+                    token = self._generate_jwt_token_from_dbc(dbc)
+                except Exception as jwt_e:
+                    logger.warning(
+                        f"jwt_secret 生成 token 失败（重载）: {jwt_e}，尝试密码登录..."
                     )
-                    if not token:
-                        raise RuntimeError(f"登录响应格式错误: {data}")
+
+                if not token:
+                    # 降级：密码登录（旧版 AstrBot v3）
+                    login_url = f"http://{host}:{port}/api/auth/login"
+                    async with session.post(
+                        login_url,
+                        json={"username": dbc["username"], "password": dbc["password"]},
+                    ) as resp:
+                        data = await resp.json()
+                        token = (
+                            data.get("data", {}).get("token")
+                            if isinstance(data, dict)
+                            else None
+                        )
+                        if not token:
+                            raise RuntimeError(f"登录响应格式错误: {data}")
 
                 # 调用仪表盘的插件重载 API
                 reload_url = f"http://{host}:{port}/api/plugin/reload"
@@ -1973,6 +2191,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                     data = await resp.json()
                     if data.get("status") == "ok":
                         logger.info("🌐 插件重载成功（通过仪表盘 API）")
+                        self._set_restart_status("reload", "success")
                         return
                     else:
                         raise RuntimeError(f"仪表盘返回: {data.get('message', data)}")
@@ -1989,16 +2208,23 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             )
             if success:
                 logger.info("🌐 插件重载成功（通过 star_manager 降级）")
+                self._set_restart_status("reload", "success")
             else:
                 logger.error(f"🌐 插件重载失败: {err_msg}")
+                self._set_restart_status("reload", "failed", err_msg)
         except Exception as e:
             logger.error(f"🌐 插件重载异常（所有方式均失败）: {e}", exc_info=True)
+            self._set_restart_status("reload", "failed", str(e))
 
     def _create_deferred_restart_task(self):
         """创建延迟 AstrBot 重启任务（确保 HTTP 响应先发出）"""
         host = self.plugin.host
         port = self.plugin.port
         dbc = dict(self.plugin.dbc)
+
+        self._reset_restart_status()
+        self._set_restart_status("restart", "pending")
+
         task = asyncio.ensure_future(self._do_deferred_restart(host, port, dbc))
         self._deferred_tasks = getattr(self, "_deferred_tasks", set())
         self._deferred_tasks.add(task)
@@ -2011,6 +2237,9 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         在 Windows 上实际是新建进程+退出当前，可能导致 Tauri 丢失子进程跟踪。
         """
         await asyncio.sleep(1.0)  # 等待 HTTP 响应完全发出
+
+        self._set_restart_status("restart", "in_progress")
+
         is_desktop = getattr(self.plugin, "is_desktop_mode", False)
         if is_desktop:
             logger.warning(
@@ -2021,19 +2250,30 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             import aiohttp as _aiohttp
 
             async with _aiohttp.ClientSession() as session:
-                login_url = f"http://{host}:{port}/api/auth/login"
-                async with session.post(
-                    login_url,
-                    json={"username": dbc["username"], "password": dbc["password"]},
-                ) as resp:
-                    data = await resp.json()
-                    token = (
-                        data.get("data", {}).get("token")
-                        if isinstance(data, dict)
-                        else None
+                # JWT 优先：通过 jwt_secret 直接签发 token
+                token = None
+                try:
+                    token = self._generate_jwt_token_from_dbc(dbc)
+                except Exception as jwt_e:
+                    logger.warning(
+                        f"jwt_secret 生成 token 失败（重启）: {jwt_e}，尝试密码登录..."
                     )
-                    if not token:
-                        raise RuntimeError(f"登录响应格式错误: {data}")
+
+                if not token:
+                    # 降级：密码登录（旧版 AstrBot v3）
+                    login_url = f"http://{host}:{port}/api/auth/login"
+                    async with session.post(
+                        login_url,
+                        json={"username": dbc["username"], "password": dbc["password"]},
+                    ) as resp:
+                        data = await resp.json()
+                        token = (
+                            data.get("data", {}).get("token")
+                            if isinstance(data, dict)
+                            else None
+                        )
+                        if not token:
+                            raise RuntimeError(f"登录响应格式错误: {data}")
 
                 restart_url = f"http://{host}:{port}/api/stat/restart-core"
                 async with session.post(
@@ -2042,10 +2282,12 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                 ) as resp:
                     if resp.status == 200:
                         logger.info("🌐 AstrBot 重启请求已发送")
+                        self._set_restart_status("restart", "success")
                     else:
                         raise RuntimeError(f"HTTP {resp.status}")
         except Exception as e:
             logger.warning(f"🌐 通过仪表盘 API 重启失败: {e}，尝试降级...")
+            self._set_restart_status("restart", "failed", str(e))
             try:
                 await self.plugin.restart_core()
             except Exception as e2:
@@ -2099,6 +2341,10 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             if plat and ctype:
                 canonical.add(key)
             elif cid not in cid_map:
+                # 防御性检查：跳过无效的纯 chat_id
+                if not cid or not _SAFE_SESSION_RE.match(cid):
+                    logger.debug(f"🌐 跳过无效的孤立会话 key: {cid!r}")
+                    continue
                 canonical.add(cid)
 
         return web.json_response({"ok": True, "sessions": sorted(canonical)})
@@ -2842,33 +3088,44 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             self.plugin.proactive_processing_sessions.pop(session_key, None)
 
         # 清除待转存消息缓存（尝试多种 key 格式）
-        if hasattr(self.plugin, "pending_messages_cache"):
-            for key in {session, session_key, chat_id}:
-                if key and key in self.plugin.pending_messages_cache:
-                    del self.plugin.pending_messages_cache[key]
-                    cleared.append("pending_messages_cache")
+        try:
+            if hasattr(self.plugin, "pending_messages_cache"):
+                for key in {session, session_key, chat_id}:
+                    if key and key in self.plugin.pending_messages_cache:
+                        del self.plugin.pending_messages_cache[key]
+                        cleared.append("pending_messages_cache")
+        except Exception as e:
+            logger.warning(f"🌐 清除待转存消息缓存失败: {e}")
 
         # 清除最近回复缓存（尝试多种 key 格式）
-        if hasattr(self.plugin, "recent_replies_cache"):
-            for key in {session, session_key, chat_id}:
-                if key and key in self.plugin.recent_replies_cache:
-                    del self.plugin.recent_replies_cache[key]
-                    cleared.append("recent_replies")
+        try:
+            if hasattr(self.plugin, "recent_replies_cache"):
+                for key in {session, session_key, chat_id}:
+                    if key and key in self.plugin.recent_replies_cache:
+                        del self.plugin.recent_replies_cache[key]
+                        cleared.append("recent_replies")
+        except Exception as e:
+            logger.warning(f"🌐 清除最近回复缓存失败: {e}")
 
         # 清除等待窗口（key 为 (chat_id, user_id) 元组）
-        if hasattr(self.plugin, "_group_wait_windows"):
-            target_ids = {session, session_key}
-            if chat_id:
-                target_ids.add(chat_id)
-            stale_windows = [
-                wk
-                for wk, _ in self.plugin._group_wait_windows.items()
-                if isinstance(wk, tuple) and len(wk) >= 1 and str(wk[0]) in target_ids
-            ]
-            for wk in stale_windows:
-                self.plugin._group_wait_windows.pop(wk, None)
-            if stale_windows:
-                cleared.append("group_wait_windows")
+        try:
+            if hasattr(self.plugin, "_group_wait_windows"):
+                target_ids = {session, session_key}
+                if chat_id:
+                    target_ids.add(chat_id)
+                stale_windows = [
+                    wk
+                    for wk, _ in self.plugin._group_wait_windows.items()
+                    if isinstance(wk, tuple)
+                    and len(wk) >= 1
+                    and str(wk[0]) in target_ids
+                ]
+                for wk in stale_windows:
+                    self.plugin._group_wait_windows.pop(wk, None)
+                if stale_windows:
+                    cleared.append("group_wait_windows")
+        except Exception as e:
+            logger.warning(f"🌐 清除等待窗口失败: {e}")
 
         # 清除对话活跃度映射
         try:
@@ -2936,6 +3193,10 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         # 4. 纯 chat_id 且无对应 compound key 的孤立运行时条目
         for cid in plain_runtime_cids:
             if cid not in cid_map and cid not in sessions:
+                # 防御性检查：跳过无效的 chat_id
+                if not cid or not cid.strip() or not _SAFE_SESSION_RE.match(cid):
+                    logger.debug(f"🌐 跳过无效的孤立运行时会话 key: {cid!r}")
+                    continue
                 sessions[cid] = {
                     "message_count": 0,
                     "file_size": 0,
@@ -3082,7 +3343,7 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         )
 
     async def _handle_session_reset(self, request: web.Request):
-        """重置会话数据"""
+        """重置会话数据（仅清除运行时状态，不删除文件，不设历史截止点）。"""
         session = request.match_info["session"]
         session_ok, session_msg = self._require_known_session(session)
         if not session_ok:
@@ -3090,25 +3351,14 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             return web.json_response({"ok": False, "msg": session_msg}, status=status)
         cleared = self._clear_session_data(session)
 
-        # 同时设置历史截止时间戳
-        try:
-            from ..utils.context_manager import ContextManager
-
-            # 兼容：以 "_" 或 ":" 分隔
-            import re
-
-            parts = re.split(r"[:_]", session)
-            chat_id = parts[-1] if len(parts) >= 3 else session
-            if chat_id:
-                ContextManager.set_history_cutoff(chat_id)
-                cleared.append("history_cutoff")
-        except Exception as e:
-            logger.warning(f"🌐 设置历史截止点失败: {e}")
+        # 触发插件重载（使内存状态清理完全生效）
+        self.auth_mgr.mark_web_initiated_reload()
+        self._create_deferred_reload_task()
 
         return web.json_response(
             {
                 "ok": True,
-                "msg": f"已清除会话 {session} 的数据",
+                "msg": f"已清除会话 {session} 的数据，插件重载中...",
                 "cleared": cleared,
             }
         )
@@ -3360,6 +3610,9 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                 if chat_id:
                     ContextManager.set_history_cutoff(chat_id)
                     cleared.append("history_cutoff")
+                    logger.info(
+                        "🌐 [Web指令-会话重置] 已设置历史截止时间戳 chat_id=%s", chat_id
+                    )
             except Exception as e:
                 logger.warning(f"🌐 设置历史截止点失败: {e}")
 
@@ -3379,10 +3632,12 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                     }
                 )
             else:
+                self.auth_mgr.mark_web_initiated_reload()
+                self._create_deferred_reload_task()
                 return web.json_response(
                     {
                         "ok": True,
-                        "msg": f"会话 {session_id} 已重置",
+                        "msg": f"会话 {session_id} 已重置，插件重载中...",
                         "cleared": cleared,
                     }
                 )
@@ -3429,8 +3684,11 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                 )
             else:
                 self.auth_mgr.mark_web_initiated_reload()
+                self._create_deferred_reload_task()
                 msg = (
-                    f"已清除 {count} 条图片描述缓存" if count >= 0 else "图片缓存已清除"
+                    f"已清除 {count} 条缓存，插件重载中..."
+                    if count >= 0
+                    else "图片缓存已清除，插件重载中..."
                 )
                 return web.json_response(
                     {
@@ -3443,6 +3701,10 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
             return web.json_response(
                 {"ok": False, "msg": "清除缓存失败，请查看日志"}, status=500
             )
+
+    async def _handle_restart_status(self, request: web.Request):
+        """返回当前重启/重载操作状态（供前端轮询）。"""
+        return web.json_response({"ok": True, **dict(self._restart_status)})
 
     # ==================== 安全管理 Handler ====================
 
@@ -3475,6 +3737,8 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
         ip = body.get("ip", "")
         duration = body.get("duration")  # None=永久, 数字=秒
         reason = body.get("reason", "手动封禁")
+        if len(reason) > 128:
+            reason = reason[:128]
 
         success, msg = self.security.ban_ip(ip, reason, duration)
         if success:
@@ -3514,6 +3778,8 @@ h1{{color:#ff6b6b;}}p{{color:#a0a0b8;line-height:1.8;}}
                 {"ok": False, "msg": f"IP {ip} 不在封禁列表中"}, status=404
             )
 
+        if len(reason) > 128:
+            reason = reason[:128]
         ban.reason = reason
         self.security._save_bans()
         return web.json_response({"ok": True, "msg": "备注已更新"})

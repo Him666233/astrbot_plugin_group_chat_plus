@@ -81,7 +81,7 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 
 | 配置项 | 作用 |
 |--------|------|
-| `enable_ignore_at_all` | 忽略@全体成员消息，避免群公告触发AI |
+| `enable_ignore_at_all` | 忽略@全体成员消息，避免群公告触发AI。开启后消息直接短路——不缓存、不保存、不处理 |
 | `at_all_message_mode` | `@全体成员` 专用处理模式：可按普通消息处理、跳过概率筛选、跳过概率+读空气，或仅临时提升当前消息概率 |
 | `at_all_probability_boost_value` | `at_all_message_mode=probability_boost` 时，仅对当前这条@全体成员消息增加的临时概率值 |
 
@@ -106,11 +106,15 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 | `trigger_keywords` | 触发词列表（如AI角色名/别名），命中后跳过概率筛选 |
 | `keyword_smart_mode` | 智能模式：即使命中关键词也保留 AI 决策判断（Phase 7），而非直接回复 |
 
+**匹配规则：** 大小写敏感，子串匹配（`in` 运算符），仅匹配用户发送的原始消息文本（不包含用户名、系统提示词等元数据）。详见 [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md#关键词系统)。
+
 ### 3.3 黑名单关键词
 
 | 配置项 | 作用 |
 |--------|------|
 | `blacklist_keywords` | 黑名单词列表，命中后**直接丢弃消息** |
+
+**匹配规则：** 与触发关键词相同——大小写敏感，子串匹配，仅匹配原始消息文本。
 
 ---
 
@@ -256,20 +260,31 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 | `at_all_message_mode` | `normal`（按普通消息处理）、`skip_probability`（跳过概率筛选但保留读空气AI）、`skip_all`（跳过概率筛选和读空气AI）、`probability_boost`（仅对当前这条@全体成员消息临时提升概率） |
 | `at_all_probability_boost_value` | `at_all_message_mode=probability_boost` 时，对当前这一条@全体成员消息增加的临时概率值 |
 
-### 5.3 图片处理
+### 5.3 多媒体消息处理
 
-将图片转换为文字描述，让AI能理解图片内容。
+支持图片、视频、语音、文件四种媒体类型的识别与传递。
+
+**图片处理**：两种模式可选：
+- **多模态直传**：`image_to_text_provider_id` 留空时，图片 URL 直接传递给多模态 AI，消息文本中保留 `[图片]` 占位标记标明图片位置
+- **转文字模式**：配置 `image_to_text_provider_id` 后调用 AI 将图片转为文字描述（`[图片内容: xxx]`），结果自动缓存；转换失败时降级为 `[图片]` 或 `[图片（识别失败）]` 占位符
 
 | 配置项 | 作用 |
 |--------|------|
 | `enable_image_processing` | 启用图片处理 |
 | `image_to_text_scope` | 处理范围：`all`（所有消息）、`mention_only`（@或关键词触发时）、`at_only`（仅@时）、`keyword_only`（仅关键词触发时） |
-| `image_to_text_provider_id` | 图片转文字的AI提供商ID（**必填**） |
+| `image_to_text_provider_id` | 图片转文字的AI提供商ID（留空=多模态直传模式） |
 | `image_to_text_prompt` | 发送给AI的图片描述提示语 |
 | `image_to_text_timeout` | API调用超时时间 |
 | `max_images_per_message` | 单条消息最大处理图片数 |
 | `enable_image_description_cache` | 缓存图片描述结果（节省API调用） |
 | `image_description_cache_max_entries` | 缓存最大条目数；当前主缓存文件为 `image_cache/descriptions.jsonl`，若检测到旧版残留路径 `image_description_cache.json`，清理逻辑也会兼容处理 |
+
+**非图片媒体（视频/语音/文件）**：插件自动提取文件路径，内联注入到消息文本中：
+- `[视频: /path/to/video.mp4]` — 路径提取成功；失败时降级为 `[视频]` 占位符
+- `[语音: /path/to/audio.amr]` — 路径提取成功，同时传入 `audio_urls` 供多模态 AI 直读；失败时降级为 `[语音]` 占位符
+- `[文件: name, /path/to/file]` — 路径提取成功；失败时降级为 `[文件: name]` 占位符
+
+**缓存行为**：消息进入缓存时，纯占位标记（`[图片]`、`[图片（识别失败）]`）被剥离，但已成功解析的文字描述（`[图片内容: xxx]`）和视频/语音/文件标记保留。图片原始数据（`image_urls`）在缓存时清空。保存到官方历史时，当前消息的 `[图片]` 标记和 `image_urls` 完整保留。
 
 ### 5.3.1 图片缓存与重置边界
 
@@ -280,10 +295,12 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 
 ### 5.4 消息元数据注入
 
+消息的最终格式为：**`[系统元数据]: [用户消息内容]`**，冒号 `:` 是系统信息与用户消息的固定分界线。所有系统提示词（时间戳、发送者、触发方式、`[戳一戳事件]` 持久化文本等）均拼接在冒号之前，用户发送的实际内容（含 @ 解析、转发解析、图片描述、`[引用 >>> ...]` 引用消息解析等）在冒号之后。**`[戳一戳提示]` 不在消息内部的元数据或内容中**，而是由 `format_context_for_ai` 在上下文拼接时追加到分隔符 `=====` 之外，仅运行时供 AI 参考，保存时由过滤规则自动移除。当任何系统元数据都不存在（所有开关关闭且无触发）时，不注入冒号。
+
 | 配置项 | 作用 |
 |--------|------|
-| `include_timestamp` | 为消息添加时间戳 `[YYYY-MM-DD 周x HH:MM:SS]` |
-| `include_sender_info` | 为消息添加发送者信息 `[Name(ID:xxx)]` |
+| `include_timestamp` | 为消息添加时间戳 `[YYYY-MM-DD 周x HH:MM:SS]`（在冒号前） |
+| `include_sender_info` | 为消息添加发送者信息 `[Name(ID:xxx)]`，同时控制 `[系统提示]` 触发方式说明的注入（在冒号前） |
 
 **单独的、不包含任何信息的 @ 消息强化（默认启用，窗口阈值可配置）**：
 - 当消息是“仅@AI且没有文字、图片、关键词等其他内容”的单独 @ 消息时，系统前面只负责识别事实，不会立刻把提醒文案混进元数据
@@ -309,8 +326,11 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 - 先经过用户伪造 `[Poke:poke]` 文本标识符过滤
 - 再经过真实 poke 事件检测（仅 QQ + aiocqhttp / OneBot poke notice）
 - 再经过 `poke_message_mode`、群白名单等原有过滤机制
-- **只有最终确实由本插件接手处理的真实 poke**，才会在概率筛选/读空气前额外生成一条“戳一戳历史事件文本”
-- 当前轮 AI 看到的仍是运行时 `[戳一戳提示]...`；保存历史时这类运行时提示会被过滤，但新的事件文本会保留下来，供后续上下文理解
+- **只有最终确实由本插件接手处理的真实 poke**，才会生成两层戳一戳标注：
+  - **`[戳一戳事件]`**（持久化）：注入到消息格式中「冒号前」的系统元数据区域，随消息一起保存到历史上下文，不会被后续过滤清理
+  - **`[戳一戳提示]`**（运行时仅 AI 可见）：追加在上下文分隔符 `=====` 之外，当前轮决策 AI 和回复 AI 均可看到，但保存时由 `MessageCleaner` 过滤规则自动移除
+- 触发反戳时，会先后保存用户戳一戳事件（user 视角）和 AI 反戳动作（assistant 视角），均写入官方存储与自定义存储并绑定当前会话。所有戳一戳历史事件与 AI 正文回复分开保存，不拼接成同一条消息
+- 戳过对方追踪提示（`[戳过对方提示]`）同样属于运行时提示，保存时会被过滤
 
 ### 5.6 缓存消息摘要
 
@@ -500,7 +520,7 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 | 路径 | 场景 | 行为 |
 |------|------|------|
 | 决策前被吸收 | 消息在 Phase 7 前被 anchor 吸收 | 返回，内容通过 anchor 的 `_smart_batch_snapshots` 保留；anchor 回复后一并保存至存储 |
-| DecisionAI 判定不回复 | anchor 的 AI 判定不回复 | 被吸收的消息剥除特殊标记，转为普通消息缓存（与概率筛选失败的消息一致），等待后续转正 |
+| DecisionAI 判定不回复 | anchor 的 AI 判定不回复 | 被吸收的消息剥除特殊标记，转为普通消息缓存（与未通过概率筛选的消息一致），等待后续转正 |
 | 决策后被吸收 | anchor 已通过 DecisionAI 但被更新的 anchor 吸收 | anchor 自身 + 其吸收的 followers 均转为普通消息缓存，等待后续转正 |
 
 被吸收的消息不会丢失——无论在哪种路径下，消息内容都会被保留（通过 anchor 的批次保存或普通消息缓存）。
@@ -586,7 +606,7 @@ AI 决定要回复后，进入回复生成阶段。
 - 吸收后的 prompt 补充内容会进入一个固定的运行时兼容补充区，并为不同片段加上明显边界，避免不同插件提示词混在一起
 - 若仍无法高置信度识别，则进入**保守回退模式**：优先保留当前 `req.system_prompt`，并输出 warning 日志，但**不会中断回复流程**
 
-🆕 V1.2.3.hotfix.1：Hook 恢复完成后，会追加 `PLUGIN_CUSTOM_STATIC_INSTRUCTIONS` 中存储的静态系统指令到 `req.system_prompt` 末尾，提高 AI 服务商整块缓存命中率。`req.prompt` 中保留原静态前缀作为安全网。
+🆕 V1.2.3.hotfix.1：Hook 恢复完成后，会追加 `PLUGIN_CUSTOM_STATIC_INSTRUCTIONS` 中存储的静态系统指令到 `req.system_prompt` 末尾，提高 AI 服务商整块缓存命中率。`req.prompt` 中原静态指令已移除重复副本，改为一行兜底指引 `[请严格遵循 system prompt 中的指令进行回复]`，确保钩子失败时 AI 仍能正常响应。
 
 因此：
 - 成功路径下，效果与旧版尽量保持一致
@@ -595,7 +615,7 @@ AI 决定要回复后，进入回复生成阶段。
 
 | 配置项 | 作用 |
 |--------|------|
-| `enable_tools_reminder` | 是否启用工具提醒文本。开启后，在 `on_llm_request` 阶段基于**当前会话最终可见工具集**生成工具提示并注入到运行时 prompt；关闭后不注入任何工具提醒文本，但不影响 AI 实际调用工具 |
+| `enable_tools_reminder` | 是否启用工具提醒文本。开启后，在 `on_llm_request` 阶段基于**当前会话最终可见工具集**生成工具提示并追加到 `system_prompt` 末尾；关闭后不注入任何工具提醒文本，但不影响 AI 实际调用工具 |
 | `tools_reminder_persona_filter` | 是否在提醒层按人格过滤工具。仅在 `enable_tools_reminder=true` 时生效：开启后，先取当前会话可见工具，再按人格工具名单过滤后展示；关闭则展示当前会话全部可见工具 |
 
 > **重要说明**：工具提醒已经改为“当前会话优先”的后置生成模式，不再在群聊主流程前半段直接把全局工具列表拼进 `final_message`。因此工具提醒能自动跟随当前会话的插件集、runtime、搜索开关、MCP 工具与其他插件工具变化。
@@ -668,6 +688,56 @@ AI 决定要回复后，进入回复生成阶段。
 
 可以把它理解为：**这次 AI 没成功回话，但这轮用户输入与上下文演进仍然被历史系统承认。**
 
+### 8.7 多轮工具调用交叉保存与异常终止处理
+
+当 AI 在一次回复中调用多个工具或发生多轮工具调用（Agent Loop）时，插件通过三个钩子协同工作，按实际执行顺序将 AI 中间推理文本与工具调用记录交错保存到对话历史。每个工具调用独立生成一个 `[工具调用记录开始]...[工具调用记录结束]` 块，工具结果超过 500 字符时截断并附加 `...`（完整结果由平台 `_save_to_history` 保存到 conversation 存储，此处为摘要格式）。
+
+#### 正常流程
+
+```
+Agent Loop 开始
+  ↓
+LLM 生成中间文本 → on_decorating_result() 累积到 _pending_bot_replies
+  ↓
+LLM 调用工具 → 框架执行工具 → 工具结果返回
+  ↓
+LLM 继续生成 → on_decorating_result() 继续累积
+  ↓
+...（可能多轮）
+  ↓
+Agent 完成 → on_agent_done → on_llm_response() 设置 _agent_done_flags
+  ↓
+after_message_sent() 检测到 agent_done → 弹出 _pending_bot_replies
+  → _build_interleaved_tool_reply() 按执行时序交错排列文本与工具记录
+  → 每个工具独立生成 [工具调用记录开始]...[工具调用记录结束] 块
+  → 保存到 ContextManager（自定义存储 + 官方存储）
+```
+
+保存格式示例（同一轮调用两个工具）：
+```
+让我先查一下记忆和群成员信息
+[工具调用记录开始]
+- get_memories({"max_count": 10}) → 💭 相关记忆：（截断到500字符）
+[工具调用记录结束]
+[工具调用记录开始]
+- get_group_members_info({}) → {"group_id":...（截断到500字符）
+[工具调用记录结束]
+印象最深的就是用户了...
+```
+
+#### 异常终止处理
+
+当工具调用出错导致 LLM 后续响应异常（如 provider 返回 `role="err"`）时，AstrBot 核心框架**不会触发 `on_agent_done`**，导致 `_agent_done_flags` 永远不会被设置。插件在 `after_message_sent` 中增加了异常检测，确保累积的文本和工具调用记录不会丢失：
+
+1. **AI 错误标记（`_ai_error_message_ids`）** — 插件在 LLM 请求阶段检测到的 AI 调用错误，已标记的消息 ID
+2. **非 LLM 终端响应附带待保存文本** — GENERAL_RESULT 类型（如 err/aborted 响应）但有文本内容且有累积文本待保存
+
+> **为什么有意跳过 LLM_RESULT？** 多轮工具调用中，AI 在调用工具前说的中间话（如"让我搜索一下"）与最终回复的类型完全相同，都是 LLM_RESULT。如果在此处对 LLM_RESULT 强制完成，会把第一段中间话当成最终回复保存，导致后续工具调用和 AI 回复全部丢失。正常完成流程由 `on_llm_response` → `_agent_done_flags` → `after_message_sent` 处理，无需强制完成。
+
+任一条件命中时，`after_message_sent` 强制设置 `_agent_done_flags` 并继续走完整的保存链路——弹出 `_pending_bot_replies` 中的累积文本、调用 `_build_interleaved_tool_reply()` 构建交错工具调用记录、通过 `ContextManager.save_bot_message()` 写入双轨存储。
+
+> **注意：** 异常终止响应的内容类型为 GENERAL_RESULT（不是 LLM_RESULT），因此 `on_decorating_result()` 不会对其触发（该钩子仅处理 LLM_RESULT）。异常终止前的中间文本（已在之前几轮 `on_decorating_result` 中累积）和所有已完成的工具调用记录仍会被正确保存。
+
 ---
 
 ## Phase 9 · 回复后处理
@@ -711,6 +781,7 @@ AI生成回复后，执行一系列后处理操作。
 |------|----------|------|
 | **Phase-1** | 普通缓存消息 + 当前用户消息 + AI回复 | 主体保存。缓存消息会同步写入 `platform_message_history` 表（Web Chat UI 可见）。AI回复若存在窗口缓冲消息，会自动追加 `[追加消息上下文]` 标记 |
 | **Phase-1（空回复降级）** | 普通缓存消息 + 当前用户消息 | 当本次普通群聊回复最终为空文本时触发：不保存 AI 回复，但仍完成缓存消息的上下文补保存（含 `platform_message_history`），避免历史断层 |
+| **Phase-1（工具调用异常终止）** | 累积的中间文本 + 工具调用交错记录 + 当前用户消息 + 缓存消息 | 当 Agent 异常终止且 `on_agent_done` 未被调用时触发：通过异常检测强制弹出 `_pending_bot_replies` 中的累积文本，构建交错工具调用记录，照常保存到双轨存储（自定义 + 官方），确保错误链路中也不会漏存 |
 | **Phase-2** | 窗口缓冲消息 | 仅在等待窗口收集了追加消息时执行，同样写入 `platform_message_history`，保存在AI回复之后 |
 | **冷群转正** | `flush_cached_messages_by_params` 将普通缓存消息与窗口缓冲消息按时间戳合并后同步写入三套存储 | 冷群静默超过 `idle_cache_flush_delay_seconds` 后触发。窗口缓冲消息也一并转正，避免因等不到 Phase-2 而被 TTL 清理后丢失 |
 | **决策AI不回复时的窗口回落** | `convert_window_buffered_to_regular` 将当前窗口批次的 `window_buffered=True` 消息转为普通缓存（移除标记） | 当读空气AI判定不回复时自动触发。通过 `gww_token` 精确绑定当前窗口批次，转换后消息等同于普通缓存：参与 Phase-1 转正、冷群转正、按时间戳正常排序，彻底避免旧窗口消息在下次回复时被 Phase-2 误拼为"追加消息"，确保上下文顺序始终正确 |

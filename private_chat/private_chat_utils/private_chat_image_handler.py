@@ -8,7 +8,7 @@
 3. 省钱缓存命中不计入 AI 调用限制计数，只有实际 AI 调用才计数
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 import asyncio
@@ -48,6 +48,7 @@ class ImageHandler:
         timeout: int = 60,
         image_description_cache: Optional[ImageDescriptionCache] = None,
         max_images_per_message: int = 10,
+        self_id: str = None,
     ) -> Tuple[bool, str, List[str], bool]:
         """
         处理私信消息中的图片
@@ -88,7 +89,9 @@ class ImageHandler:
 
             # 如果没有图片，从消息链提取完整文本（含引用内容）
             if not has_image:
-                text_content = ImageHandler._extract_text_only(message_chain)
+                text_content = ImageHandler._extract_text_only(
+                    message_chain, self_id=self_id
+                )
                 if not text_content:
                     text_content = event.get_message_outline()
                 return True, text_content, [], False
@@ -109,7 +112,9 @@ class ImageHandler:
                         "[私信图片处理] 图片处理未启用，图片直接传递（多模态模式）"
                     )
                 image_urls = await ImageHandler._extract_image_urls(image_components)
-                text_content = ImageHandler._extract_text_only(message_chain)
+                text_content = ImageHandler._extract_text_only(
+                    message_chain, self_id=self_id
+                )
                 return True, text_content, image_urls, True
 
             # 情况2：功能开启但未配置provider → 多模态直传
@@ -119,7 +124,9 @@ class ImageHandler:
                         "[私信图片处理] 未配置图片转文字提供商ID，图片直接传递（多模态模式）"
                     )
                 image_urls = await ImageHandler._extract_image_urls(image_components)
-                text_content = ImageHandler._extract_text_only(message_chain)
+                text_content = ImageHandler._extract_text_only(
+                    message_chain, self_id=self_id
+                )
                 return True, text_content, image_urls, True
 
             # 情况3：功能开启且有provider → 图片转文字（含省钱缓存）
@@ -139,6 +146,7 @@ class ImageHandler:
                 image_description_cache,
                 max_images_per_message,
                 getattr(event, "session_id", ""),
+                self_id=self_id,
             )
 
             # 转换失败的降级处理
@@ -151,7 +159,9 @@ class ImageHandler:
                         if isinstance(comp, Image):
                             fallback_parts.append("[图片（识别失败）]")
                         else:
-                            fmt = ImageHandler._format_special_component(comp)
+                            fmt = ImageHandler._format_special_component(
+                                comp, self_id=self_id
+                            )
                             if fmt:
                                 fallback_parts.append(fmt)
                     fallback_text = (
@@ -160,7 +170,9 @@ class ImageHandler:
                     return True, fallback_text, [], False
                 else:
                     # 图文混合消息转换失败：保留文字
-                    text_only = ImageHandler._extract_text_only(message_chain)
+                    text_only = ImageHandler._extract_text_only(
+                        message_chain, self_id=self_id
+                    )
                     return True, text_only, [], False
 
             # 转换成功
@@ -212,7 +224,9 @@ class ImageHandler:
         return has_image, has_text, image_components
 
     @staticmethod
-    def _format_special_component(component: BaseMessageComponent) -> str:
+    def _format_special_component(
+        component: BaseMessageComponent, self_id: str = None
+    ) -> str:
         """
         格式化特殊消息组件为文本表示
 
@@ -237,15 +251,31 @@ class ImageHandler:
                 if not sender_nickname and hasattr(component, "sender"):
                     sender_nickname = getattr(component.sender, "nickname", None)
                 sender_id = getattr(component, "sender_id", None)
+                if (
+                    sender_nickname
+                    and sender_id
+                    and str(sender_nickname) == str(sender_id)
+                ):
+                    sender_nickname = None
+                is_self = self_id and sender_id and str(sender_id) == str(self_id)
+                self_suffix = "(你)" if is_self else ""
                 if message_content:
                     if sender_nickname and sender_id:
-                        return f"[引用 {sender_nickname}(ID:{sender_id}): {message_content}]"
+                        return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
                     elif sender_id:
-                        return f"[引用 用户(ID:{sender_id}): {message_content}]"
+                        return f"[引用 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
                     elif sender_nickname:
-                        return f"[引用 {sender_nickname}: {message_content}]"
+                        return (
+                            f"[引用 {sender_nickname}{self_suffix}: {message_content}]"
+                        )
                     else:
                         return f"[引用消息: {message_content}]"
+                if sender_nickname and sender_id:
+                    return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_id:
+                    return f"[引用 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_nickname:
+                    return f"[引用 {sender_nickname}{self_suffix}: (无法获取引用内容)]"
                 return "[引用消息]"
             except Exception:
                 return "[引用消息]"
@@ -253,7 +283,9 @@ class ImageHandler:
             return ""
 
     @staticmethod
-    def _extract_text_only(message_chain: List[BaseMessageComponent]) -> str:
+    def _extract_text_only(
+        message_chain: List[BaseMessageComponent], self_id: str = None
+    ) -> str:
         """
         从消息链提取纯文字，过滤图片
 
@@ -271,7 +303,9 @@ class ImageHandler:
             elif isinstance(component, Image):
                 continue
             else:
-                formatted = ImageHandler._format_special_component(component)
+                formatted = ImageHandler._format_special_component(
+                    component, self_id=self_id
+                )
                 if formatted:
                     text_parts.append(formatted)
 
@@ -321,6 +355,7 @@ class ImageHandler:
         image_description_cache: Optional[ImageDescriptionCache] = None,
         max_ai_calls: int = 10,
         session_id: str = "",
+        self_id: str = None,
     ) -> Optional[str]:
         """
         将图片转换为文字描述（含省钱缓存 + AI调用限制）
@@ -462,7 +497,9 @@ class ImageHandler:
                     else:
                         result_parts.append("[图片]")
                 else:
-                    formatted = ImageHandler._format_special_component(component)
+                    formatted = ImageHandler._format_special_component(
+                        component, self_id=self_id
+                    )
                     if formatted:
                         result_parts.append(formatted)
 

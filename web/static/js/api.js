@@ -40,6 +40,14 @@ const Api = {
 
     async request(method, path, body, options = {}) {
         const headers = { 'Content-Type': 'application/json' };
+        if (options.autoRefresh) {
+            headers['X-GCP-Auto-Refresh'] = '1';
+            delete options.autoRefresh;
+        }
+        if (options.headers) {
+            Object.assign(headers, options.headers);
+            delete options.headers;
+        }
         const fetchOptions = {
             method: method || 'GET',
             headers,
@@ -92,7 +100,7 @@ const Api = {
     changePassword(old_password, new_password) {
         return this.post('/api/auth/change-password', { old_password, new_password });
     },
-    verify()                 { return this.get('/api/auth/verify'); },
+    verify(options)           { return this.get('/api/auth/verify', options); },
     heartbeat() {
         if (this._inflightHeartbeat) return this._inflightHeartbeat;
         this._inflightHeartbeat = this.get('/api/auth/heartbeat').finally(() => {
@@ -107,11 +115,11 @@ const Api = {
     reloadPlugin(config)     { return this.post('/api/config/reload', config ? { config } : {}); },
 
     dataSessions()           { return this.get('/api/data/sessions'); },
-    dataAttention(session)   { return this.get(`/api/data/attention/${encodeURIComponent(session)}`); },
-    dataMood(session)        { return this.get(`/api/data/mood/${encodeURIComponent(session)}`); },
-    dataProbability(session) { return this.get(`/api/data/probability/${encodeURIComponent(session)}`); },
-    dataProactive()          { return this.get('/api/data/proactive'); },
-    dataOverview()           { return this.get('/api/data/overview'); },
+    dataAttention(session, options = {})   { return this.get(`/api/data/attention/${encodeURIComponent(session)}`, options); },
+    dataMood(session, options = {})        { return this.get(`/api/data/mood/${encodeURIComponent(session)}`, options); },
+    dataProbability(session, options = {}) { return this.get(`/api/data/probability/${encodeURIComponent(session)}`, options); },
+    dataProactive(options = {})            { return this.get('/api/data/proactive', options); },
+    dataOverview(options = {})             { return this.get('/api/data/overview', options); },
     dataStatus()             { return this.get('/api/data/status'); },
 
     sessionList()            { return this.get('/api/session/list'); },
@@ -127,6 +135,7 @@ const Api = {
     cmdReset(restart_mode)               { return this.post('/api/commands/reset', { restart_mode }); },
     cmdResetHere(session_id, restart_mode) { return this.post('/api/commands/reset-here', { session_id, restart_mode }); },
     cmdClearImageCache(restart_mode)     { return this.post('/api/commands/clear-image-cache', { restart_mode }); },
+    restartStatus()               { return this.get('/api/commands/restart-status'); },
 
     getAccessLog(page, size) { return this.get(`/api/security/access-log?page=${page}&size=${size}`); },
     getBans()                { return this.get('/api/security/bans'); },
@@ -136,7 +145,7 @@ const Api = {
     getIpConfig()            { return this.get('/api/security/ip-config'); },
     putIpConfig(config)      { return this.put('/api/security/ip-config', config); },
 
-    sessionDetail(session)   { return this.get(`/api/data/session-detail/${encodeURIComponent(session)}`); },
+    sessionDetail(session, options = {})   { return this.get(`/api/data/session-detail/${encodeURIComponent(session)}`, options); },
 
     fileList()               { return this.get('/api/files/list'); },
     fileRead(path)           { return this.get(`/api/files/read?path=${encodeURIComponent(path)}`); },

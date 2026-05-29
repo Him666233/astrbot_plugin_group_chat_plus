@@ -5,7 +5,7 @@
 核心功能：
 1. AI读空气判断 - 智能决定是否回复消息
 2. 动态概率调整 - 回复后提高触发概率，促进连续对话
-3. 图片识别支持 - 可将图片转为文字描述
+3. 多媒体支持 - 图片（转文字/多模态直传）、视频、语音、文件自动识别与传递
 4. 上下文记忆 - 自动管理聊天历史
 5. 记忆植入 - 集成长期记忆系统
 6. 工具提醒 - 提示AI可用的功能
@@ -32,7 +32,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 
 v1.2.1 更新内容：
 - 🆕 Web管理面板 - 全新可视化管理界面，支持JWT认证、访问日志、统计图表、IP安全管理
@@ -73,7 +73,7 @@ v1.0.9 更新内容：
 
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import copy
 import sys
 import hashlib
@@ -97,8 +97,138 @@ from astrbot.core.star.star_tools import StarTools
 from astrbot.core.message.components import Plain, At, AtAll
 from astrbot.core.message.message_event_result import MessageChain
 
+# 🆕 逐插件上下文追踪（最小化 monkey-patch）
+import astrbot.core.pipeline.context as _gcp_pipeline_context
+from astrbot.core.star.star_handler import (
+    EventType as _GcpEventType,
+    star_handlers_registry as _gcp_registry,
+)
+from astrbot.core.star.star import star_map as _gcp_star_map
+
 # 导入 ProviderRequest 类型用于类型判断
 from astrbot.core.provider.entities import ProviderRequest
+
+# ── 逐插件追踪：模块级状态与工具函数 ──
+
+_gcp_original_call_event_hook = None  # 保留占位，已不再使用 monkey-patch
+_gcp_handler_wrapping_installed = False  # handler 包装是否已安装
+
+
+def _gcp_context_fp(msg) -> str:
+    """快速 context 消息指纹（用于逐插件 diff 去重）。"""
+    if not isinstance(msg, dict):
+        return ""
+    try:
+        c = msg.get("content", "")
+        if isinstance(c, list):
+            c = json.dumps(c, ensure_ascii=False, sort_keys=True)
+        return f"{msg.get('role', '') or ''}\n{str(c or '')}".strip()
+    except Exception:
+        return ""
+
+
+async def _gcp_instrumented_call_event_hook(event, hook_type, *args, **kwargs):
+    """[已弃用] 旧版 monkey-patch 逐插件追踪方案。
+
+    原通过替换 call_event_hook 实现，但因 Python from-import 语义导致
+    monkey-patch 无法影响各调用方模块的本地绑定，实际上从未生效。
+
+    新版方案（V1.2.3.hotfix.2-Beta-11+）已改为 _install_per_plugin_context_tracking
+    中直接包装每个 handler 的 .handler 函数，每个 wrapper 独立快照+写入 event extras，
+    不再依赖全局 monkey-patch。此函数保留仅供历史参考，不会再被调用。
+    """
+    if hook_type != _GcpEventType.OnLLMRequestEvent or not args:
+        return await _gcp_original_call_event_hook(event, hook_type, *args, **kwargs)
+
+    req = args[0]
+    try:
+        handlers = _gcp_registry.get_handlers_by_event_type(
+            hook_type,
+            plugins_name=event.plugins_name,
+        )
+    except Exception:
+        return await _gcp_original_call_event_hook(event, hook_type, *args, **kwargs)
+
+    per_plugin = OrderedDict()
+    _name_counts: dict[str, int] = {}  # 防止同名碰撞
+    for handler in handlers:
+        # 解析插件名（三层回退：star_map.name → module_path → "unknown"）
+        try:
+            md = _gcp_star_map.get(handler.handler_module_path)
+            raw_name = md.name if md else handler.handler_module_path
+        except Exception:
+            raw_name = handler.handler_module_path or "unknown"
+
+        # 确保键唯一：同名时追加序号（#2, #3...），绝不让两个插件共享一个 entry
+        if raw_name in _name_counts:
+            _name_counts[raw_name] += 1
+            plugin_name = f"{raw_name} #{_name_counts[raw_name]}"
+        else:
+            _name_counts[raw_name] = 1
+            plugin_name = raw_name
+
+        # 快照 before（contexts + prompt）
+        try:
+            ctx_before = list(req.contexts) if isinstance(req.contexts, list) else []
+        except Exception:
+            ctx_before = []
+        try:
+            prompt_before = req.prompt or ""
+        except Exception:
+            prompt_before = ""
+
+        # 执行 handler（核心，不能跳过）
+        try:
+            await handler.handler(event, *args, **kwargs)
+        except BaseException:
+            logger.error(f"[逐插件追踪] handler 异常: {plugin_name}", exc_info=True)
+
+        # 快照 after → 计算新增 context（逐条指纹去重）
+        try:
+            ctx_after = list(req.contexts) if isinstance(req.contexts, list) else []
+            before_fps = {_gcp_context_fp(m) for m in ctx_before}
+            before_fps.discard("")
+            added = []
+            seen = set(before_fps)
+            for m in ctx_after:
+                fp = _gcp_context_fp(m)
+                if fp and fp not in seen:
+                    seen.add(fp)
+                    added.append(copy.deepcopy(m) if isinstance(m, dict) else m)
+        except Exception:
+            added = []
+
+        # 快照 after → 计算 prompt 增量
+        try:
+            prompt_after = req.prompt or ""
+            prompt_delta = ""
+            if prompt_after != prompt_before:
+                if prompt_before and prompt_after.startswith(prompt_before):
+                    prompt_delta = prompt_after[len(prompt_before) :]
+                elif prompt_before and prompt_after.endswith(prompt_before):
+                    prompt_delta = prompt_after[: -len(prompt_before)]
+                else:
+                    prompt_delta = ""  # 无法可靠提取增量，跳过
+        except Exception:
+            prompt_delta = ""
+
+        if added or prompt_delta:
+            entry = {"contexts_added": added} if added else {}
+            if prompt_delta:
+                entry["prompt_added"] = prompt_delta
+            per_plugin[plugin_name] = entry
+
+        if event.is_stopped():
+            break
+
+    try:
+        if per_plugin:
+            event.set_extra("_gcp_per_plugin_injections", per_plugin)
+    except Exception:
+        pass
+
+    return event.is_stopped()
+
 
 # 导入 aiocqhttp 相关类型
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -152,7 +282,7 @@ from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
     "astrbot_plugin_group_chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "V1.2.3.hotfix.1",
+    "V1.2.3.hotfix.2",
     "https://github.com/Him666233/astrbot_plugin_group_chat_plus",
 )
 class ChatPlus(Star):
@@ -223,11 +353,17 @@ class ChatPlus(Star):
                 safe_extra_parts = list(extra_parts)
             else:
                 safe_extra_parts = []
+            image_urls = getattr(req, "image_urls", []) or []
+            safe_image_urls = list(image_urls) if isinstance(image_urls, list) else []
+            audio_urls = getattr(req, "audio_urls", []) or []
+            safe_audio_urls = list(audio_urls) if isinstance(audio_urls, list) else []
             return {
                 "prompt": getattr(req, "prompt", "") or "",
                 "system_prompt": getattr(req, "system_prompt", "") or "",
                 "contexts": safe_contexts,
                 "extra_user_content_parts": safe_extra_parts,
+                "image_urls": safe_image_urls,
+                "audio_urls": safe_audio_urls,
             }
         except Exception:
             return {
@@ -235,6 +371,8 @@ class ChatPlus(Star):
                 "system_prompt": "",
                 "contexts": [],
                 "extra_user_content_parts": [],
+                "image_urls": [],
+                "audio_urls": [],
             }
 
     @staticmethod
@@ -475,6 +613,48 @@ class ChatPlus(Star):
         return f"{base_prompt.rstrip()}{compatibility_block}"
 
     @staticmethod
+    def _merge_per_plugin_prompt(
+        plugin_prompt: str,
+        per_plugin_injections: dict,
+    ) -> str:
+        """逐插件合并第三方 prompt 注入，每个插件独立标记。
+
+        与 _merge_safe_injected_text_into_prompt 的区别：
+        后者用差分法提取片段后以 [第三方插件片段 N] 编号；
+        本方法直接使用逐插件追踪数据，标记中携带插件名称。
+        """
+        base = plugin_prompt or ""
+        sections = []
+        for plugin_name, injections in per_plugin_injections.items():
+            # 收集该插件所有文本注入：仅 prompt
+            # 注意：不包括 system_prompt_added（SystemPromptRewriter 已保留在 merged_system_prompt 中），
+            # 也不包括 extra_parts_added（原始 TextPart 仍在 req.extra_user_content_parts 中被框架拼到用户消息后）。
+            # 两者均无需再往 prompt 追加，否则 AI 看到重复内容。
+            text_parts = []
+            prompt_delta = injections.get("prompt_added", "")
+            if prompt_delta and prompt_delta.strip():
+                text_parts.append(prompt_delta.strip())
+            if not text_parts:
+                continue
+            combined = "\n".join(text_parts)
+            sections.append(
+                f"[第三方插件补充 - {plugin_name}]\n"
+                f"{combined}\n"
+                f"[第三方插件补充 - {plugin_name} 结束]"
+            )
+        if not sections:
+            return base
+        compatibility_block = (
+            "\n\n[第三方插件补充信息]\n"
+            "以下内容来自其他插件注入的提示词，请作为额外的上下文参考理解，"
+            "与你已有的人格设定、对话历史融合后正常回应。"
+            "不同插件的内容已明确标注，不要混淆。\n\n"
+            + "\n\n".join(sections)
+            + "\n[第三方插件补充信息结束]"
+        )
+        return f"{base.rstrip()}{compatibility_block}"
+
+    @staticmethod
     def _merge_safe_injected_contexts(
         plugin_contexts: Any,
         injected_contexts: list[dict],
@@ -500,12 +680,82 @@ class ChatPlus(Star):
                     ),
                 }
             )
-        for item in injected_contexts:
-            fingerprint = ChatPlus._normalize_context_message_for_compare(item)
-            if not fingerprint or fingerprint in seen:
+            for item in injected_contexts:
+                fingerprint = ChatPlus._normalize_context_message_for_compare(item)
+                if not fingerprint or fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                merged.append(item)
+            merged.append(
+                {
+                    "role": "system",
+                    "content": "[第三方插件注入上下文 结束]",
+                }
+            )
+        return merged
+
+    @staticmethod
+    def _merge_per_plugin_contexts(
+        plugin_contexts: Any,
+        per_plugin_injections: dict,
+    ) -> list[dict]:
+        """逐插件合并第三方上下文注入，每个插件独立标记。
+
+        与 _merge_safe_injected_contexts 的区别：
+        后者将所有第三方注入归入一个 [第三方插件注入上下文] 标记；
+        本方法为每个插件生成独立的 [第三方插件注入上下文 - 插件名] 标记。
+        """
+        merged: list[dict] = []
+        seen: set = set()
+
+        # 先保留插件自身的 contexts
+        if isinstance(plugin_contexts, list):
+            for item in plugin_contexts:
+                if not isinstance(item, dict):
+                    continue
+                fp = ChatPlus._normalize_context_message_for_compare(item)
+                if fp:
+                    seen.add(fp)
+                merged.append(item)
+
+        # 逐插件添加第三方注入
+        for plugin_name, injections in per_plugin_injections.items():
+            contexts_added = injections.get("contexts_added", [])
+            if not contexts_added:
                 continue
-            seen.add(fingerprint)
-            merged.append(item)
+
+            # 去重（与已有内容 + 前序插件注入）
+            unique = []
+            for item in contexts_added:
+                if not isinstance(item, dict):
+                    continue
+                fp = ChatPlus._normalize_context_message_for_compare(item)
+                if not fp or fp in seen:
+                    continue
+                seen.add(fp)
+                unique.append(item)
+
+            if not unique:
+                continue
+
+            merged.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"[第三方插件注入上下文 - {plugin_name}]\n"
+                        f"以下对话记录来自插件 '{plugin_name}' 的提示词系统，"
+                        f"请作为额外的对话上下文理解，与主对话历史融合参考。"
+                    ),
+                }
+            )
+            merged.extend(unique)
+            merged.append(
+                {
+                    "role": "system",
+                    "content": f"[第三方插件注入上下文 - {plugin_name} 结束]",
+                }
+            )
+
         return merged
 
     @staticmethod
@@ -567,6 +817,222 @@ class ChatPlus(Star):
     def _coerce_component_text(value: Any) -> str:
         """兼容某些平台/组件 text=None 的情况，仅提取可安全拼接的文本。"""
         return value if isinstance(value, str) else ""
+
+    def _install_per_plugin_context_tracking(self):
+        """包装 OnLLMRequestEvent 各 handler，追踪逐插件上下文注入。
+
+        对每个第三方插件的 OnLLMRequest handler 做包装：执行前后各拍一次
+        req.contexts / req.prompt 快照，计算该插件独立注入的增量后立即存入
+        event._gcp_per_plugin_injections。
+
+        本插件自己的 handler（priority=-1，最后执行）读取该数据，实现逐插件
+        标记隔离。不再依赖 monkey-patch call_event_hook（Python from-import
+        语义下该方案无效）。
+        """
+        global _gcp_handler_wrapping_installed
+        if _gcp_handler_wrapping_installed:
+            return
+        _gcp_handler_wrapping_installed = True
+
+        try:
+            handlers = _gcp_registry.get_handlers_by_event_type(
+                _GcpEventType.OnLLMRequestEvent,
+                only_activated=False,
+            )
+        except Exception:
+            logger.warning(
+                "[逐插件追踪] 获取 handlers 失败，将使用原有差分逻辑",
+                exc_info=True,
+            )
+            return
+
+        wrapped_count = 0
+        for handler in handlers:
+            if getattr(handler, "_gcp_tracking_wrapped", False):
+                continue
+            # 跳过本插件自己的 handler
+            if (
+                handler.handler_module_path
+                and "astrbot_plugin_group_chat_plus" in handler.handler_module_path
+            ):
+                continue
+            if (
+                handler.handler_module_path
+                and "astrbot.core" in handler.handler_module_path
+            ):
+                continue  # 跳过框架内置 handler（如平台 LTM）
+
+            original = handler.handler
+            handler._gcp_tracking_wrapped = True
+
+            async def _make_tracking_wrapper(
+                event,
+                *args,
+                __original=original,
+                __h=handler,
+                **kwargs,
+            ):
+                if not args:
+                    return await __original(event, *args, **kwargs)
+                req = args[0]
+                try:
+                    _ = req.contexts  # 快速验证是否为 ProviderRequest
+                except Exception:
+                    return await __original(event, *args, **kwargs)
+
+                # 快照 before
+                try:
+                    ctx_before = (
+                        list(req.contexts) if isinstance(req.contexts, list) else []
+                    )
+                except Exception:
+                    ctx_before = []
+                try:
+                    prompt_before = req.prompt or ""
+                except Exception:
+                    prompt_before = ""
+                try:
+                    img_before = (
+                        list(req.image_urls) if isinstance(req.image_urls, list) else []
+                    )
+                except Exception:
+                    img_before = []
+                try:
+                    aud_before = (
+                        list(req.audio_urls) if isinstance(req.audio_urls, list) else []
+                    )
+                except Exception:
+                    aud_before = []
+                try:
+                    sys_before = req.system_prompt or ""
+                except Exception:
+                    sys_before = ""
+                try:
+                    extra_before = (
+                        list(req.extra_user_content_parts)
+                        if isinstance(req.extra_user_content_parts, list)
+                        else []
+                    )
+                except Exception:
+                    extra_before = []
+
+                # 执行原始 handler
+                await __original(event, *args, **kwargs)
+
+                # 快照 after → 计算新增 context
+                try:
+                    ctx_after = (
+                        list(req.contexts) if isinstance(req.contexts, list) else []
+                    )
+                    before_fps = {_gcp_context_fp(m) for m in ctx_before}
+                    before_fps.discard("")
+                    added = []
+                    seen = set(before_fps)
+                    for m in ctx_after:
+                        fp = _gcp_context_fp(m)
+                        if fp and fp not in seen:
+                            seen.add(fp)
+                            added.append(copy.deepcopy(m) if isinstance(m, dict) else m)
+                except Exception:
+                    added = []
+
+                # 快照 after → 计算 prompt 增量
+                try:
+                    prompt_after = req.prompt or ""
+                    prompt_delta = ""
+                    if prompt_after != prompt_before:
+                        if prompt_before and prompt_after.startswith(prompt_before):
+                            prompt_delta = prompt_after[len(prompt_before) :]
+                        elif prompt_before and prompt_after.endswith(prompt_before):
+                            prompt_delta = prompt_after[: -len(prompt_before)]
+                except Exception:
+                    prompt_delta = ""
+
+                # 快照 after → 计算 image_urls / audio_urls 增量
+                try:
+                    img_after = (
+                        list(req.image_urls) if isinstance(req.image_urls, list) else []
+                    )
+                    img_added = [u for u in img_after if u not in set(img_before)]
+                except Exception:
+                    img_added = []
+                try:
+                    aud_after = (
+                        list(req.audio_urls) if isinstance(req.audio_urls, list) else []
+                    )
+                    aud_added = [u for u in aud_after if u not in set(aud_before)]
+                except Exception:
+                    aud_added = []
+
+                # 快照 after → 计算 system_prompt 增量
+                try:
+                    sys_after = req.system_prompt or ""
+                    sys_delta = ""
+                    if sys_after != sys_before:
+                        if sys_before and sys_after.startswith(sys_before):
+                            sys_delta = sys_after[len(sys_before) :]
+                        elif sys_before and sys_after.endswith(sys_before):
+                            sys_delta = sys_after[: -len(sys_before)]
+                except Exception:
+                    sys_delta = ""
+
+                # 快照 after → 计算 extra_user_content_parts 增量
+                try:
+                    extra_after = (
+                        list(req.extra_user_content_parts)
+                        if isinstance(req.extra_user_content_parts, list)
+                        else []
+                    )
+                    extra_added = [
+                        item for item in extra_after if item not in extra_before
+                    ]
+                except Exception:
+                    extra_added = []
+
+                if (
+                    not added
+                    and not prompt_delta
+                    and not img_added
+                    and not aud_added
+                    and not sys_delta
+                    and not extra_added
+                ):
+                    return
+
+                # 解析插件名
+                try:
+                    md = _gcp_star_map.get(__h.handler_module_path)
+                    plugin_name = md.name if md else __h.handler_module_path
+                except Exception:
+                    plugin_name = __h.handler_module_path or "unknown"
+
+                # 立即存入 event extras（后续 handler 可读取）
+                per_plugin = event.get_extra("_gcp_per_plugin_injections") or {}
+                if plugin_name not in per_plugin:
+                    entry = {}
+                    if added:
+                        entry["contexts_added"] = added
+                    if prompt_delta:
+                        entry["prompt_added"] = prompt_delta
+                    if img_added:
+                        entry["image_urls_added"] = img_added
+                    if aud_added:
+                        entry["audio_urls_added"] = aud_added
+                    if sys_delta:
+                        entry["system_prompt_added"] = sys_delta
+                    if extra_added:
+                        entry["extra_parts_added"] = extra_added
+                    per_plugin[plugin_name] = entry
+                    event.set_extra("_gcp_per_plugin_injections", per_plugin)
+
+            handler.handler = _make_tracking_wrapper
+            wrapped_count += 1
+
+        if wrapped_count > 0:
+            logger.info(
+                f"[逐插件追踪] 已包装 {wrapped_count} 个 OnLLMRequest handlers"
+                "（直接 handler 包装模式）"
+            )
 
     def __init__(self, context: Context, config: AstrBotConfig):
         """
@@ -1965,6 +2431,22 @@ class ChatPlus(Star):
         )  # 私信清除缓存指令用户ID名单
 
         # === Web 配置面板 ===
+        #
+        # ╔══════════════════════════════════════════════════════════════════╗
+        # ║  ⛔ 以下三个属性名（enable_web_panel / web_panel_port /        ║
+        # ║     web_panel_host）严禁重命名或删除！                          ║
+        # ║                                                                  ║
+        # ║      astrbot_plugin_self_learning（自学习插件）通过             ║
+        # ║      getattr(plugin, "xxx") 直接读取这三个属性来发现和          ║
+        # ║      连接本插件的 Web 面板。                                    ║
+        # ║                                                                  ║
+        # ║      参考文件（自学习插件侧）：                                  ║
+        # ║      webui/services/integration_service.py                      ║
+        # ║      _group_chat_plus_dashboard() 方法                          ║
+        # ║                                                                  ║
+        # ║      允许：修改 config key、默认值、赋值来源                     ║
+        # ║      禁止：重命名实例属性名、删除属性                            ║
+        # ╚══════════════════════════════════════════════════════════════════╝
         self.enable_web_panel = config.get("enable_web_panel", False)
         self.web_panel_port = config.get("web_panel_port", 1451)
         self.web_panel_host = config.get("web_panel_host", "0.0.0.0")
@@ -1983,7 +2465,7 @@ class ChatPlus(Star):
         self.port = self.dbc.get("port", 6185)
         if os.environ.get("DASHBOARD_PORT"):
             self.port = int(os.environ.get("DASHBOARD_PORT"))
-        if self.host == "0.0.0.0":
+        if self.host in ("0.0.0.0", "localhost", "::1"):
             self.host = "127.0.0.1"
         self.restart_url = f"http://{self.host}:{self.port}/api/stat/restart-core"
 
@@ -2435,7 +2917,7 @@ class ChatPlus(Star):
 
         # ========== 日志输出 ==========
         logger.info("=" * 50)
-        logger.info("群聊增强插件已加载 - V1.2.3.hotfix.1")
+        logger.info("群聊增强插件已加载 - V1.2.3.hotfix.2")
         logger.info(
             f"🔘 群聊功能总开关: {'✓ 已启用' if self.enable_group_chat else '✗ 已禁用'}"
         )
@@ -2688,6 +3170,9 @@ class ChatPlus(Star):
                 save_rules = self.save_content_filter_rules
                 logger.info(f"  - 过滤规则数: {len(save_rules)} 条")
 
+        # 🆕 安装逐插件上下文追踪补丁
+        self._install_per_plugin_context_tracking()
+
     def _build_proactive_config(self) -> dict:
         """
         构建主动对话管理器所需的配置字典（使用已提取的实例变量）
@@ -2849,9 +3334,34 @@ class ChatPlus(Star):
             if not self.context:
                 return
 
+            # 对 AI 视角的戳一戳事件文本按配置注入时间戳 / 发送者元数据，
+            # 使保存到历史中的消息与普通消息保持一致的格式外观。
+            bot_id = event.get_self_id() or ""
+            bot_name = "AI"
+            try:
+                if hasattr(event, "get_self_name") and callable(event.get_self_name):
+                    bot_name = event.get_self_name() or "AI"
+            except Exception:
+                pass
+
+            formatted_poke_text = MessageProcessor.add_metadata_from_cache(
+                poke_event_text,
+                sender_id=bot_id,
+                sender_name=bot_name,
+                message_timestamp=time.time(),
+                include_timestamp=self.include_timestamp,
+                include_sender_info=self.include_sender_info,
+                mention_info=None,
+                trigger_type=None,
+                poke_info=None,
+            )
+
             try:
                 await ContextManager.save_bot_message(
-                    event, poke_event_text, self.context, skip_custom_storage=True
+                    event,
+                    formatted_poke_text,
+                    self.context,
+                    skip_custom_storage=True,
                 )
             except Exception as custom_err:
                 logger.warning(
@@ -2863,7 +3373,7 @@ class ChatPlus(Star):
                     event,
                     [],
                     "",
-                    poke_event_text,
+                    formatted_poke_text,
                     self.context,
                     save_kind="poke_event",
                 )
@@ -3334,7 +3844,21 @@ class ChatPlus(Star):
         )
 
     async def _get_auth_token(self):
-        """获取认证token"""
+        """获取认证 token。
+
+        策略（按优先级）：
+        1. 主路径：通过 jwt_secret 直接签发 JWT（兼容 v3/v4）
+        2. 降级路径：通过 /api/auth/login 密码登录（仅旧版 v3 明文密码可用）
+        """
+        # 主路径：JWT 签发
+        try:
+            token = self._generate_jwt_token()
+            logger.debug("通过 jwt_secret 生成认证 token 成功")
+            return token
+        except Exception as e:
+            logger.warning(f"通过 jwt_secret 生成 token 失败: {e}，降级尝试密码登录...")
+
+        # 降级路径：密码登录（旧版 AstrBot v3）
         login_url = f"http://{self.host}:{self.port}/api/auth/login"
         login_data = {
             "username": self.dbc["username"],
@@ -3626,7 +4150,9 @@ class ChatPlus(Star):
                     if self._is_enabled(event):
                         chat_id = event.get_group_id()
                         message_text = (
-                            MessageCleaner.extract_raw_message_from_event(event)
+                            MessageCleaner.extract_raw_message_from_event(
+                                event, self_id=str(event.get_self_id())
+                            )
                             or event.get_message_str()
                             or ""
                         )
@@ -3814,6 +4340,25 @@ class ChatPlus(Star):
         except Exception as e:
             logger.error(f"发送重启请求时出错: {e}")
             raise e
+
+    def _generate_jwt_token(self, dbc_override: dict | None = None) -> str:
+        """使用 dashboard 的 jwt_secret 直接签发 JWT，跳过密码登录。
+
+        兼容 AstrBot v3 和 v4。逻辑与 AuthRoute.generate_jwt() 一致。
+        参数 dbc_override 用于延迟任务场景（插件可能已部分卸载）。
+        """
+        import jwt as _jwt
+
+        dbc = dbc_override if dbc_override is not None else self.dbc
+        jwt_secret = dbc.get("jwt_secret", "")
+        if not jwt_secret:
+            raise ValueError("jwt_secret 不在 dashboard 配置中")
+
+        payload = {
+            "username": dbc.get("username", "astrbot"),
+            "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        }
+        return _jwt.encode(payload, jwt_secret, algorithm="HS256")
 
     @filter.command("gcp_reset")
     async def gcp_reset(self, event: AstrMessageEvent):
@@ -5013,9 +5558,7 @@ class ChatPlus(Star):
                 transient_probability_boost=at_all_transient_probability_boost,
             )
             if not should_process:
-                logger.info(
-                    "【步骤5】概率判断失败，丢弃消息（已缓存原始消息避免上下文断裂）"
-                )
+                logger.info("【步骤5】未通过概率筛选，消息已缓存（避免上下文断裂）")
                 if self.debug_mode:
                     logger.info("=" * 60)
                 return False
@@ -5074,7 +5617,9 @@ class ChatPlus(Star):
             )
             user_id = event.get_sender_id()
             message_id = self._get_message_id(event)
-            raw_text = MessageCleaner.extract_raw_message_from_event(event)
+            raw_text = MessageCleaner.extract_raw_message_from_event(
+                event, self_id=str(event.get_self_id())
+            )
             # contains_ai: 这里只判断“是否把AI叫出来”，哪怕同时@了别人/全体也算重新叫出AI
             is_empty_at = MessageCleaner.is_empty_at_message(
                 raw_text,
@@ -5115,9 +5660,7 @@ class ChatPlus(Star):
             return {
                 "chat_key": chat_key,
                 "user_id": user_id,
-                "user_name": event.get_sender_name() or "未知用户",
-                "message_id": message_id,
-                "raw_text": raw_text,
+                "user_name": self._safe_sender_display(event),
                 "is_empty_at": is_empty_at,
                 "pending_before": pending_before,
                 "pending_progress": progress,
@@ -6161,7 +6704,9 @@ class ChatPlus(Star):
             logger.info("【步骤6】提取纯净原始消息")
 
         # 使用MessageCleaner提取纯净的原始消息（不含系统提示词）
-        original_message_text = MessageCleaner.extract_raw_message_from_event(event)
+        original_message_text = MessageCleaner.extract_raw_message_from_event(
+            event, self_id=str(event.get_self_id())
+        )
         if self.debug_mode:
             logger.info(f"  纯净原始消息: {original_message_text[:100]}...")
 
@@ -6202,6 +6747,7 @@ class ChatPlus(Star):
             self.image_to_text_timeout,
             self.image_description_cache,  # 🆕 v1.2.0: 传递图片描述缓存
             self.max_images_per_message,  # 单条消息最大处理图片数
+            self_id=str(event.get_self_id()),
         )
 
         if not should_continue:
@@ -6210,6 +6756,36 @@ class ChatPlus(Star):
                 logger.info("【步骤6.5】图片处理判定丢弃消息，不缓存")
                 logger.info("=" * 60)
             return False, None, None, None, None, None, None, False, {}
+
+        # 🆕 提取非图片媒体文件（语音/视频/文件）的路径
+        # 路径提取成功后内联注入到 processed_message 的占位标记中
+        # 解析成功: [视频]→[视频: /path], [语音]→[语音: /path], [文件:x]→[文件:x, /path]
+        # 解析失败: 标记保持原样作为占位符
+        _media_audio_urls: list = []
+        _media_video_paths: list = []
+        _media_file_infos: list = []
+        try:
+            (
+                _media_audio_urls,
+                _media_video_paths,
+                _media_file_infos,
+            ) = await ImageHandler.extract_media_urls(event)
+            if _media_audio_urls or _media_video_paths or _media_file_infos:
+                processed_message = ImageHandler.enrich_media_markers(
+                    processed_message,
+                    audio_urls=_media_audio_urls,
+                    video_paths=_media_video_paths,
+                    file_infos=_media_file_infos,
+                )
+                if self.debug_mode:
+                    logger.info(
+                        f"【步骤6.45】提取非图片媒体: "
+                        f"audio={len(_media_audio_urls)}个, "
+                        f"video={len(_media_video_paths)}个, "
+                        f"file={len(_media_file_infos)}个"
+                    )
+        except Exception as e:
+            logger.warning(f"[媒体提取] 提取非图片媒体文件时出错（已跳过）: {e}")
 
         # 🆕 v1.2.0: 表情包标记注入（正常处理路径）
         # 只有当表情包图片信息确实保留在消息中时（作为URL或文字描述）才添加标记
@@ -6254,9 +6830,11 @@ class ChatPlus(Star):
         current_message_id = self._get_message_id(event)
 
         # 🆕 v1.2.0: 使用缓存管理器统一处理缓存
+        # 注意: content 和 image_urls 在此保留完整信息（含 [图片] 标记和原始路径），
+        # 供当前消息保存时使用。进入缓存时由 cache_manager.add_to_cache 统一剥离。
         cached_message = {
             "role": "user",
-            "content": processed_message,  # 处理后的消息（可能已过滤图片、转文字、或保留原样）
+            "content": processed_message,  # 处理后的消息（可能含 [图片]/[图片内容:xxx]/视频/语音/文件标记）
             "timestamp": time.time(),
             "message_id": current_message_id,
             # 保存发送者信息，用于转正时添加正确的元数据
@@ -6275,6 +6853,8 @@ class ChatPlus(Star):
             "poke_info": poke_info,
             "persistent_poke_event_text": persistent_poke_event_text,
             "image_urls": image_urls or [],
+            # 🆕 非图片媒体信息（路径已内联到 content 中，字典字段作元数据）
+            "audio_urls": _media_audio_urls,
             "is_at_all_message": is_at_all_message,
             # 🔧 修复：保存单独无信息@消息标记，用于生成正确的系统提示词
             "is_empty_at": is_empty_at,
@@ -6350,6 +6930,19 @@ class ChatPlus(Star):
                 chat_id,
             )
 
+        # 🆕 戳过对方追踪提示（提前计算，传入 add_metadata_to_message 统一组装）
+        poke_trace_text = ""
+        if (
+            self.poke_trace_enabled
+            and self._is_poke_enabled_in_group(chat_id)
+            and self._check_and_consume_poke_trace(chat_id, event.get_sender_id())
+        ):
+            _n = self._safe_sender_display(event)
+            _id = event.get_sender_id()
+            poke_trace_text = f"[戳过对方提示]你刚刚戳过这条消息的发送者{_n}(ID:{_id})"
+            if self.debug_mode:
+                logger.info(f"  已添加戳过对方提示: 目标={_n}(ID:{_id})")
+
         message_text_for_ai = MessageProcessor.add_metadata_to_message(
             event,
             processed_message,  # 使用处理后的消息（图片已处理）
@@ -6362,27 +6955,37 @@ class ChatPlus(Star):
             "",
             "",
             is_at_all_message=is_at_all_message,
-        )
-        message_text_for_ai = MessageProcessor.format_message_for_context_display(
-            message_text_for_ai,
-            None,
-            False,
-            persistent_poke_event_text,
+            persistent_poke_event_text=persistent_poke_event_text,
+            poke_trace_text=poke_trace_text,
         )
 
-        # 🆕 戳过对方追踪提示（需要同时满足：功能启用 + 群聊在白名单中 + 有追踪记录）
-        if (
-            self.poke_trace_enabled
-            and self._is_poke_enabled_in_group(chat_id)
-            and self._check_and_consume_poke_trace(chat_id, event.get_sender_id())
-        ):
-            _n = event.get_sender_name() or "未知用户"
-            _id = event.get_sender_id()
-            message_text_for_ai += (
-                f"\n[戳过对方提示]你刚刚戳过这条消息的发送者{_n}(ID:{_id})"
-            )
-            if self.debug_mode:
-                logger.info(f"  已添加戳过对方提示: 目标={_n}(ID:{_id})")
+        # [戳一戳提示] 不在消息内注入，而是由 format_context_for_ai 追加到分隔符之外
+        _poke_notice_text = ""
+        if poke_info and isinstance(poke_info, dict):
+            try:
+                _is_poke_bot = poke_info.get("is_poke_bot", False)
+                _sender_id = str(poke_info.get("sender_id", "") or "")
+                _sender_name = (
+                    str(poke_info.get("sender_name", "") or "").strip() or "未知用户"
+                )
+                _sender_display = (
+                    f"{_sender_name}(ID:{_sender_id})" if _sender_id else _sender_name
+                )
+                _target_id = str(poke_info.get("target_id", "") or "")
+                _target_name = (
+                    str(poke_info.get("target_name", "") or "").strip() or "未知用户"
+                )
+                _target_display = (
+                    f"{_target_name}(ID:{_target_id})" if _target_id else _target_name
+                )
+                if _is_poke_bot:
+                    _poke_notice_text = (
+                        f"[戳一戳提示]有人在戳你，戳你的人是{_sender_display}"
+                    )
+                else:
+                    _poke_notice_text = f"[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{_sender_display}在戳{_target_display}"
+            except Exception:
+                _poke_notice_text = ""
 
         if self.debug_mode:
             logger.info("【步骤7.5】为当前消息添加元数据（用于AI识别）")
@@ -6888,6 +7491,7 @@ class ChatPlus(Star):
             include_timestamp=self.include_timestamp,
             include_sender_info=self.include_sender_info,
             window_buffered_messages=window_buffered_msgs,
+            poke_notice=_poke_notice_text,
         )
 
         if self.debug_mode:
@@ -7205,15 +7809,20 @@ class ChatPlus(Star):
         # 工具提醒改为在 on_llm_request 中基于当前会话最终工具集生成，
         # 这里不再提前把工具列表注入到 prompt 文本中，避免与实际可调用工具不一致。
 
-        # 🆕 v1.0.2: 注入情绪状态（如果启用）
+        # 🆕 v1.0.2: 更新情绪状态（如果启用），情绪提示改为在 on_llm_request 中
+        # 追加到 system_prompt，不再注入 user prompt。
         if self.mood_enabled and self.mood_tracker:
             if self.debug_mode:
-                logger.info("【步骤12.5】注入情绪状态")
+                logger.info("【步骤12.5】更新情绪状态")
 
-            # 使用格式化后的上下文来判断情绪
-            final_message = self.mood_tracker.inject_mood_to_prompt(
-                chat_id, final_message, formatted_context
-            )
+            self.mood_tracker.update_mood_from_context(chat_id, formatted_context)
+            current_mood = self.mood_tracker.get_current_mood(chat_id)
+            if current_mood != "平静":
+                mood_hint = (
+                    f"[系统信息-情绪参考: {current_mood}"
+                    "（在你的人格基调上自然体现，不要偏离人格设定）]"
+                )
+                event.set_extra("_group_chat_plus_mood_hint", mood_hint)
 
         # 调用AI生成回复
         if self.debug_mode:
@@ -7250,6 +7859,9 @@ class ChatPlus(Star):
                         f"【步骤12】工具提醒将按人格过滤 {len(allowed_tool_names_for_reminder)} 个工具"
                     )
 
+            # 🆕 从 event extras 读取语音URL（视频/文件路径已内联到 final_message 中）
+            _media_audio_urls = event.get_extra("_plugin_media_audio_urls", []) or []
+
             reply_result = await ReplyHandler.generate_reply(
                 event,
                 self.context,
@@ -7257,6 +7869,7 @@ class ChatPlus(Star):
                 self.reply_ai_extra_prompt,
                 self.reply_ai_prompt_mode,
                 image_urls,  # 传递图片URL列表
+                audio_urls=_media_audio_urls,  # 🆕 传递语音/音频URL列表
                 include_sender_info=self.include_sender_info,
                 include_timestamp=self.include_timestamp,  # 🔧 v1.2.0: 补传时间戳开关，确保contexts格式与prompt一致
                 history_messages=history_messages,  # 🔧 修复：传递历史消息用于构建contexts
@@ -7384,13 +7997,20 @@ class ChatPlus(Star):
                     last_cached.get("is_empty_at", False),  # 保留单独无信息@消息标记
                     "",
                     last_cached.get("is_at_all_message", False),
+                    persistent_poke_event_text=last_cached.get(
+                        "persistent_poke_event_text", ""
+                    ),
+                )
+
+                logger.info(
+                    f"[戳一戳保存] 从缓存读取 persistent_poke_event_text="
+                    f"{repr(last_cached.get('persistent_poke_event_text', '')[:80] if last_cached.get('persistent_poke_event_text') else '')}"
                 )
 
                 # 清理系统提示（保存前过滤）
                 message_to_save = MessageCleaner.clean_message(message_to_save)
-                message_to_save = self._append_persistent_event_text(
-                    message_to_save,
-                    last_cached.get("persistent_poke_event_text", ""),
+                logger.info(
+                    f"[戳一戳保存] clean后内容前150字符: {message_to_save[:150]}"
                 )
 
             # 如果从缓存获取失败，使用当前处理后的消息并添加元数据
@@ -7420,16 +8040,15 @@ class ChatPlus(Star):
                     "",
                     "",
                     is_at_all_message=is_at_all_message,
+                    persistent_poke_event_text=last_cached.get(
+                        "persistent_poke_event_text", ""
+                    )
+                    if last_cached
+                    else "",
                 )
 
                 # 清理系统提示（保存前过滤）
                 message_to_save = MessageCleaner.clean_message(message_to_save)
-                message_to_save = self._append_persistent_event_text(
-                    message_to_save,
-                    last_cached.get("persistent_poke_event_text", "")
-                    if isinstance(last_cached, dict)
-                    else "",
-                )
 
             if self.debug_mode:
                 logger.info(f"  准备保存的完整消息: {message_to_save[:300]}...")
@@ -8110,9 +8729,29 @@ class ChatPlus(Star):
                         poke_info
                     )
                     if user_poke_text:
+                        # 获取原始事件消息文本（如 [ComponentType.Poke]），
+                        # 该原始消息 MUST 始终出现在保存内容中。
+                        original_msg = (event.message_str or "").strip()
+                        if not original_msg:
+                            original_msg = "[ComponentType.Poke]"
+
+                        # 按配置添加时间戳 / 发送者信息等元数据，
+                        # poke_info 不传入（避免重复注入系统提示），
+                        # 持久化戳一戳事件文本通过 persistent_poke_event_text 注入到 system_parts。
+                        formatted_user_msg = MessageProcessor.add_metadata_to_message(
+                            event,
+                            original_msg,
+                            self.include_timestamp,
+                            self.include_sender_info,
+                            None,  # mention_info
+                            None,  # trigger_type
+                            None,  # poke_info
+                            persistent_poke_event_text=user_poke_text or "",
+                        )
+
                         await ContextManager.save_user_message(
                             event,
-                            user_poke_text,
+                            formatted_user_msg,
                             self.context,
                             skip_custom_storage=True,
                         )
@@ -8121,7 +8760,7 @@ class ChatPlus(Star):
                                 ContextManager.save_to_official_conversation_with_cache(
                                     event,
                                     [],
-                                    user_poke_text,
+                                    formatted_user_msg,
                                     "",
                                     self.context,
                                     save_kind="poke_event",
@@ -8361,7 +9000,9 @@ class ChatPlus(Star):
                 # 合并模式：剥离@组件，作为普通消息缓存到窗口
                 # 1. 先保留剥离前的原始消息文本，供缓存/转正/历史保留完整@语义
                 pre_intercept_raw_message = (
-                    MessageCleaner.extract_raw_message_from_event(event)
+                    MessageCleaner.extract_raw_message_from_event(
+                        event, self_id=str(event.get_self_id())
+                    )
                 )
                 # 2. 从消息链中移除指向bot的At组件
                 original_chain = event.get_messages()
@@ -8472,12 +9113,14 @@ class ChatPlus(Star):
             # "intercept"（默认）→ fall through 到下方普通消息缓存分支
 
         # ---- 普通消息（含 intercept 模式的关键词/@消息）：拦截并缓存 ----
-        # 处理逻辑与概率过滤失败时的缓存路径完全一致
+        # 处理逻辑与未通过概率过滤时的缓存路径完全一致
         try:
             original_message_text = (
                 pre_intercept_raw_message
                 if pre_intercept_raw_message is not None
-                else MessageCleaner.extract_raw_message_from_event(event)
+                else MessageCleaner.extract_raw_message_from_event(
+                    event, self_id=str(event.get_self_id())
+                )
             )
 
             # 让出控制权，让平台 LTM 有机会开始处理图片
@@ -8588,18 +9231,15 @@ class ChatPlus(Star):
                     "is_at_all_message": False,
                     "is_empty_at": False,
                 }
-                self.cache_manager.add_to_cache(
+                _cached_count = self.cache_manager.add_to_cache(
                     chat_id, cached_message, source="等待窗口"
                 )
 
                 async with self._group_wait_window_lock:
                     w = self._group_wait_windows.get(window_key)
                     if w:
-                        # 这里仍然严格按同一用户的 window_key 更新窗口状态，
-                        # 不会影响同群其他用户的等待窗口。
-                        # intercept：成功缓存后把这条追加消息计入 extra_count。
-                        # immediate / force_close：成功缓存后仅结束窗口，不增加 extra_count。
-                        if count_after_buffer:
+                        # 仅当消息确实进入缓存（非空消息）时才计数
+                        if count_after_buffer and _cached_count > 0:
                             w["extra_count"] += 1
                         if force_complete_after_buffer:
                             w["force_complete"] = True
@@ -8897,6 +9537,46 @@ class ChatPlus(Star):
             else None
         )
 
+        # 提前构建戳一戳文本（概率检查之前），确保无论概率是否通过都能写入缓存
+        persistent_poke_event_text = ""
+        poke_notice_text = ""
+        if poke_info_for_probability:
+            _poke_info_inner = poke_info_for_probability.get("poke_info")
+            if _poke_info_inner:
+                try:
+                    persistent_poke_event_text = (
+                        MessageProcessor.build_persistent_poke_event_text(
+                            _poke_info_inner
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[戳一戳事件] 构建历史事件文本失败，已降级忽略: {e}"
+                    )
+                try:
+                    _is_pb = _poke_info_inner.get("is_poke_bot", False)
+                    _sid = str(_poke_info_inner.get("sender_id", "") or "")
+                    _sname = (
+                        str(_poke_info_inner.get("sender_name", "") or "").strip()
+                        or "未知用户"
+                    )
+                    _tid = str(_poke_info_inner.get("target_id", "") or "")
+                    _tname = (
+                        str(_poke_info_inner.get("target_name", "") or "").strip()
+                        or "未知用户"
+                    )
+                    if _is_pb:
+                        poke_notice_text = (
+                            f"[戳一戳提示]有人在戳你，戳你的人是{_sname}(ID:{_sid})"
+                        )
+                    else:
+                        poke_notice_text = f"[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{_sname}(ID:{_sid})在戳{_tname}(ID:{_tid})"
+                except Exception as _poke_notice_err:
+                    if self.debug_mode:
+                        logger.info(
+                            f"构建戳一戳提示失败，已降级忽略: {_poke_notice_err}"
+                        )
+
         # 步骤2.8: 提前检测@提及信息与候选冷却上下文（轻量操作，便于概率阶段使用）
         mention_info = await self._check_mention_others(event)
 
@@ -8980,17 +9660,17 @@ class ChatPlus(Star):
             is_at_all_message=is_at_all_message,
         )
         if not should_process:
-            # 🆕 概率判断失败时，也进行简化的消息缓存（避免上下文断裂）
+            # 🆕 未通过概率筛选时，也进行简化的消息缓存（避免上下文断裂）
             # 🆕 v1.2.0: 尝试从平台 LTM 获取图片描述，充分利用平台的图片理解功能
             try:
                 if self.debug_mode:
                     logger.info(
-                        "【步骤3-缓存】概率判断失败，但仍缓存原始消息（避免上下文断裂）"
+                        "【步骤3-缓存】未通过概率筛选，缓存原始消息（避免上下文断裂）"
                     )
 
                 # 提取原始消息文本（不含系统提示词
                 original_message_text = MessageCleaner.extract_raw_message_from_event(
-                    event
+                    event, self_id=str(event.get_self_id())
                 )
 
                 # 🔧 v1.2.0: 先让出控制权，让平台 LTM 有机会开始处理消息
@@ -9113,12 +9793,22 @@ class ChatPlus(Star):
                         "is_at_message": is_at_message,
                         "has_trigger_keyword": has_trigger_keyword,
                         "is_at_all_message": is_at_all_message,
-                        "poke_info": None,  # 概率失败时简化处理
-                        "persistent_poke_event_text": "",
+                        "poke_info": None,  # 概率未通过时简化处理
+                        "persistent_poke_event_text": persistent_poke_event_text,
                         "probability_filtered": True,  # 标记为概率筛查过滤的消息
                         "image_urls": [],  # 🔧 概率过滤时，图片已转为文字或被过滤，不保留URL
                         "is_empty_at": False,
                     }
+                    if persistent_poke_event_text:
+                        logger.info(
+                            f"[戳一戳缓存] 概率未通过，persistent_poke_event_text="
+                            f"{persistent_poke_event_text[:80]}..."
+                        )
+                    else:
+                        logger.info(
+                            f"[戳一戳缓存] 概率未通过，persistent_poke_event_text 为空 "
+                            f"(poke_info_for_probability={bool(poke_info_for_probability)})"
+                        )
 
                     # 使用缓存管理器添加缓存
                     source_label = (
@@ -9137,7 +9827,7 @@ class ChatPlus(Star):
             except Exception as e:
                 logger.warning(f"[概率过滤-缓存] 缓存消息失败: {e}")
 
-            # 概率判断失败，返回（不继续处理）
+            # 未通过概率筛选，返回（不继续处理）
             return
 
         # 🆕 v1.2.0: 群聊等待窗口激活
@@ -9196,16 +9886,7 @@ class ChatPlus(Star):
             if poke_info_for_probability
             else None
         )
-        persistent_poke_event_text = ""
-        if poke_info_for_probability and poke_info:
-            try:
-                persistent_poke_event_text = (
-                    MessageProcessor.build_persistent_poke_event_text(poke_info)
-                )
-            except Exception as e:
-                logger.warning(f"[戳一戳事件] 构建历史事件文本失败，已降级忽略: {e}")
-                persistent_poke_event_text = ""
-
+        # persistent_poke_event_text 和 poke_notice_text 已在步骤2.5之后提前构建
         # 收到戳一戳后的反戳逻辑（放在概率判断之后）：
         # 若命中概率，则反戳并丢弃本插件处理中剩余步骤
         if poke_info:
@@ -9280,13 +9961,9 @@ class ChatPlus(Star):
                 "",
                 "",
                 is_at_all_message=is_at_all_message,
+                persistent_poke_event_text=persistent_poke_event_text,
             )
-            return MessageProcessor.format_message_for_context_display(
-                _current_message,
-                None,
-                False,
-                persistent_poke_event_text,
-            )
+            return _current_message
 
         current_message_for_ai = _build_current_message_for_ai(message_text)
 
@@ -9343,7 +10020,7 @@ class ChatPlus(Star):
                 chat_id=chat_id,
                 processing_id=processing_id,
                 content=_smart_content,
-                sender_name=event.get_sender_name() or "未知用户",
+                sender_name=self._safe_sender_display(event),
                 sender_id=str(event.get_sender_id()),
                 cached_data=_smart_cached,
                 is_forced=_is_forced,
@@ -9485,6 +10162,7 @@ class ChatPlus(Star):
                             include_timestamp=self.include_timestamp,
                             include_sender_info=self.include_sender_info,
                             window_buffered_messages=smart_batch_messages,
+                            poke_notice=poke_notice_text,
                         )
                     except Exception as smart_ctx_err:
                         logger.warning(
@@ -9536,7 +10214,7 @@ class ChatPlus(Star):
                                 is_private,
                                 chat_id,
                                 event.get_sender_id(),
-                                event.get_sender_name() or "未知用户",
+                                self._safe_sender_display(event),
                                 trigger_message_id=pending_cooldown_context.get(
                                     "message_id", ""
                                 ),
@@ -9549,7 +10227,7 @@ class ChatPlus(Star):
                             is_private,
                             chat_id,
                             event.get_sender_id(),
-                            event.get_sender_name() or "未知用户",
+                            self._safe_sender_display(event),
                             trigger_message_id=pending_cooldown_context.get(
                                 "message_id", ""
                             ),
@@ -9561,7 +10239,7 @@ class ChatPlus(Star):
                             is_private,
                             chat_id,
                             event.get_sender_id(),
-                            event.get_sender_name() or "未知用户",
+                            self._safe_sender_display(event),
                             trigger_message_id=pending_cooldown_context.get(
                                 "message_id", ""
                             ),
@@ -9781,6 +10459,7 @@ class ChatPlus(Star):
                         include_timestamp=self.include_timestamp,
                         include_sender_info=self.include_sender_info,
                         window_buffered_messages=_window_buffered_msgs,
+                        poke_notice=poke_notice_text,
                     )
                     if self.debug_mode:
                         logger.info(
@@ -9868,7 +10547,7 @@ class ChatPlus(Star):
             if is_at_message or has_trigger_keyword:
                 try:
                     user_id = event.get_sender_id()
-                    user_name = event.get_sender_name() or "未知用户"
+                    user_name = self._safe_sender_display(event)
                     await AttentionManager.reset_consecutive_replies(
                         platform_name, is_private, chat_id, user_id
                     )
@@ -9949,6 +10628,7 @@ class ChatPlus(Star):
                     window_buffered_messages=self.cache_manager.get_window_buffered_messages(
                         chat_id
                     ),
+                    poke_notice=poke_notice_text,
                 )
                 emoji_marker_applied = True
                 if self.debug_mode:
@@ -9979,6 +10659,7 @@ class ChatPlus(Star):
                             include_timestamp=self.include_timestamp,
                             include_sender_info=self.include_sender_info,
                             window_buffered_messages=smart_batch_messages,
+                            poke_notice=poke_notice_text,
                         )
                     except Exception as smart_reply_ctx_err:
                         logger.warning(
@@ -10131,42 +10812,155 @@ class ChatPlus(Star):
             for warning_text in rewrite_result.warnings:
                 logger.info(f"  [重写提示] {warning_text}")
 
-        try:
-            absorbed_prompt_texts = self._extract_third_party_prompt_additions(
-                req_snapshot.get("prompt", "") or "",
-                plugin_short_prompt,
-                plugin_prompt,
-            )
-            if absorbed_prompt_texts:
-                plugin_prompt = self._merge_safe_injected_text_into_prompt(
-                    plugin_prompt,
-                    absorbed_prompt_texts,
-                )
-                self._log_third_party_prompt_absorption(absorbed_prompt_texts)
-            elif self.debug_mode and self._is_meaningful_text(
-                req_snapshot.get("prompt", "")
-            ):
-                logger.info("[兼容增强][详细] 未吸收到安全的第三方prompt补充内容")
-        except Exception as e:
-            logger.error(f"[兼容增强] 提取第三方prompt补充失败: {e}", exc_info=True)
-            absorbed_prompt_texts = []
+        # 🆕 读取逐插件追踪数据（handler wrapper 在执行过程中实时写入）
+        per_plugin_injections = event.get_extra("_gcp_per_plugin_injections", None)
 
         try:
-            absorbed_contexts = self._extract_third_party_context_additions(
-                req_snapshot.get("contexts", []),
-                plugin_contexts,
-            )
-            if absorbed_contexts:
-                plugin_contexts = self._merge_safe_injected_contexts(
-                    plugin_contexts,
-                    absorbed_contexts,
+            if per_plugin_injections:
+                plugin_prompt = self._merge_per_plugin_prompt(
+                    plugin_prompt,
+                    per_plugin_injections,
                 )
-                self._log_third_party_context_absorption(absorbed_contexts)
-            elif self.debug_mode and req_snapshot.get("contexts"):
-                logger.info("[兼容增强][详细] 未保留额外的第三方上下文注入")
+                if self.debug_mode:
+                    logger.info(
+                        "[逐插件隔离] 已使用逐插件 prompt 隔离，"
+                        f"涉及插件: {list(per_plugin_injections.keys())}"
+                    )
+            else:
+                # 🔧 回退：使用原有差分逻辑
+                absorbed_prompt_texts = self._extract_third_party_prompt_additions(
+                    req_snapshot.get("prompt", "") or "",
+                    plugin_short_prompt,
+                    plugin_prompt,
+                )
+                if absorbed_prompt_texts:
+                    plugin_prompt = self._merge_safe_injected_text_into_prompt(
+                        plugin_prompt,
+                        absorbed_prompt_texts,
+                    )
+                    self._log_third_party_prompt_absorption(absorbed_prompt_texts)
+                elif self.debug_mode and self._is_meaningful_text(
+                    req_snapshot.get("prompt", "")
+                ):
+                    logger.info("[兼容增强][详细] 未吸收到安全的第三方prompt补充内容")
         except Exception as e:
-            logger.error(f"[兼容增强] 提取第三方contexts补充失败: {e}", exc_info=True)
-            absorbed_contexts = []
+            # 冗余回退
+            logger.error(f"[兼容增强] prompt 隔离失败: {e}", exc_info=True)
+            try:
+                absorbed_prompt_texts = self._extract_third_party_prompt_additions(
+                    req_snapshot.get("prompt", "") or "",
+                    plugin_short_prompt,
+                    plugin_prompt,
+                )
+                if absorbed_prompt_texts:
+                    plugin_prompt = self._merge_safe_injected_text_into_prompt(
+                        plugin_prompt,
+                        absorbed_prompt_texts,
+                    )
+            except Exception:
+                pass
+
+        try:
+            if per_plugin_injections:
+                plugin_contexts = self._merge_per_plugin_contexts(
+                    plugin_contexts,
+                    per_plugin_injections,
+                )
+                if self.debug_mode:
+                    logger.info(
+                        "[逐插件隔离] 已使用逐插件上下文隔离，"
+                        f"涉及插件: {list(per_plugin_injections.keys())}"
+                    )
+            else:
+                # 🔧 回退：使用原有差分逻辑（兼容补丁未安装或失败的场景）
+                absorbed_contexts = self._extract_third_party_context_additions(
+                    req_snapshot.get("contexts", []),
+                    plugin_contexts,
+                )
+                if absorbed_contexts:
+                    plugin_contexts = self._merge_safe_injected_contexts(
+                        plugin_contexts,
+                        absorbed_contexts,
+                    )
+                    self._log_third_party_context_absorption(absorbed_contexts)
+                elif self.debug_mode and req_snapshot.get("contexts"):
+                    logger.info("[兼容增强][详细] 未保留额外的第三方上下文注入")
+        except Exception as e:
+            # 冗余回退：逐插件路径异常时，尝试原有差分逻辑
+            logger.error(f"[兼容增强] 上下文隔离失败: {e}", exc_info=True)
+            try:
+                absorbed_contexts = self._extract_third_party_context_additions(
+                    req_snapshot.get("contexts", []),
+                    plugin_contexts,
+                )
+                if absorbed_contexts:
+                    plugin_contexts = self._merge_safe_injected_contexts(
+                        plugin_contexts,
+                        absorbed_contexts,
+                    )
+            except Exception:
+                pass
+
+        # 逐插件追踪路径：输出第三方注入摘要（始终输出，不依赖 debug_mode）
+        if per_plugin_injections:
+            summary_parts = []
+            for pname, pinj in per_plugin_injections.items():
+                injected = []
+                if pinj.get("prompt_added"):
+                    injected.append("prompt文本")
+                if pinj.get("system_prompt_added"):
+                    injected.append("system_prompt文本")
+                if pinj.get("contexts_added"):
+                    injected.append(f"contexts({len(pinj['contexts_added'])}条)")
+                if pinj.get("image_urls_added"):
+                    injected.append(f"图片({len(pinj['image_urls_added'])}个)")
+                if pinj.get("audio_urls_added"):
+                    injected.append(f"音频({len(pinj['audio_urls_added'])}个)")
+                if pinj.get("extra_parts_added"):
+                    injected.append("extra_content_parts")
+                if injected:
+                    summary_parts.append(f"  {pname}: {', '.join(injected)}")
+            if summary_parts:
+                logger.info(
+                    f"[兼容增强] 检测到 {len(summary_parts)} 个第三方插件注入:\n"
+                    + "\n".join(summary_parts)
+                )
+            elif self.debug_mode:
+                logger.info(
+                    "[兼容增强] 逐插件追踪已启用，但未检测到有效的第三方注入内容"
+                )
+
+        # 🔧 图片/音频 URL 合并：与 prompt/contexts 同管道，优先逐插件追踪
+        _merged_image_urls = list(plugin_image_urls)
+        _plugin_audio_urls = event.get_extra("_plugin_audio_urls", []) or []
+        _merged_audio_urls = list(_plugin_audio_urls) if _plugin_audio_urls else []
+        _img_seen = set(_merged_image_urls)
+        _aud_seen = set(_merged_audio_urls)
+
+        if per_plugin_injections:
+            for _pdata in per_plugin_injections.values():
+                for _u in _pdata.get("image_urls_added", []):
+                    if _u not in _img_seen:
+                        _img_seen.add(_u)
+                        _merged_image_urls.append(_u)
+                for _u in _pdata.get("audio_urls_added", []):
+                    if _u not in _aud_seen:
+                        _aud_seen.add(_u)
+                        _merged_audio_urls.append(_u)
+        else:
+            # 回退：从快照提取第三方追加的 URL
+            for _u in req_snapshot.get("image_urls", []):
+                if _u not in _img_seen:
+                    _img_seen.add(_u)
+                    _merged_image_urls.append(_u)
+            for _u in req_snapshot.get("audio_urls", []):
+                if _u not in _aud_seen:
+                    _aud_seen.add(_u)
+                    _merged_audio_urls.append(_u)
+
+        req.image_urls = _merged_image_urls
+        if _merged_audio_urls:
+            req.audio_urls = _merged_audio_urls
 
         # 🔧 使用插件自己的上下文替换平台 LTM 注入的上下文
         # 平台 LTM 的 on_req_llm 方法会修改 req.contexts 和 req.system_prompt
@@ -10177,7 +10971,6 @@ class ChatPlus(Star):
         #    其他插件（如 livingmemory，priority=0）已先执行，拿到的是短消息，
         #    向量检索正常工作，不会触发 token 超限截断警告。
         req.prompt = plugin_prompt
-        req.image_urls = plugin_image_urls
 
         # 🔧 保护 extra_user_content_parts：快照中有但属性不存在时恢复快照值
         # 其他插件（如 livingmemory）可能读取此字段获取图片描述等数据
@@ -10219,44 +11012,6 @@ class ChatPlus(Star):
                 # 最终回退：类型不兼容时直接替换
                 req.func_tool = plugin_tool_set
         # 如果 plugin_tool_set 为 None（获取失败），保留 req.func_tool 原样（框架工具仍可用）
-
-        # 🔧 工具提醒只作用于提醒层，不改变实际工具执行权限
-        current_tools = _get_compatible_tools(req.func_tool)
-        reminder_prompt = req.prompt or ""
-        if enable_tools_reminder and current_tools:
-            try:
-                from .utils.tools_reminder import ToolsReminder
-
-                effective_allowed_tool_names = reminder_allowed_tool_names
-                if (
-                    tools_reminder_persona_filter
-                    and effective_allowed_tool_names is None
-                ):
-                    effective_allowed_tool_names = (
-                        await ToolsReminder.get_persona_tool_names(
-                            self.context,
-                            event.unified_msg_origin,
-                            event.get_platform_name(),
-                        )
-                    )
-
-                current_conf = (
-                    self.context.get_config(umo=event.unified_msg_origin) or {}
-                )
-                provider_settings = current_conf.get("provider_settings", {})
-                tool_schema_mode = provider_settings.get("tool_schema_mode", "full")
-                include_tool_parameters = tool_schema_mode != "skills_like"
-
-                reminder_prompt = ToolsReminder.build_tools_reminder_message(
-                    reminder_prompt,
-                    req.func_tool,
-                    effective_allowed_tool_names,
-                    event,
-                    include_parameters=include_tool_parameters,
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ 生成工具提醒失败（将跳过提醒，不影响主流程）: {e}")
-        req.prompt = reminder_prompt
 
         # 🔧 合并 system_prompt：优先使用重写结果，失败时 helper 内部已做保守回退
         req.system_prompt = rewrite_result.merged_system_prompt
@@ -10306,6 +11061,63 @@ class ChatPlus(Star):
             except ImportError:
                 pass
 
+        # P1: 工具提醒追加到 system_prompt 末尾（工具列表是系统级指令，放在 system 参数中
+        # AI 会以更高权重遵守。提示词格式与原 user prompt 版本完全一致。）
+        if enable_tools_reminder and current_tools:
+            try:
+                from .utils.tools_reminder import (
+                    ToolsReminder,
+                    TOOL_REMINDER_START_MARKER,
+                    TOOL_REMINDER_END_MARKER,
+                )
+
+                effective_allowed_tool_names = reminder_allowed_tool_names
+                if (
+                    tools_reminder_persona_filter
+                    and effective_allowed_tool_names is None
+                ):
+                    effective_allowed_tool_names = (
+                        await ToolsReminder.get_persona_tool_names(
+                            self.context,
+                            event.unified_msg_origin,
+                            event.get_platform_name(),
+                        )
+                    )
+
+                current_conf = (
+                    self.context.get_config(umo=event.unified_msg_origin) or {}
+                )
+                provider_settings = current_conf.get("provider_settings", {})
+                tool_schema_mode = provider_settings.get("tool_schema_mode", "full")
+                include_tool_parameters = tool_schema_mode != "skills_like"
+
+                tools = ToolsReminder.tools_to_info(
+                    req.func_tool, effective_allowed_tool_names, event
+                )
+                if tools:
+                    tools_info = ToolsReminder.format_tools_info(
+                        tools, include_parameters=include_tool_parameters
+                    )
+                    tools_block = (
+                        TOOL_REMINDER_START_MARKER
+                        + "\n=== 可用工具列表 ===\n"
+                        + tools_info
+                        + "\n"
+                        + TOOL_REMINDER_END_MARKER
+                        + "\n(以上是当前会话中你可以调用的所有工具，根据需要选择合适的工具使用)"
+                    )
+                    req.system_prompt += "\n\n" + tools_block
+            except Exception as e:
+                logger.warning(f"⚠️ 生成工具提醒失败（将跳过提醒，不影响主流程）: {e}")
+
+        # P2: 情绪提示追加到 system_prompt 末尾（由 _generate_and_send_reply /
+        # proactive_chat_manager 预先存入 event extra，此处统一处理）。
+        mood_hint = event.get_extra("_group_chat_plus_mood_hint", None)
+        if mood_hint:
+            req.system_prompt += f"\n\n{mood_hint}"
+            if self.debug_mode:
+                logger.info(f"  ✅ 已追加情绪提示到 system_prompt")
+
         if self.debug_mode:
             logger.info("  ✅ 已恢复插件自定义上下文:")
             logger.info(f"    - contexts 数量: {len(req.contexts)}")
@@ -10313,6 +11125,9 @@ class ChatPlus(Star):
             logger.info(f"    - prompt 长度: {len(req.prompt)}")
             logger.info(
                 f"    - image_urls 数量: {len(req.image_urls) if req.image_urls else 0}"
+            )
+            logger.info(
+                f"    - audio_urls 数量: {len(req.audio_urls) if req.audio_urls else 0}"
             )
             logger.info(
                 f"    - 第三方prompt补充: {len(absorbed_prompt_texts)} 段, 第三方contexts补充: {len(absorbed_contexts)} 条"
@@ -10335,12 +11150,15 @@ class ChatPlus(Star):
             event.set_extra(PLUGIN_CUSTOM_SYSTEM_PROMPT, None)
             event.set_extra(PLUGIN_CUSTOM_PROMPT, None)
             event.set_extra(PLUGIN_IMAGE_URLS, None)
+            event.set_extra("_plugin_audio_urls", None)
+            event.set_extra("_plugin_media_audio_urls", None)
             event.set_extra(PLUGIN_FUNC_TOOL, None)
             event.set_extra(PLUGIN_CURRENT_MESSAGE, None)
             event.set_extra(PLUGIN_ENABLE_TOOLS_REMINDER, None)
             event.set_extra(PLUGIN_TOOLS_REMINDER_PERSONA_FILTER, None)
             event.set_extra(PLUGIN_ALLOWED_TOOL_NAMES, None)
             event.set_extra(PLUGIN_CUSTOM_STATIC_INSTRUCTIONS, None)
+            event.set_extra("_gcp_per_plugin_injections", None)
             # 简化日志：非debug模式下也显示，方便监控安全机制
             logger.info("[安全] 已清理LLM请求上下文缓存")
         except Exception as e:
@@ -10681,14 +11499,69 @@ class ChatPlus(Star):
                 # 此处暂不保存，等待后续的最终调用
                 is_agent_done = message_id in self._agent_done_flags
 
+                # 🆕 提前检查 AI 错误标记（原在下方，需提前用于异常终止检测）
+                ai_error_flag_early = (
+                    hasattr(self, "_ai_error_message_ids")
+                    and message_id in self._ai_error_message_ids
+                )
+
                 if not is_agent_done:
-                    # agent还在运行（多轮工具调用中），文本已在 on_decorating_result 累积
                     pending_count = len(self._pending_bot_replies.get(message_id, []))
-                    logger.info(
-                        f"[消息发送后] agent尚未完成（多轮工具调用中），"
-                        f"已累积 {pending_count} 段回复，等待agent完成后统一保存"
-                    )
-                    return
+
+                    # 🆕 修复：当工具调用或 LLM 出错导致 on_agent_done 未被调用时，
+                    # _agent_done_flags 永远不会被设置，导致累积的回复文本丢失。
+                    # 检测以下异常终止信号并强制完成：
+                    # 1. AI 错误标记（_ai_error_message_ids）
+                    # 2. 非 LLM_RESULT 但有文本内容（如 err/aborted 响应）
+                    # 注意：LLM_RESULT 不在此处强制完成——多轮工具调用中 AI 先
+                    # 说话再调工具时中间文本也是 LLM_RESULT，正常完成由
+                    # on_llm_response → _agent_done_flags → after_message_sent 处理。
+                    force_done = False
+                    if ai_error_flag_early and pending_count > 0:
+                        force_done = True
+                        logger.warning(
+                            f"[消息发送后] 检测到 AI 调用错误标记，强制完成 agent "
+                            f"以保存 {pending_count} 段累积回复"
+                        )
+                    elif pending_count > 0:
+                        # 检查当前消息是否已是异常/错误终端响应
+                        # 注意：LLM_RESULT 在此处不强制完成！多轮工具调用中
+                        # AI 先说话再调工具时，中间文本也是 LLM_RESULT 类型。
+                        # 正常完成由 on_llm_response 设置 _agent_done_flags 处理。
+                        # 这里只处理异常终止信号（GENERAL_RESULT + 有文本），
+                        # 此时 on_agent_done 不会被调用，需要强制保存。
+                        _result_obj = event._result if event._result else None
+                        if _result_obj:
+                            try:
+                                _is_llm = _result_obj.is_llm_result()
+                            except Exception:
+                                _is_llm = False
+                            if not _is_llm and _result_obj.chain:
+                                # GENERAL_RESULT 但有文本内容（如 err/aborted 响应），
+                                # 且 on_agent_done 未被调用 → 异常终止，强制保存
+                                _text = "".join(
+                                    self._coerce_component_text(
+                                        getattr(c, "text", None)
+                                    )
+                                    for c in _result_obj.chain
+                                ).strip()
+                                if _text:
+                                    force_done = True
+                                    logger.warning(
+                                        f"[消息发送后] agent_done 标志未设置但收到非 LLM 终端响应"
+                                        f"（长度 {len(_text)} 字符），"
+                                        f"强制保存 {pending_count} 段累积回复"
+                                    )
+
+                    if force_done:
+                        self._agent_done_flags.add(message_id)
+                        is_agent_done = True
+                    else:
+                        logger.info(
+                            f"[消息发送后] agent尚未完成（多轮工具调用中），"
+                            f"已累积 {pending_count} 段回复，等待agent完成后统一保存"
+                        )
+                        return
 
                 # agent已完成，清除标记并进行最终保存
                 del self.processing_sessions[message_id]
@@ -10729,13 +11602,19 @@ class ChatPlus(Star):
                 logger.info(f"[消息发送后] 会话 {chat_id} 不是LLM结果，跳过")
                 return
 
-            # 提取回复文本（仅在为LLM结果且非重复拦截时使用）
+            # 提取回复文本
+            # 🆕 修复：不仅限于 is_llm_result，当 AI 错误或 on_agent_done 未正常触发时，
+            # 也需要弹出 _pending_bot_replies 中累积的中间文本，防止工具调用记录丢失。
             displayed_bot_reply_text = ""
             original_bot_reply_text = ""
             bot_reply_to_save = None  # 🔧 初始化为None，重复拦截时不保存AI消息
             is_empty_reply = False
+            accumulated_texts = []
 
-            if is_llm_result and not is_duplicate_blocked:
+            _has_pending = bool(self._pending_bot_replies.get(message_id, []))
+            _should_pop_pending = is_llm_result or ai_error_flag or _has_pending
+
+            if _should_pop_pending and not is_duplicate_blocked:
                 # 🔧 多轮工具调用支持：使用累积的所有回复文本，而不是仅当前一段
                 accumulated_texts = self._pending_bot_replies.pop(message_id, [])
                 # 清理 raw_reply_cache（不再需要）
@@ -10751,6 +11630,11 @@ class ChatPlus(Star):
                             f"[消息发送后] 🔧 多轮工具调用：合并了 {len(accumulated_texts)} 段AI回复，"
                             f"总长度: {len(original_bot_reply_text)} 字符"
                         )
+                    if not is_llm_result:
+                        logger.info(
+                            f"[消息发送后] 非 LLM 结果但检测到累积回复文本，"
+                            f"已强制弹出并准备保存（ai_error_flag={ai_error_flag}）"
+                        )
                 else:
                     # 回退：从当前 event result 提取（兼容无累积的情况）
                     displayed_bot_reply_text = "".join(
@@ -10765,8 +11649,8 @@ class ChatPlus(Star):
                         f"[消息发送后] 会话 {chat_id} 回复文本为空，进入降级保存：仅保存用户消息与缓存上下文"
                     )
 
-            # 🔧 只在非重复拦截且非空回复时保存AI消息
-            if is_llm_result and not is_duplicate_blocked and not is_empty_reply:
+            # 🔧 保存AI消息：LLM结果、AI错误、或有累积的待保存文本
+            if _should_pop_pending and not is_duplicate_blocked and not is_empty_reply:
                 if self.debug_mode:
                     logger.info(
                         f"【消息发送后】会话 {chat_id} - 保存AI回复，长度: {len(original_bot_reply_text)} 字符"
@@ -10949,16 +11833,15 @@ class ChatPlus(Star):
                     last_cached.get("is_empty_at", False),  # 保留单独无信息@消息标记
                     "",
                     last_cached.get("is_at_all_message", False),
+                    persistent_poke_event_text=last_cached.get(
+                        "persistent_poke_event_text", ""
+                    )
+                    if isinstance(last_cached, dict)
+                    else "",
                 )
 
                 # 清理系统提示（保存前过滤）
                 message_to_save = MessageCleaner.clean_message(message_to_save)
-                message_to_save = self._append_persistent_event_text(
-                    message_to_save,
-                    last_cached.get("persistent_poke_event_text", "")
-                    if isinstance(last_cached, dict)
-                    else "",
-                )
 
                 # 强制日志：添加元数据后的内容
                 logger.info(f"🟡 [官方保存-加元数据后] 内容: {message_to_save[:150]}")
@@ -10969,11 +11852,18 @@ class ChatPlus(Star):
                     "[消息发送后] ⚠️ 缓存中无消息，从event提取消息（不应该发生）"
                 )
                 # 使用当前处理后的消息
-                processed = MessageCleaner.extract_raw_message_from_event(event)
+                processed = MessageCleaner.extract_raw_message_from_event(
+                    event, self_id=str(event.get_self_id())
+                )
                 mention_info = (
                     last_cached.get("mention_info")
                     if isinstance(last_cached, dict)
                     else None
+                )
+                _fb_poke_text = (
+                    last_cached.get("persistent_poke_event_text", "")
+                    if isinstance(last_cached, dict)
+                    else ""
                 )
                 if processed:
                     message_to_save = MessageProcessor.add_metadata_to_message(
@@ -10992,15 +11882,10 @@ class ChatPlus(Star):
                             if isinstance(last_cached, dict)
                             else False
                         ),
+                        persistent_poke_event_text=_fb_poke_text,
                     )
                     # 清理系统提示（保存前过滤）
                     message_to_save = MessageCleaner.clean_message(message_to_save)
-                    message_to_save = self._append_persistent_event_text(
-                        message_to_save,
-                        last_cached.get("persistent_poke_event_text", "")
-                        if isinstance(last_cached, dict)
-                        else "",
-                    )
                     logger.info(
                         f"[消息发送后] 从event提取的消息: {message_to_save[:200]}..."
                     )
@@ -11122,13 +12007,12 @@ class ChatPlus(Star):
                     _smart_msg.get("is_empty_at", False),
                     "",
                     _smart_msg.get("is_at_all_message", False),
+                    persistent_poke_event_text=_smart_msg.get(
+                        "persistent_poke_event_text", ""
+                    ),
                 )
                 _smart_message_to_save = MessageCleaner.clean_message(
                     _smart_message_to_save
-                )
-                _smart_message_to_save = self._append_persistent_event_text(
-                    _smart_message_to_save,
-                    _smart_msg.get("persistent_poke_event_text", ""),
                 )
                 if _smart_message_to_save:
                     cached_messages_to_convert.append(
@@ -11271,7 +12155,7 @@ class ChatPlus(Star):
                     self._update_last_reply_target(
                         chat_key=chat_key_for_reply_target,
                         user_id=event.get_sender_id(),
-                        user_name=event.get_sender_name() or "未知用户",
+                        user_name=self._safe_sender_display(event),
                         message_id=message_id,
                         confidence=reply_target_confidence,
                     )
@@ -11370,14 +12254,13 @@ class ChatPlus(Star):
                 last_cached.get("is_empty_at", False),
                 "",
                 last_cached.get("is_at_all_message", False),
+                persistent_poke_event_text=last_cached.get(
+                    "persistent_poke_event_text", ""
+                ),
             )
 
             # 清理系统提示
             message_to_save = MessageCleaner.clean_message(message_to_save)
-            message_to_save = self._append_persistent_event_text(
-                message_to_save,
-                last_cached.get("persistent_poke_event_text", ""),
-            )
 
             if not message_to_save:
                 return
@@ -11428,13 +12311,12 @@ class ChatPlus(Star):
                     _smart_msg.get("is_empty_at", False),
                     "",
                     _smart_msg.get("is_at_all_message", False),
+                    persistent_poke_event_text=_smart_msg.get(
+                        "persistent_poke_event_text", ""
+                    ),
                 )
                 _smart_message_to_save = MessageCleaner.clean_message(
                     _smart_message_to_save
-                )
-                _smart_message_to_save = self._append_persistent_event_text(
-                    _smart_message_to_save,
-                    _smart_msg.get("persistent_poke_event_text", ""),
                 )
                 if _smart_message_to_save:
                     cached_messages_to_convert.append(
@@ -11675,6 +12557,7 @@ class ChatPlus(Star):
         - AI 先说话再调工具 → 文本在前，工具记录在后
         - AI 直接调工具 → 工具记录在前
         - 多轮交替调用 → 按实际顺序交错排列
+        - 同一轮调用多个工具 → 每个工具独立一个 [工具调用记录开始]...[工具调用记录结束] 块
 
         利用 ToolCallsResult.tool_calls_info.content 判断每轮工具调用是否伴随文本，
         与 _pending_bot_replies 中的文本按序对应。
@@ -11723,8 +12606,7 @@ class ChatPlus(Star):
                     interleaved_parts.append(pending_texts[text_index])
                     text_index += 1
 
-                # 格式化这一轮的工具调用记录
-                tool_lines = []
+                # 格式化这一轮的工具调用记录——每个工具独立一个块
                 if tool_calls_info and getattr(tool_calls_info, "tool_calls", None):
                     for i, tc in enumerate(tool_calls_info.tool_calls):
                         # 兼容 ToolCall 对象和 dict 两种格式
@@ -11768,17 +12650,16 @@ class ChatPlus(Star):
                             if len(result_preview) > 500:
                                 result_preview = result_preview[:500] + "..."
 
+                        result_preview = result_preview.strip()
                         if result_preview:
-                            tool_lines.append(
-                                f"- {func_name}({func_args}) → {result_preview}"
-                            )
+                            tool_line = f"- {func_name}({func_args}) → {result_preview}"
                         else:
-                            tool_lines.append(f"- {func_name}({func_args}) → (无返回)")
+                            tool_line = f"- {func_name}({func_args}) → (无返回)"
 
-                if tool_lines:
-                    interleaved_parts.append(
-                        "[工具调用记录]\n" + "\n".join(tool_lines) + "\n[工具调用结束]"
-                    )
+                        # 每个工具独立一个块，不再合并
+                        interleaved_parts.append(
+                            "[工具调用记录开始]\n" + tool_line + "\n[工具调用记录结束]"
+                        )
 
             # 剩余的 pending_texts 是最后一轮工具调用之后 AI 的最终回复
             while text_index < len(pending_texts):
@@ -11896,17 +12777,18 @@ class ChatPlus(Star):
                     last_cached.get("is_empty_at", False),
                     "",
                     last_cached.get("is_at_all_message", False),
-                )
-                message_to_save = MessageCleaner.clean_message(message_to_save)
-                message_to_save = self._append_persistent_event_text(
-                    message_to_save,
-                    last_cached.get("persistent_poke_event_text", "")
+                    persistent_poke_event_text=last_cached.get(
+                        "persistent_poke_event_text", ""
+                    )
                     if isinstance(last_cached, dict)
                     else "",
                 )
+                message_to_save = MessageCleaner.clean_message(message_to_save)
 
             if not message_to_save:
-                processed = MessageCleaner.extract_raw_message_from_event(event)
+                processed = MessageCleaner.extract_raw_message_from_event(
+                    event, self_id=str(event.get_self_id())
+                )
                 mention_info = (
                     last_cached.get("mention_info")
                     if isinstance(last_cached, dict)
@@ -11929,14 +12811,13 @@ class ChatPlus(Star):
                             if isinstance(last_cached, dict)
                             else False
                         ),
-                    )
-                    message_to_save = MessageCleaner.clean_message(message_to_save)
-                    message_to_save = self._append_persistent_event_text(
-                        message_to_save,
-                        last_cached.get("persistent_poke_event_text", "")
+                        persistent_poke_event_text=last_cached.get(
+                            "persistent_poke_event_text", ""
+                        )
                         if isinstance(last_cached, dict)
                         else "",
                     )
+                    message_to_save = MessageCleaner.clean_message(message_to_save)
 
             if message_to_save:
                 extra_cached_messages = []
@@ -11967,13 +12848,12 @@ class ChatPlus(Star):
                         _smart_msg.get("is_empty_at", False),
                         "",
                         _smart_msg.get("is_at_all_message", False),
+                        persistent_poke_event_text=_smart_msg.get(
+                            "persistent_poke_event_text", ""
+                        ),
                     )
                     _smart_message_to_save = MessageCleaner.clean_message(
                         _smart_message_to_save
-                    )
-                    _smart_message_to_save = self._append_persistent_event_text(
-                        _smart_message_to_save,
-                        _smart_msg.get("persistent_poke_event_text", ""),
                     )
                     if _smart_message_to_save:
                         extra_cached_messages.append(
@@ -13001,6 +13881,18 @@ class ChatPlus(Star):
             logger.error(f"检测@提及时发生错误: {e}", exc_info=True)
             return None
 
+    @staticmethod
+    def _safe_sender_display(event: AstrMessageEvent) -> str:
+        """从事件获取安全的发送者显示名，解析失败时返回'未知用户'。"""
+        try:
+            name = str(event.get_sender_name() or "").strip()
+            uid = str(event.get_sender_id() or "").strip()
+            if name and name != uid:
+                return name
+            return "未知用户"
+        except Exception:
+            return "未知用户"
+
     async def _resolve_group_member_name(
         self,
         event: AstrMessageEvent,
@@ -13013,16 +13905,20 @@ class ChatPlus(Star):
             user_id_str = str(user_id or "").strip()
             group_id_str = str(group_id or "").strip()
             fallback_name = (fallback_name or "").strip()
-            if fallback_name and fallback_name != "未知用户":
+            if (
+                fallback_name
+                and fallback_name != "未知用户"
+                and fallback_name != user_id_str
+            ):
                 return fallback_name
             if not user_id_str or not group_id_str:
-                return fallback_name or user_id_str or "未知用户"
+                return "未知用户"
 
             try:
                 sender = getattr(getattr(event, "message_obj", None), "sender", None)
                 if sender and str(getattr(sender, "user_id", "")) == user_id_str:
                     sender_nick = str(getattr(sender, "nickname", "") or "").strip()
-                    if sender_nick:
+                    if sender_nick and sender_nick != user_id_str:
                         return sender_nick
             except Exception:
                 pass
@@ -13068,11 +13964,11 @@ class ChatPlus(Star):
                             f"[戳一戳检测] get_group_member_info 获取昵称失败: {e}"
                         )
 
-            return fallback_name or user_id_str or "未知用户"
+            return "未知用户"
         except Exception as e:
             if self.debug_mode:
                 logger.info(f"[戳一戳检测] 解析群成员昵称失败，使用回退值: {e}")
-            return fallback_name or str(user_id or "").strip() or "未知用户"
+            return "未知用户"
 
     async def _check_poke_message(self, event: AstrMessageEvent) -> dict:
         """
@@ -13160,6 +14056,22 @@ class ChatPlus(Star):
                 group_id,
                 fallback_name=event.get_sender_name() or "",
             )
+            # notice 事件 fallback：从 raw_message 补充提取发送者昵称
+            if (
+                not sender_name
+                or sender_name == str(sender_id)
+                or sender_name == "未知用户"
+            ):
+                try:
+                    _raw_sender = raw_message.get("sender")
+                    if isinstance(_raw_sender, dict):
+                        _nick = (
+                            _raw_sender.get("nickname") or _raw_sender.get("card") or ""
+                        )
+                        if _nick and _nick.strip():
+                            sender_name = _nick.strip()
+                except Exception:
+                    pass
 
             # 获取被戳者昵称（如果可能）
             target_name = ""
@@ -13476,7 +14388,9 @@ class ChatPlus(Star):
         if self.humanize_mode_enabled:
             try:
                 # 从事件中提取消息文本
-                message_text = MessageCleaner.extract_raw_message_from_event(event)
+                message_text = MessageCleaner.extract_raw_message_from_event(
+                    event, self_id=str(event.get_self_id())
+                )
                 if message_text:
                     interest_boost = (
                         await HumanizeModeManager.get_interest_probability_boost(
@@ -13559,7 +14473,9 @@ class ChatPlus(Star):
         # 🆕 v1.2.1: 消息质量预判
         if self.enable_message_quality_scoring:
             try:
-                message_text = MessageCleaner.extract_raw_message_from_event(event)
+                message_text = MessageCleaner.extract_raw_message_from_event(
+                    event, self_id=str(event.get_self_id())
+                )
                 if message_text:
                     quality_adjust, quality_reason = MessageQualityScorer.score_message(
                         message_text

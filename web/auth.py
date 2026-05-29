@@ -6,6 +6,7 @@ Argon2id 密码哈希（内存硬化，防 GPU 暴力破解）+ JWT + 服务端�
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -408,6 +409,16 @@ class AuthManager:
             session["revoked_at"] = now
         self._save_sessions()
 
+    @staticmethod
+    def _normalize_ip(ip: str | None) -> str:
+        """将 IP 地址规范化为标准字符串形式（IPv4/IPv6 统一比较）。"""
+        if not ip:
+            return ""
+        try:
+            return str(ipaddress.ip_address(ip.strip()))
+        except ValueError:
+            return ip.strip()
+
     def _create_session(
         self, *, device_id: str, client_ip: str | None, user_agent: str
     ) -> dict:
@@ -423,7 +434,7 @@ class AuthManager:
             "last_heartbeat_at": 0,
             "status": "active",
             "reason": "",
-            "bound_ip": client_ip or "",
+            "bound_ip": self._normalize_ip(client_ip),
             "ua_hash": _hash_user_agent(user_agent),
         }
         self._sessions[sid] = record
@@ -574,7 +585,11 @@ class AuthManager:
                 reason=AuthFailureReason.EXPIRED,
             )
 
-        if current_ip and payload.get("ip") and payload["ip"] != current_ip:
+        if (
+            current_ip
+            and payload.get("ip")
+            and payload["ip"] != self._normalize_ip(current_ip)
+        ):
             session["status"] = "revoked"
             session["reason"] = AuthFailureReason.IP_CHANGED
             session["revoked_at"] = now

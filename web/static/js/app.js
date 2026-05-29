@@ -54,6 +54,10 @@ const App = {
 
         this._updateConfigBadgeVisibility();
 
+        // 缩放按钮仅在流程图页面显示
+        const zoomCtrl = document.getElementById('zoom-ctrl');
+        if (zoomCtrl) zoomCtrl.classList.toggle('hidden', name !== 'tech-tree');
+
         // 按需初始化视图
         this._activateView(name);
     },
@@ -92,6 +96,7 @@ const App = {
                 this._renderFileBrowser();
                 break;
         }
+
     },
 
     /** 初始化主界面 */
@@ -158,8 +163,21 @@ const App = {
             themeBtn.textContent = savedTheme === 'light' ? '🌙 切换深色' : '☀️ 切换浅色';
         }
 
-        // 初始化默认视图
-        await this._activateView(this._currentView);
+        // 若上次是核心设置页保存并重启触发的刷新，恢复到之前的视图
+        let _restored = false;
+        try {
+            const restoreView = sessionStorage.getItem('gcp_restore_view');
+            if (restoreView) {
+                sessionStorage.removeItem('gcp_restore_view');
+                this.showView(restoreView);
+                _restored = true;
+            }
+        } catch (_e) {}
+
+        if (!_restored) {
+            // 无恢复标记：初始化默认视图
+            await this._activateView(this._currentView);
+        }
 
         // 全局点击：工具提示外部点击时关闭（移动端）
         document.addEventListener('click', (e) => {
@@ -276,6 +294,9 @@ const App = {
                     if (res) {
                         if (res.ok) {
                             Utils.toast(res.msg || '执行成功', 'success');
+                            if (mode === 'restart' || mode === 'reload') {
+                                App._pollRestartStatus(mode);
+                            }
                         } else {
                             Utils.toast(res.msg || '执行失败', 'error');
                         }
@@ -322,7 +343,10 @@ const App = {
         logSection.innerHTML = `
             <div class="log-section-header">
                 <h3>访问日志</h3>
-                <button class="btn btn-sm" id="btn-refresh-log">刷新</button>
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span class="log-refresh-hint">本页无自动刷新，有新日志产生时请手动点击刷新按钮获取最新信息</span>
+                    <button class="btn btn-sm" id="btn-refresh-log">刷新</button>
+                </div>
             </div>
             <div id="log-table-container"></div>
             <div id="log-pagination"></div>`;
@@ -368,7 +392,7 @@ const App = {
                         <span class="log-card-ip">${Utils.escapeHtml(ban.ip)}</span>
                         ${sourceBadge}
                     </div>
-                    <div class="log-card-row"><strong>原因</strong><span>${Utils.escapeHtml(ban.reason || '')}</span></div>
+                    <div class="log-card-row"><strong>原因</strong><span style="word-break:break-word;">${Utils.escapeHtml(ban.reason || '')}</span></div>
                     <div class="log-card-row"><strong>封禁时间</strong><span>${Utils.formatTime(ban.banned_at)}</span></div>
                     <div class="log-card-row"><strong>剩余时间</strong><span>${remaining}</span></div>
                     <div class="log-card-actions">
@@ -391,16 +415,16 @@ const App = {
                     ? '永久' : Utils.formatDuration(ban.remaining_seconds);
                 const isSpider = ban.reason && ban.reason.startsWith('[防爬虫]');
                 const sourceBadge = isSpider
-                    ? '<span style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:1px 5px;">🕷️ 自动</span>'
-                    : '<span style="font-size:11px;background:var(--glass-bg-hover);color:var(--text-secondary);border:1px solid var(--glass-border);border-radius:3px;padding:1px 5px;">👤 手动</span>';
+                    ? '<span style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:1px 5px;white-space:nowrap;">🕷️ 自动</span>'
+                    : '<span style="font-size:11px;background:var(--glass-bg-hover);color:var(--text-secondary);border:1px solid var(--glass-border);border-radius:3px;padding:1px 5px;white-space:nowrap;">👤 手动</span>';
                 const displayReason = Utils.escapeHtml(ban.reason || '');
                 tr.innerHTML = `
-                    <td style="font-family:monospace;">${Utils.escapeHtml(ban.ip)}</td>
-                    <td>${sourceBadge}</td>
-                    <td><span title="${displayReason}" style="display:block;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${displayReason}</span></td>
-                    <td>${Utils.formatTime(ban.banned_at)}</td>
-                    <td>${remaining}</td>
-                    <td>
+                    <td style="font-family:monospace;white-space:nowrap;">${Utils.escapeHtml(ban.ip)}</td>
+                    <td style="white-space:nowrap;">${sourceBadge}</td>
+                    <td><span title="${displayReason}" style="display:block;word-break:break-word;line-height:1.5;">${displayReason}</span></td>
+                    <td style="white-space:nowrap;">${Utils.formatTime(ban.banned_at)}</td>
+                    <td style="white-space:nowrap;">${remaining}</td>
+                    <td style="white-space:nowrap;">
                         <button class="btn btn-sm" data-edit-ban="${Utils.escapeHtml(ban.ip)}">编辑备注</button>
                         <button class="btn btn-sm" data-unban="${Utils.escapeHtml(ban.ip)}">解封</button>
                     </td>`;
@@ -430,7 +454,7 @@ const App = {
                 const ip = btn.dataset.editBan;
                 const ban = bans.find(b => b.ip === ip);
                 const currentReason = ban ? (ban.reason || '') : '';
-                const newReason = await Utils.prompt(`编辑 ${ip} 的封禁备注`, currentReason);
+                const newReason = await Utils.prompt(`编辑 ${ip} 的封禁备注`, currentReason, 128);
                 if (newReason === null) return;
                 const res = await Api.updateBanNote(ip, newReason);
                 if (res.ok) {
@@ -522,7 +546,7 @@ const App = {
                         noteHtml = `<span class="log-note-spider" data-tooltip="${safeNote}"
                             style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);
                             border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:2px 6px;
-                            white-space:nowrap;display:inline-block;">
+                            white-space:nowrap;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;">
                             🕷️ ${displayText}
                         </span>`;
                     } else if (log.note.includes('登录失败')) {
@@ -678,8 +702,10 @@ const App = {
             <div class="confirm-box" style="width:360px;">
                 <h3 style="margin-bottom:12px;">封禁 IP</h3>
                 <div style="display:flex;flex-direction:column;gap:8px;">
-                    <input type="text" id="ban-ip-input" placeholder="IP 地址" value="${Utils.escapeHtml(ip)}">
-                    <input type="text" id="ban-reason-input" placeholder="封禁原因（可选）" value="${Utils.escapeHtml(initialReason)}">
+                    <input type="text" id="ban-ip-input" placeholder="IPv4 / IPv6 地址" value="${Utils.escapeHtml(ip)}">
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:-4px;">支持 IPv4（如 192.168.1.100）和 IPv6（如 2001:db8::1）</div>
+                    <input type="text" id="ban-reason-input" placeholder="封禁原因（可选）" maxlength="128" value="${Utils.escapeHtml(initialReason)}">
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:-2px;">最多 128 个字符</div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label style="white-space:nowrap;font-size:13px;">封禁时长</label>
                         <select id="ban-duration-select" style="flex:1;">
@@ -796,7 +822,17 @@ const App = {
         const heartbeatSection = document.createElement('div');
         heartbeatSection.className = 'settings-section';
         heartbeatSection.innerHTML = `
-            <h3>💓 会话心跳状态</h3>
+            <div class="settings-section-header">
+                <h3>💓 会话心跳状态</h3>
+                <div class="settings-section-header-right">
+                    <button id="btn-refresh-heartbeat" class="btn btn-sm" title="手动刷新心跳状态">🔄 刷新</button>
+                    <label class="auto-refresh-toggle">
+                        <span class="dot active" id="heartbeat-refresh-dot"></span>
+                        <input type="checkbox" checked id="heartbeat-auto-refresh">
+                        <span>自动刷新</span>
+                    </label>
+                </div>
+            </div>
             <div id="heartbeat-status-loading" class="chart-empty" style="padding:12px;">加载中...</div>
             <div id="heartbeat-status-content" class="hidden" style="display:flex;flex-direction:column;gap:8px;"></div>`;
         container.appendChild(heartbeatSection);
@@ -915,18 +951,23 @@ const App = {
                     <div id="ip-list-section">
                         <label style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">
                             <span id="ip-list-label">IP 名单</span>
-                            <span style="font-weight:normal;color:var(--text-secondary);">（每行一个 IP 地址）</span>
+                            <span style="font-weight:normal;color:var(--text-secondary);">（每行一个，支持 IPv4 / IPv6）</span>
                         </label>
-                        <textarea id="ip-list-textarea" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="每行一个 IP 地址"></textarea>
+                        <textarea id="ip-list-textarea" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="每行一个 IP 地址&#10;例如：192.168.1.100&#10;　　　2001:db8::1"></textarea>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.6;">
+                            📌 仅支持<strong>单个 IP 精确匹配</strong>，不支持 CIDR 网段（如 192.168.0.0/16）、IP 段或域名。<br>
+                            📌 <code>0.0.0.0</code> 和 <code>::</code> 为未指定地址，<strong>不会匹配任何实际客户端 IP</strong>：白名单模式下将导致全员无法访问，黑名单模式下无实际拦截效果。<br>
+                            📌 IPv6 地址支持任意格式（压缩/半压缩/完整展开），系统会自动统一规范化为标准形式进行匹配。
+                        </div>
                     </div>
                     <div>
                         <label style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">
-                            受保护 IP
+                            受保护 IP（永不封禁）
                             <span style="font-weight:normal;color:var(--text-muted);"> （只读，仅可通过 AstrBot 传统配置修改）</span>
                         </label>
                         <div id="protected-ips-display" style="font-family:monospace;font-size:13px;padding:8px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:var(--radius-sm);min-height:48px;color:var(--text-secondary);white-space:pre-wrap;"></div>
                         <div style="font-size:11px;color:var(--accent-red);margin-top:4px;">
-                            ⚠️ 受保护 IP 是底线安全配置（最高优先级，不受任何机制影响），防止 Web 面板被攻破后攻击者篡改。
+                            ⚠️ 受保护 IP 是底线安全配置（最高优先级，不受封禁/黑白名单/防爬虫/暴力破解等任何机制影响）。支持 IPv4 和 IPv6 地址。
                             如需修改，请在 AstrBot 插件配置页修改 <code>web_panel_protected_ips</code>。
                         </div>
                     </div>
@@ -991,19 +1032,22 @@ const App = {
 
                 // 配置写入成功，触发插件重载（保持登录态）
                 saveIpBtn.textContent = '重启中...';
-                statusEl.textContent = '正在重启插件...';
+                saveIpBtn.disabled = true;
+                statusEl.textContent = '正在重启插件，完成后将自动刷新...';
+                statusEl.style.color = 'var(--accent)';
                 const reloadRes = await Api.reloadPlugin();
-                saveIpBtn.disabled = false;
-                saveIpBtn.textContent = '保存并重启插件';
-                if (reloadRes && reloadRes.ok) {
-                    Utils.toast('IP 配置已保存，插件正在重启，请稍后刷新页面...', 'success');
-                    statusEl.textContent = '重启中...';
-                    statusEl.style.color = 'var(--accent)';
-                } else {
-                    Utils.toast('配置已保存，但触发重启失败，请手动重启插件', 'warning');
-                    statusEl.textContent = '请手动重启';
-                    statusEl.style.color = 'var(--accent-orange)';
+                // 无论服务器返回什么（包括网络错误），都尝试等待服务器恢复后自动刷新。
+                // 若服务器未真正重启，轮询会立刻成功并刷新页面，结果等价。
+                if (reloadRes && !reloadRes.ok && !reloadRes.network_error) {
+                    // 服务器返回了明确的业务错误（非网络问题），说明配置有问题
+                    saveIpBtn.disabled = false;
+                    saveIpBtn.textContent = '保存并重启插件';
+                    statusEl.textContent = '重启失败';
+                    statusEl.style.color = 'var(--danger)';
+                    Utils.toast(reloadRes.msg || '重启失败，请检查配置', 'error');
+                    return;
                 }
+                this._waitForServerAndRefresh();
             });
         }
 
@@ -1040,14 +1084,14 @@ const App = {
         infoSection.innerHTML = `
             <h3>安全配置说明</h3>
             <p style="font-size:13px;color:var(--text-secondary);line-height:1.8;">
-                <strong>IP 访问控制（黑白名单）</strong>修改后需点击「保存并重启插件」，重启完成后生效，与传统配置项行为一致。<br>
+                <strong>IP 访问控制（黑白名单）</strong>修改后需点击「保存并重启插件」，重启完成后生效，与传统配置项行为一致。所有 IP 名单均支持 IPv4 和 IPv6 地址，仅做精确地址匹配（不支持 CIDR 网段/子网）。<br>
                 <br>
                 - <strong>关闭模式</strong>：不做 IP 过滤，任何 IP 均可访问<br>
                 - <strong>白名单模式</strong>：仅名单中的 IP 可访问面板（白名单 IP 直接放行，不受封禁影响）<br>
                 - <strong>黑名单模式</strong>：名单中的 IP 被阻止访问（未在黑名单内的 IP 仍受封禁检查约束）<br>
-                - <strong>受保护 IP</strong>：优先级最高，永远放行，不受任何机制影响。<strong>只能通过 AstrBot 传统配置修改</strong>，防止面板被攻破后遭篡改<br>
+                - <strong>受保护 IP</strong>：优先级最高，永远放行，不受任何机制影响。支持 IPv4 / IPv6。<strong>只能通过 AstrBot 传统配置修改</strong>，防止面板被攻破后遭篡改<br>
                 <br>
-                <strong>总开关 / 端口 / 监听地址 / 密码重置 / 信任代理 / IP 绑定 / 心跳频率</strong>：这些配置出于安全考虑只能通过 AstrBot 插件配置页修改，上方「安全敏感配置」区展示了其当前值供参考。<br>
+                <strong>总开关 / 端口 / 监听地址 / 密码重置 / 信任代理 / IP 绑定 / 心跳频率</strong>：这些配置出于安全考虑只能通过 AstrBot 插件配置页修改，上方「安全敏感配置」区展示了其当前值供参考。监听地址设为 <code>0.0.0.0</code> 或 <code>::</code> 时自动启用双栈（同时监听 IPv4 + IPv6）。<br>
                 <br>
                 <strong>日志清理 / 防爬虫 / 已登录请求限速</strong>：在「Web 面板运行配置」区可直接修改，修改后需保存并重启插件。
             </p>`;
@@ -1228,17 +1272,17 @@ const App = {
                     saveBtn.disabled = false;
                     return;
                 }
-                statusEl.textContent = '已保存，正在重启...';
+                statusEl.textContent = '正在重启，完成后将自动刷新...';
+                statusEl.style.color = 'var(--accent)';
                 const reloadRes = await Api.reloadPlugin();
-                if (reloadRes && reloadRes.ok) {
-                    Utils.toast('桌面端模式已更新，插件正在重启...', 'success');
-                    statusEl.textContent = '重启中...';
-                    statusEl.style.color = 'var(--accent)';
-                } else {
-                    Utils.toast('配置已保存，但触发重启失败，请手动重启', 'warning');
-                    statusEl.textContent = '请手动重启';
+                if (reloadRes && !reloadRes.ok && !reloadRes.network_error) {
                     saveBtn.disabled = false;
+                    statusEl.textContent = '重启失败';
+                    statusEl.style.color = 'var(--danger)';
+                    Utils.toast(reloadRes.msg || '重启失败，请检查配置', 'error');
+                    return;
                 }
+                this._waitForServerAndRefresh();
             });
         }
     },
@@ -1379,22 +1423,23 @@ const App = {
             const saveBtn = document.getElementById('btn-save-webcfg');
             const statusEl = document.getElementById('webcfg-status');
             saveBtn.disabled = true;
-            saveBtn.textContent = '保存中...';
-            statusEl.textContent = '';
+            saveBtn.textContent = '重启中...';
+            statusEl.textContent = '正在重启，完成后将自动刷新...';
+            statusEl.style.color = 'var(--accent)';
 
             const res = await Api.reloadPlugin(pending);
-            saveBtn.disabled = false;
-            saveBtn.textContent = '保存并重启插件';
-
-            if (res.ok) {
-                Utils.toast('已保存，插件重启成功', 'success');
-                statusEl.textContent = '已保存';
-                Object.assign(cfg, pending);
-                Object.keys(pending).forEach(k => delete pending[k]);
-            } else {
-                Utils.toast(res.msg || '保存失败', 'error');
-                statusEl.textContent = '保存失败';
+            if (res && !res.ok && !res.network_error) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = '保存并重启插件';
+                statusEl.textContent = '重启失败';
+                statusEl.style.color = 'var(--danger)';
+                Utils.toast(res.msg || '重启失败', 'error');
+                return;
             }
+            // 无论成功或网络错误，等待服务器恢复后自动刷新
+            Object.assign(cfg, pending);
+            Object.keys(pending).forEach(k => delete pending[k]);
+            this._waitForServerAndRefresh();
         });
     },
 
@@ -1449,6 +1494,9 @@ const App = {
         const listPanel = document.createElement('div');
         listPanel.className = 'file-list-panel';
         listPanel.innerHTML = `
+            <div class="file-refresh-notice">
+                ⚠️ 文件数据可能已被外部更新，请及时点击右侧"刷新"按钮获取最新文件列表和内容。本页面不提供自动刷新功能。
+            </div>
             <div class="file-list-header">
                 <h3 style="margin:0;font-size:14px;">数据文件</h3>
                 <button class="btn btn-sm" id="btn-refresh-files">刷新</button>
@@ -1474,7 +1522,7 @@ const App = {
         container.appendChild(editorPanel);
 
         // 事件绑定
-        document.getElementById('btn-refresh-files').addEventListener('click', () => this._loadFileList());
+        document.getElementById('btn-refresh-files').addEventListener('click', () => this._refreshFileBrowser());
         document.getElementById('btn-save-file').addEventListener('click', () => this._saveCurrentFile());
         document.getElementById('btn-delete-file').addEventListener('click', () => this._deleteCurrentFile());
 
@@ -1550,6 +1598,25 @@ const App = {
             dirEl.appendChild(filesList);
             tree.appendChild(dirEl);
         });
+    },
+
+    /** 刷新文件浏览器：刷新文件列表 + 重新读取当前打开的文件 */
+    async _refreshFileBrowser() {
+        // 如果有未保存的修改，先确认
+        if (this._fileEditorDirty) {
+            const ok = await Utils.confirm('当前文件有未保存的修改，刷新将丢失修改，是否继续？');
+            if (!ok) return;
+        }
+
+        await this._loadFileList();
+
+        // 如果有当前打开的文件，重新读取内容
+        if (this._currentFilePath && this._currentFileMeta) {
+            this._fileEditorDirty = false;
+            await this._openFile(this._currentFileMeta);
+        }
+
+        Utils.toast('文件列表已刷新', 'success', 2000);
     },
 
     /** 打开文件 */
@@ -1713,6 +1780,75 @@ const App = {
             section.style.opacity = '1';
             label.textContent = '黑名单 IP';
         }
+    },
+
+    /** 等待服务器重启完成后刷新当前页面（回到当前所在视图）。
+     *  每 intervalMs 毫秒探测一次服务器是否恢复，恢复后自动 reload。
+     *  探测使用 /api/auth/status（公开路由，不触发防爬虫速率限制）。
+     *  最长等待 maxWaitMs 毫秒，超时后提示手动刷新。 */
+    async _waitForServerAndRefresh(maxWaitMs = 35000, intervalMs = 3000) {
+        const startedAt = Date.now();
+        // 记住当前所在视图，刷新后恢复（而不是回到默认的流程图页）
+        try { sessionStorage.setItem('gcp_restore_view', this._currentView); } catch (_e) {}
+        // 先等一小段时间让旧服务器完全停止
+        await new Promise(r => setTimeout(r, 1500));
+
+        const poll = async () => {
+            if (Date.now() - startedAt >= maxWaitMs) {
+                try { sessionStorage.removeItem('gcp_restore_view'); } catch (_e) {}
+                Utils.toast('插件重启耗时较长，请手动刷新页面（F5）确认最新配置已生效', 'warning', 8000);
+                return;
+            }
+            try {
+                const resp = await fetch('/api/auth/status', { method: 'GET', cache: 'no-store' });
+                if (resp.ok) {
+                    // 服务器已恢复，保留 restore_view 标记供初始化时使用，然后刷新
+                    Utils.toast('插件已重启，正在刷新页面...', 'success', 2000);
+                    setTimeout(() => { window.location.reload(); }, 800);
+                    return;
+                }
+            } catch (_e) {
+                // 网络错误 = 服务器尚未恢复，继续轮询
+            }
+            setTimeout(poll, intervalMs);
+        };
+        poll();
+    },
+
+    /** 轮询重启/重载状态，在右上角弹出结果提示。 */
+    async _pollRestartStatus(operation, maxWaitMs = 30000, intervalMs = 2500) {
+        const startedAt = Date.now();
+        const label = operation === 'restart' ? 'AstrBot 重启' : '插件重载';
+
+        return new Promise((resolve) => {
+            const poll = async () => {
+                if (Date.now() - startedAt >= maxWaitMs) {
+                    Utils.toast(`${label}操作超时，请检查服务器日志`, 'warning', 5000);
+                    resolve('timeout');
+                    return;
+                }
+                try {
+                    const res = await Api.restartStatus();
+                    if (res && res.ok && res.status) {
+                        if (res.status === 'success') {
+                            Utils.toast(`${label}成功`, 'success', 4000);
+                            resolve('success');
+                            return;
+                        }
+                        if (res.status === 'failed') {
+                            const errMsg = res.error || '未知错误';
+                            Utils.toast(`${label}失败: ${errMsg}`, 'error', 6000);
+                            resolve('failed');
+                            return;
+                        }
+                    }
+                } catch (_e) {
+                    // 连接断开在重启过程中是正常现象，继续轮询
+                }
+                setTimeout(poll, intervalMs);
+            };
+            setTimeout(poll, 1500);
+        });
     },
 
     _ensureConfigBadge() {
@@ -1889,7 +2025,7 @@ const App = {
 
     _normalizeHeartbeatSeconds(value, fallback, minValue) {
         const num = Number(value);
-        if (!Number.isFinite(num) || num < minValue) return fallback;
+        if (!Number.isFinite(num) || num < minValue) return fallback * 1000;
         return Math.round(num) * 1000;
     },
 
@@ -1942,14 +2078,16 @@ const App = {
         return rows.join('');
     },
 
-    async _loadHeartbeatStatus() {
+    async _loadHeartbeatStatus(isAutoRefresh = false) {
         const loading = document.getElementById('heartbeat-status-loading');
         const content = document.getElementById('heartbeat-status-content');
         if (!loading || !content) return;
 
-        const verify = await Api.verify();
+        const isFirstLoad = content.classList.contains('hidden');
+
+        const verify = await Api.verify(isAutoRefresh ? { autoRefresh: true } : undefined);
         if (!verify.ok) {
-            loading.textContent = '加载失败';
+            if (isFirstLoad) loading.textContent = '加载失败';
             return;
         }
 
@@ -1957,10 +2095,34 @@ const App = {
         const cfg = cfgRes && cfgRes.ok ? (cfgRes.config || {}) : {};
         const heartbeatCfg = this._buildHeartbeatConfig(cfg);
 
-        loading.classList.add('hidden');
-        content.classList.remove('hidden');
-        content.style.display = 'flex';
+        // verify 本身就是一次会话有效性确认，成功后同步更新心跳成功时间
+        if (verify.ok && this._authMonitor) {
+            this._authMonitor.lastHeartbeatSuccessAt = Date.now();
+            this._authMonitor.lastHeartbeatStatus = 'ok';
+        }
 
+        if (isFirstLoad) loading.classList.add('hidden');
+
+        // 首次渲染：构建完整 DOM
+        if (isFirstLoad) {
+            content.classList.remove('hidden');
+            content.style.display = 'flex';
+            this._buildHeartbeatDOM(content, verify, heartbeatCfg);
+            // 启动自动刷新
+            this._startHeartbeatAutoRefresh(heartbeatCfg);
+            // 绑定控件事件
+            this._bindHeartbeatControls(heartbeatCfg);
+        } else {
+            // 增量更新：仅修改变化的 DOM 值
+            this._updateHeartbeatDOM(content, verify, heartbeatCfg);
+        }
+
+        // 保存上一次数据用于下次对比
+        this._heartbeatPrevData = { verify, heartbeatCfg };
+    },
+
+    /** 构建心跳状态 DOM（首次渲染） */
+    _buildHeartbeatDOM(content, verify, heartbeatCfg) {
         const statusBadgeMap = {
             idle: '<span class="heartbeat-status-badge heartbeat-status-badge--idle">idle（尚未开始）</span>',
             ok: '<span class="heartbeat-status-badge heartbeat-status-badge--ok">ok（正常）</span>',
@@ -1970,24 +2132,123 @@ const App = {
         };
 
         const rows = [
-            ['当前会话 ID', verify.session_id || '—'],
-            ['当前设备 ID', verify.device_id || '—'],
-            ['前台心跳间隔', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`],
-            ['后台心跳间隔', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`],
-            ['失败重试基准', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`],
-            ['失败重试上限', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`],
-            ['当前标签页角色', this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>'],
-            ['当前心跳状态', statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle],
-            ['最近一次心跳成功', this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功'],
-            ['缓冲重试期', (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>'],
-            ['会话剩余时间', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—'],
+            ['当前会话 ID', verify.session_id || '—', 'hb-sid'],
+            ['当前设备 ID', verify.device_id || '—', 'hb-did'],
+            ['前台心跳间隔', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`, 'hb-vis-int'],
+            ['后台心跳间隔', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`, 'hb-hid-int'],
+            ['失败重试基准', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`, 'hb-retry-base'],
+            ['失败重试上限', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`, 'hb-retry-max'],
+            ['当前标签页角色', this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>', 'hb-role'],
+            ['当前心跳状态', statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle, 'hb-status'],
+            ['最近一次心跳成功', this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功', 'hb-last-ok'],
+            ['缓冲重试期', (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>', 'hb-retry'],
+            ['会话剩余时间', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—', 'hb-ttl'],
         ];
 
-        content.innerHTML = rows.map(([label, value]) => `
-            <div class="config-field config-field-readonly" style="max-width:500px;">
+        content.innerHTML = rows.map(([label, value, id]) => `
+            <div class="config-field config-field-readonly" style="max-width:500px;" id="${id}">
                 <div class="config-field-label">${label}</div>
                 <div class="config-field-readonly-value heartbeat-status-value">${value}</div>
             </div>`).join('');
+    },
+
+    /** 增量更新心跳状态 DOM */
+    _updateHeartbeatDOM(content, verify, heartbeatCfg) {
+        const statusBadgeMap = {
+            idle: '<span class="heartbeat-status-badge heartbeat-status-badge--idle">idle（尚未开始）</span>',
+            ok: '<span class="heartbeat-status-badge heartbeat-status-badge--ok">ok（正常）</span>',
+            retrying: '<span class="heartbeat-status-badge heartbeat-status-badge--retrying">retrying（重试中）</span>',
+            invalid: '<span class="heartbeat-status-badge heartbeat-status-badge--invalid">invalid（会话失效）</span>',
+            stopped: '<span class="heartbeat-status-badge heartbeat-status-badge--stopped">stopped（已停止）</span>',
+        };
+
+        const leaderLabel = this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>';
+        const statusLabel = statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle;
+        const lastOk = this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功';
+        const retryLabel = (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>';
+
+        const updates = [
+            ['hb-sid', verify.session_id || '—'],
+            ['hb-did', verify.device_id || '—'],
+            ['hb-vis-int', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`],
+            ['hb-hid-int', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`],
+            ['hb-retry-base', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`],
+            ['hb-retry-max', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`],
+            ['hb-role', leaderLabel],
+            ['hb-status', statusLabel],
+            ['hb-last-ok', lastOk],
+            ['hb-retry', retryLabel],
+            ['hb-ttl', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—'],
+        ];
+
+        updates.forEach(([id, val]) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const valEl = el.querySelector('.heartbeat-status-value');
+            if (!valEl) return;
+            if (valEl.innerHTML !== val) {
+                valEl.innerHTML = val;
+                Utils.highlightChange(el);
+            }
+        });
+    },
+
+    /** 启动心跳状态自动刷新定时器（仅首次创建，之后只设标志位）。
+     *  定时器一旦创建永不停止——心跳计时必须与配置保持同步，
+     *  开关仅控制是否更新 DOM，不清除定时器以免节奏偏移。 */
+    _startHeartbeatAutoRefresh(heartbeatCfg) {
+        this._heartbeatAutoRefresh = true;
+        if (this._heartbeatRefreshTimer) return;
+        const intervalMs = Math.max(5000, Math.round(heartbeatCfg.visibleIntervalMs / 2));
+        const intervalSec = Math.round(intervalMs / 1000);
+        const labelSpan = document.querySelector('#heartbeat-auto-refresh + span');
+        if (labelSpan) labelSpan.textContent = `自动刷新（${intervalSec}秒）`;
+        this._heartbeatRefreshTimer = setInterval(() => {
+            // 每次循环确保标签显示最新间隔（防止 DOM 重建后丢失）
+            const span = document.querySelector('#heartbeat-auto-refresh + span');
+            if (span) span.textContent = `自动刷新（${intervalSec}秒）`;
+            if (this._currentView === 'settings' && this._heartbeatAutoRefresh) {
+                this._loadHeartbeatStatus(true);
+            }
+        }, intervalMs);
+    },
+
+    /** 关闭心跳状态自动刷新（仅设标志位，定时器不停） */
+    _stopHeartbeatAutoRefresh() {
+        this._heartbeatAutoRefresh = false;
+    },
+
+    /** 绑定心跳状态控件事件 */
+    _bindHeartbeatControls(heartbeatCfg) {
+        const manualBtn = document.getElementById('btn-refresh-heartbeat');
+        const autoToggle = document.getElementById('heartbeat-auto-refresh');
+        const dot = document.getElementById('heartbeat-refresh-dot');
+
+        if (manualBtn && !manualBtn._hbBound) {
+            manualBtn._hbBound = true;
+            manualBtn.addEventListener('click', async () => {
+                manualBtn.disabled = true;
+                manualBtn.textContent = '刷新中...';
+                try {
+                    await this._loadHeartbeatStatus();
+                    Utils.toast('心跳状态已刷新', 'success', 2000);
+                } catch (e) {
+                    Utils.toast('刷新失败', 'error', 3000);
+                } finally {
+                    manualBtn.disabled = false;
+                    manualBtn.textContent = '🔄 刷新';
+                }
+            });
+        }
+
+        if (autoToggle && !autoToggle._hbBound) {
+            autoToggle._hbBound = true;
+            autoToggle.addEventListener('change', (e) => {
+                // 定时器永不停止，仅切换标志位控制 DOM 是否更新
+                this._heartbeatAutoRefresh = e.target.checked;
+                if (dot) dot.className = 'dot' + (this._heartbeatAutoRefresh ? ' active' : '');
+            });
+        }
     },
 
     _redirectToLogin(reason, message, options = {}) {
@@ -2132,6 +2393,12 @@ const App = {
                 }
                 if (payload.type === 'logout') {
                     App._redirectToLogin('logout', '您已退出登录', { showAlert: false });
+                }
+                // Leader 心跳成功后同步状态到 Follower 标签页
+                if (payload.type === 'session-ok') {
+                    this.lastHeartbeatSuccessAt = Date.now();
+                    this.lastHeartbeatStatus = 'ok';
+                    this.consecutiveNetworkFailures = 0;
                 }
             },
             markAuthenticated() {

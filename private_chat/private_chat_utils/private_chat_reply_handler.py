@@ -3,7 +3,7 @@
 负责调用AI生成回复
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 
 v1.2.0 更新：
 - 改用 event.request_llm() 替代 provider.text_chat()，支持其他插件的钩子注入
@@ -143,6 +143,7 @@ class ReplyHandler:
         extra_prompt: str,
         prompt_mode: str = "append",
         image_urls: list = None,
+        audio_urls: list = None,
         include_sender_info: bool = True,
         include_timestamp: bool = True,
         history_messages: list = None,
@@ -166,9 +167,11 @@ class ReplyHandler:
         Returns:
             ProviderRequest对象
         """
-        # 如果image_urls为None，初始化为空列表
+        # 默认值初始化
         if image_urls is None:
             image_urls = []
+        if audio_urls is None:
+            audio_urls = []
         # 如果history_messages为None，初始化为空列表
         if history_messages is None:
             history_messages = []
@@ -524,6 +527,7 @@ class ReplyHandler:
                 tool_set=plugin_tool_set,
                 session_id=event.session_id,
                 image_urls=image_urls,
+                audio_urls=audio_urls,
                 contexts=contexts,
                 system_prompt=system_prompt,
             )

@@ -104,6 +104,11 @@
                 <div id="flow-breadcrumb" class="flow-breadcrumb hidden"></div>
                 <div id="tech-tree-wrapper">
                     <div id="tech-tree-canvas"></div>
+                    <div id="zoom-ctrl" class="zoom-ctrl hidden">
+                        <button class="zoom-ctrl-in" title="放大">+</button>
+                        <button class="zoom-ctrl-fit" title="适应屏幕">⊡</button>
+                        <button class="zoom-ctrl-out" title="缩小">−</button>
+                    </div>
                     <div id="config-panel" class="config-panel">
                         <div class="config-panel-header">
                             <h3 id="config-panel-title">配置项</h3>
@@ -118,13 +123,16 @@
             <div id="view-charts" class="view hidden">
                 <div class="view-header">
                     <h2>数据可视化</h2>
-                    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;min-width:0;">
+                    <div class="charts-header-right">
+                        <button id="btn-refresh-charts" class="btn btn-sm" title="手动刷新数据">🔄 刷新</button>
+                        <label class="auto-refresh-toggle">
+                            <span class="dot active" id="charts-refresh-dot"></span>
+                            <input type="checkbox" checked id="charts-auto-refresh">
+                            <span>自动刷新（3秒）</span>
+                        </label>
                         <select id="chart-session-select" class="select-sm">
                             <option value="">选择会话...</option>
                         </select>
-                        <div style="font-size:11px;color:var(--text-secondary);line-height:1.5;text-align:right;max-width:320px;">
-                            会话列表会合并插件自定义聊天记录与当前运行时状态；官方存储仍会同步写入，并在部分场景作为历史读取回退。
-                        </div>
                     </div>
                 </div>
                 <div id="charts-grid"></div>

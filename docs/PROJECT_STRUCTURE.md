@@ -60,7 +60,7 @@ astrbot_plugin_group_chat_plus/
 │   ├── reply_handler.py        # AI 回复生成
 │   ├── message_processor.py    # 消息元数据注入
 │   ├── context_manager.py      # 上下文管理器
-│   ├── image_handler.py        # 图片处理
+│   ├── image_handler.py        # 多媒体处理（图片/视频/语音/文件）
 │   ├── image_description_cache.py # 图片描述缓存
 │   ├── keyword_checker.py      # 关键词检测
 │   ├── message_cleaner.py      # 历史消息清洗
@@ -111,7 +111,9 @@ astrbot_plugin_group_chat_plus/
   - `on_group_message()` — 群聊消息入口，执行 Phase 1-3
   - `_process_message()` — 消息主处理管线，执行 Phase 4-9
   - `on_llm_request()` — LLM 请求钩子（优先级 -1），负责上下文注入、system_prompt 兼容重写、第三方长期提示词吸收与历史处理
-  - `after_message_sent()` — 消息发送后的统计和状态更新
+  - `on_llm_response()` — LLM 响应钩子（优先级 -1），设置 Agent 完成标志（`_agent_done_flags`），在 Agent 无最终文本时触发兜底保存
+  - `on_decorating_result()` — 结果装饰钩子，负责多轮工具调用中累积 AI 中间回复文本（`_pending_bot_replies`）、内容过滤、重复检测
+  - `after_message_sent()` — 消息发送后处理，合并累积的中间文本与工具调用记录（`_build_interleaved_tool_reply()`），保存到双轨存储；异常终止时通过异常检测（AI 错误标记 / 非 LLM 终端响应）强制保存
 - **主动对话** — 定时任务，独立于消息流程运行
 - **Web 面板启动** — 初始化 Web 服务器
 
@@ -143,7 +145,7 @@ astrbot_plugin_group_chat_plus/
 Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 
 - **路由注册** — 登录页、面板页、API 端点、静态资源
-- **中间件链** — 路径遍历防护 → IP 访问控制 → 防爬虫检测 → JWT 认证 → 安全头注入
+- **中间件链** — 路径遍历防护 → 登录页公开静态资源 → robots.txt → IP 访问控制（在被封 IP 级阻断，非 API 请求重定向至 `/error?code=blocked` 统一渲染，`/error` 路径放行避循环；IP 检查前置于面板静态资源和所有受保护路由）→ 面板静态资源 JWT 验证 → 内部静态资源封锁 → 防爬虫检测 → JWT 认证 → 安全头注入
 - **安全响应头** — X-Content-Type-Options / X-Frame-Options / X-XSS-Protection / Referrer-Policy / Permissions-Policy 等
 - **Content-Security-Policy** — 基于 nonce 的严格 CSP（script-src 使用 nonce 替代 unsafe-inline，防止 XSS 注入）
 - **敏感文件保护** — Web 文件管理 API 对 `auth.json`、`jwt_secret.json`、`sessions.json`、`access_log*`、`bans.json` 实施访问控制（返回 403）
@@ -169,7 +171,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 ### security.py — 安全管理器
 
 - **暴力破解防护** — 分级锁定（5/10/15/20 次失败 → 30/60/300/600 秒锁定）
-- **防爬虫检测** — User-Agent 匹配、请求频率限制、扫描路径模式识别
+- **防爬虫检测** — User-Agent 匹配、请求频率限制（已登录/未登录双档独立阈值）、扫描路径模式识别。自动刷新和心跳请求不计入速率滑动窗口，手动刷新和用户操作正常受速率约束
 - **IP 封禁** — 手动封禁 + 自动封禁，封禁持久化（`bans.json`），重启恢复
 - **访问日志** — 记录所有请求，支持按类型/IP/时间筛选
 
@@ -179,7 +181,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 |------|------|
 | `login.html` | 登录页面，公开访问，独立于面板代码 |
 | `panel.html` | 管理面板主页面，需 JWT 认证。加载各 JS 模块 |
-| `error.html` | 统一错误页面，通过 URL 参数 `code` 区分类型（`blocked`/`403`/`404`） |
+| `error.html` | 统一错误页面，服务端注入 code 占位符（`blocked`/`403`/`404`），blocked 状态不展示封禁原因/时长/触发机制，仅显示通用提示并自动轮询解封 |
 
 ### static/css/ — 样式文件
 
@@ -197,14 +199,14 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 |------|------|
 | `api.js` | HTTP 客户端封装，自动携带 Bearer Token，统一错误处理 |
 | `auth.js` | 前端认证逻辑，Token 存取 |
-| `app.js` | 面板应用入口，初始化各模块，不含登录逻辑（登录在独立页面） |
-| `charts.js` | 基于 Canvas 的实时统计图表（消息量、回复率、群活跃度） |
+| `app.js` | 面板应用入口，初始化各模块，管理视图切换。包含文件管理（手动刷新+提示）、核心设置（心跳状态自动/手动刷新）、访问日志（含无自动刷新提示与 tooltip 展示）、IP 封禁管理（含备注长度限制与换行显示）等功能 |
+| `charts.js` | 基于 Canvas 的实时统计图表（概览、注意力、概率、情绪、主动对话），支持 3 秒自动刷新和手动刷新（按钮始终可见，带 toast 反馈）。无会话时只刷新全局概览 |
 | `config-editor.js` | 配置可视化编辑器，根据 JSON Schema 动态生成表单 |
 | `flow-data.js` | 消息处理流程的可视化数据定义 |
 | `prompt-data.js` | 系统提示词模板的预置数据（读空气AI / 回复AI / 主动对话AI / 主动对话判断AI） |
-| `session-mgr.js` | 会话管理界面 |
-| `tech-tree.js` | 技术树/功能关联图谱的渲染逻辑 |
-| `utils.js` | 通用工具函数（格式化、DOM 操作等） |
+| `session-mgr.js` | 会话管理界面（会话列表和详情页均支持 3 秒自动刷新和手动刷新，带 toast 反馈）。列表页进入详情时暂停轮询，返回时恢复。聊天记录使用增量更新保持滚动位置，编辑模式下暂停自动刷新 |
+| `tech-tree.js` | 技术树/功能关联图谱的渲染逻辑，包含系统提示词悬浮窗（拖拽/缩放/视口约束/移动端触摸）、右下角缩放控件（放大/缩小/适应屏幕按钮、Ctrl+滚轮缩放、双指捏合缩放）、智能搜索、面包屑导航、SVG+DOM 混合渲染、粒子动画 |
+| `utils.js` | 通用工具函数（格式化、DOM 操作、Toast/Confirm/Prompt 弹窗，Prompt 支持 maxLength 字数限制与实时计数） |
 
 ---
 
@@ -225,10 +227,10 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 
 | 文件 | 类 | 说明 |
 |------|-----|------|
-| `message_processor.py` | `MessageProcessor` | 为消息注入元数据（时间戳、发送者信息），并对原始 At 标签做内联解析增强（如 `[At:ID|解析结果]`）；旧版 `【@指向说明】` 仍保留为单次高层提醒 |
-| `context_manager.py` | `ContextManager` | 管理自定义消息存储 + 同步平台官方历史记录。处理历史截止时间戳 |
-| `message_cleaner.py` | `MessageCleaner` | 清洗历史消息，过滤系统提示词和标记；提取原始消息链中的 At / AtAll 结构，并提供空@消息双模式判定（`contains_ai` / `only_ai`） |
-| `image_handler.py` | `ImageHandler` | 调用图片转文字 API，提取图片 URL，处理多图 |
+| `message_processor.py` | `MessageProcessor` | 为消息注入元数据（时间戳、发送者信息、`[戳一戳事件]` 持久化文本、系统提示词等），统一拼接在冒号 `:` 之前作为系统元数据区；冒号之后为用户消息内容（含 @ 内联解析 `[At:ID\|解析结果]`）。`[戳一戳提示]` **不由此模块注入**，而是由主流程在上下文拼接阶段追加到分隔符之外 |
+| `context_manager.py` | `ContextManager` | 管理自定义消息存储 + 同步平台官方历史记录。处理历史截止时间戳。`format_context_for_ai` 负责拼接完整上下文，支持将 `[戳一戳提示]` 追加在分隔符 `=====` 之外 |
+| `message_cleaner.py` | `MessageCleaner` | 清洗历史消息中的运行时内容（分隔线、`[戳一戳提示]`、背景信息块等）；提取原始消息链中的 At / AtAll / Image / Video / Record / File / Reply 结构并生成文本标记。引用消息格式为 `[引用 >>> 发送者(ID): 消息内容]`，使用 `>>>` 明确分隔引用标记与内容。若被引用消息发送者为 AI 自身，标注 `(你)`；内容无法提取时标注 `(无法获取引用内容)`。提供空@消息双模式判定（`contains_ai` / `only_ai`） |
+| `image_handler.py` | `ImageHandler` | 多媒体文件处理核心：图片（转文字/多模态直传）、视频/语音/文件路径提取与内联标记注入、媒体标记占位符生成、缓存剥离前的标记富化。引用组件解析同 `message_cleaner.py` 的 `>>>` 格式 |
 | `image_description_cache.py` | `ImageDescriptionCache` | 本地缓存图片描述结果，避免重复 API 调用；当前主缓存文件为 `image_cache/descriptions.jsonl` |
 | `forward_message_parser.py` | `ForwardMessageParser` | 群聊与私聊共用的公共转发解析内核，面向 QQ / OneBot 合并转发，支持在深度限制内展开嵌套转发，并将结果折叠为单条可读文本继续下传 |
 | `welcome_message_parser.py` | `WelcomeMessageParser` | 检测新成员入群消息 |

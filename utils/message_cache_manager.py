@@ -3,9 +3,10 @@
 负责统一管理待决策消息的缓存、读取、合并和转正保存
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
+import re
 import time
 from typing import List, Dict, Optional, Set, Tuple
 from astrbot.api.event import AstrMessageEvent
@@ -100,6 +101,34 @@ class MessageCacheManager:
         Returns:
             缓存后的总条数
         """
+        # 防御性校验：拒绝无效的 chat_id，防止幽灵会话产生
+        if not chat_id or not isinstance(chat_id, str) or not chat_id.strip():
+            logger.warning(
+                f"[缓存管理器] 拒绝无效的 chat_id={chat_id!r} (来源: {source})，"
+                f"跳过缓存以避免幽灵会话"
+            )
+            return 0
+
+        # 🆕 进入缓存前统一剥离无信息图片标记和原始数据：
+        #   [图片]             → 剥离（纯占位符，缓存后文件不可用，无上下文价值）
+        #   [图片（识别失败）]   → 剥离（转换失败降级标记，同理）
+        #   image_urls          → 清空（缓存中图片文件路径不可用）
+        #   [图片内容: xxx]     → 保留（已成功解析为文字描述，AI 可读）
+        # 视频/语音/文件标记及路径保留（路径内联在标记中，有上下文提示价值）
+        # 复制一份避免修改调用方的原始 dict（该 dict 可能被用于当前消息保存）
+        message_data = dict(message_data)
+        _content = message_data.get("content", "") or ""
+        if _content:
+            _content = _content.replace("[图片（识别失败）]", "")
+            _content = re.sub(r"\[图片\]", "", _content).strip()
+            message_data["content"] = _content
+        message_data["image_urls"] = []
+
+        # 剥离后如果是空消息，直接跳过不缓存
+        if not message_data.get("content", ""):
+            logger.info(f"[缓存管理器] 消息剥离后为空，跳过缓存 (来源: {source})")
+            return 0
+
         # 初始化缓存
         if chat_id not in self.pending_messages_cache:
             self.pending_messages_cache[chat_id] = []
@@ -513,14 +542,13 @@ class MessageCacheManager:
                     cached_msg.get("is_empty_at", False),
                     "",
                     cached_msg.get("is_at_all_message", False),
+                    persistent_poke_event_text=cached_msg.get(
+                        "persistent_poke_event_text", ""
+                    ),
                 )
 
                 # 清理系统提示
                 msg_content = MessageCleaner.clean_message(msg_content)
-                msg_content = _append_persistent_poke_event_text(
-                    msg_content,
-                    cached_msg.get("persistent_poke_event_text", ""),
-                )
 
                 # 保存图片URL
                 cached_image_urls = cached_msg.get("image_urls", [])
@@ -815,14 +843,13 @@ class MessageCacheManager:
                 cached_msg.get("is_empty_at", False),
                 "",
                 cached_msg.get("is_at_all_message", False),
+                persistent_poke_event_text=cached_msg.get(
+                    "persistent_poke_event_text", ""
+                ),
             )
 
             # 清理系统提示
             msg_content = MessageCleaner.clean_message(msg_content)
-            msg_content = _append_persistent_poke_event_text(
-                msg_content,
-                cached_msg.get("persistent_poke_event_text", ""),
-            )
 
             # 保存图片URL
             cached_image_urls = cached_msg.get("image_urls", [])

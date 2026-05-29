@@ -205,7 +205,7 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
     document.getElementById('err-desc').textContent = desc;
 
     // 安全展示 reason（纯文本，无 innerHTML）
-    if (reason) {
+    if (reason && code !== 'blocked') {
         var reasonBox = document.getElementById('err-reason-box');
         var reasonEl = document.getElementById('err-reason');
         reasonEl.textContent = reason;

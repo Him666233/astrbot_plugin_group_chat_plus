@@ -1,5 +1,170 @@
 ## 📝 更新日志
 
+### V1.2.3.hotfix.2 (2026-05-29)
+
+**AI 提示词注入顺序全面优化（缓存命中占比大幅提升）+ 逐插件上下文追踪全面升级（全字段覆盖+具名隔离）+ Agent 调用非图片媒体全链路扩展 + 消息元数据化防注入机制 + 戳一戳双层标注与引用消息格式重构 + 用户名称全链路兜底 + 主动对话重复启动防护 + 多轮工具调用链路修复 + IPV6 全面兼容管控 + Web 面板 UX 全面增强（自动刷新重构/心跳同步/图表主题适配/悬浮窗移动端适配/访问日志与封禁管理修复）+ AstrBot v4 重启认证升级 + 多项细节修复 + 文档全面更新**
+
+**🧠 AI 提示词注入顺序优化与缓存命中提升**:
+- **缓存友好的提示词拼接顺序全面重排** — 对所有 AI 模块的提示词拼接逻辑进行了系统性重排，将静态指令（角色设定、行为规则、输出格式要求等跨请求不变的内容）统一放在 system_prompt 的前半部分，将动态内容（当前时间信息、平台注入的聊天历史、用户消息等每轮不同的内容）放在后半部分。涉及模块包括：群聊回复 AI（`reply_handler.py` 的 `SYSTEM_REPLY_PROMPT`）、私聊回复 AI（`private_chat_reply_handler.py` 的 `SYSTEM_REPLY_PROMPT`）、读空气 AI（`decision_ai.py` 的系统提示词拼接）、频率调整 AI（`frequency_adjuster.py` 的提示词拼接）、主动对话生成 AI（`proactive_chat_manager.py` 的 `default_proactive_prompt`）。同一静态前缀在连续多次 API 调用之间保持字节级不变，使 Anthropic prompt cache 能够持续命中，大幅降低首 token 延迟与 API 费用
+- **提示词内部位置引用同步修正** — 由于静态内容从 prompt 后半部分移至前半部分，所有提示词中"上方/上述/前面"等位置引用措辞全部更新为"下方"，与实际的物理拼接顺序保持一致。AI 不会因方向措辞与内容实际所在位置不一致而产生理解偏差（如"上述规则"实际上在它的下面）
+- **用户自定义提示词的覆盖/拼接模式同步适配** — 覆盖模式（用户自定义系统提示词完全替代默认）和拼接模式（用户自定义提示词紧跟默认系统提示词）均改为缓存友好顺序输出，确保自定义配置用户也能享受缓存命中提升
+- **增强提示词防回声/防复读约束** — 回复 AI 和主动对话生成 AI 的提示词中新增防回声引导段落，提示 AI "你的任务是产生有价值的新内容，不是重复或轻微改写用户已经说过的内容。如果用户消息中包含多条内容，针对最有讨论价值的方向回复，而不是把每条都复述一遍"。同时提示词中移除了可能被 AI 理解为"复述当前话题"的模糊用语，改为"根据上下文自然延伸"的正面引导
+
+**🔌 逐插件上下文追踪全面升级**:
+- **monkey-patch 替换为 handler wrapper 架构** — 彻底废弃通过 monkey-patch `call_event_hook` 拦截第三方插件注入的方式（该方式依赖 Python from-import 语义，在特定加载顺序下会失效成为死代码），改为在 `OnLLMRequestEvent` 的 handler 列表上直接包装每个第三方 handler：包装器在执行前后拍摄 prompt 和 contexts 的快照，通过差分法精确计算每个插件独立注入的内容，实时写入 `event._gcp_per_plugin_injections` 字典。本插件自己的 handler（priority=-1，最后执行）读取该字典实现逐插件标记隔离
+- **第三方标记从统一编号升级为具名首尾配对隔离** — prompt 中的第三方注入标记从原有的 `[第三方插件片段 N] ... [/第三方插件片段 N]` 统一匿名编号格式，升级为携带插件名的首尾配对格式：`[第三方插件:插件名 补充信息] ... [/第三方插件:插件名 补充信息]`。contexts 中的注入标记从 `[第三方插件注入上下文]` 升级为 `[第三方插件:插件名 注入上下文] ... [/第三方插件:插件名 注入上下文]`。AI 可明确区分不同插件的注入来源（如"天气插件告诉我的"vs"翻译插件告诉我的"），不会混淆不同插件的补充信息
+- **全字段追踪覆盖消除重复显示** — 原有差分法仅追踪 prompt 和 contexts 两个通道，现扩展为全字段追踪，新增覆盖：`system_prompt`（插件通过 event.set_extra("system_prompt", ...) 注入）、`extra_user_content_parts`（插件追加的用户消息片段）、`image_urls`（插件追加的图片 URL）、`audio_urls`（插件追加的音频 URL）。所有通道统一走逐插件标记合并管道，同一插件通过多个通道注入的重复内容（如同时在 contexts 和 extra_user_content_parts 中注入同一段信息）通过指纹去重自动合并，不再在最终 prompt 中重复出现
+- **上下文差分指纹去重** — `_gcp_fingerprint_context(msg)` 函数对每个 context 消息生成快速指纹（截取前 120 字符并压缩空白），用于跨插件的注入 diff 去重，避免不同插件注入相同上下文信息时出现重复显示
+- **Web 端与架构文档同步更新** — Web 面板的提示词预览中，第三方插件注入标记的展示格式同步更新为具名配对格式，架构文档中「与其他插件的兼容性」章节扩充了逐插件追踪机制的完整说明
+
+**📦 Agent 调用兼容性全面扩充**:
+- **视频/语音/文件三类非图片媒体完整支持** — 在 `image_handler.py` 的媒体提取管线中新增三个独立提取通道：① 视频组件（`Video`）→ 提取文件路径，注入 `[视频: /data/videos/xxx.mp4]` 内联标记；② 语音组件（`Record`）→ 提取音频路径，注入 `[语音]` 标记，路径注入 `audio_urls` 字段供 LLM 访问；③ 文件组件（`File`）→ 提取文件名和路径，注入 `[文件: 报告.pdf]` 标记。三类媒体覆盖消息链遍历、标记内联注入、缓存剥离前富化（保留有路径的标记、剥离纯占位符）、保存传递全链路，与既有图片处理逻辑（`[图片]` / `[图片内容: xxx]`）完全平行一致
+- **纯语音/纯文件消息防丢弃** — `image_handler.py` 的 `_extract_image_urls_structured()` 返回值从二元组 `(image_urls, image_descriptions)` 扩展为五元组 `(image_urls, image_descriptions, audio_urls, video_paths, file_infos)`，调用方同步更新。语音消息和文件消息在 `main.py` 的空消息入口过滤环节被视为有效内容，防止纯语音/纯文件的合法消息被误判为真空消息而丢弃
+
+**💬 消息系统提示词统一元数据化（杜绝提示词注入伪造）**:
+- **冒号前元数据区 + 冒号后用户内容区严格分离** — `message_processor.py` 的 `format_message_for_ai()` 方法重构为两段式输出格式：冒号 `:` 之前为系统元数据区，仅包含系统生成的元信息（时间戳 `[2026-05-29 周四 14:30:00]`、发送者信息 `Name(ID:12345)`、`[戳一戳事件]` 持久化文本、`[系统提示]` 触发方式说明）；冒号之后仅保留用户消息的原始内容（含 @ 提及内联解析 `[At:ID|解析结果]`）。用户无法通过消息内容注入伪造的时间戳、发送者身份或戳一戳事件文本——因为用户输入的所有字符都在冒号之后，而系统元数据在冒号之前，两者不存在字符重叠区间
+- **引用消息的 `>>>` 分隔符同样在冒号前注入** — 引用消息标记（`[引用: Name(ID): 原文...]`）及其 `>>>` 分隔符均注入在冒号前元数据区，被引用内容与用户当前消息正文之间通过冒号明确切分
+- **`[戳一戳提示]` 运行时注入在分隔符之外** — 运行时戳一戳提示（`[戳一戳提示] @Name 戳了戳你`）由 `main.py` 的 `format_context_for_ai()` 在构建完整上下文时追加到消息块分隔符之外，不进入冒号前元数据区。持久化戳一戳事件（`[戳一戳事件]`）则注入冒号前并随消息保存到历史。两种戳一戳标记职责清晰、互不重叠，过滤清理规则不会误伤持久化戳一戳事件
+- **元数据区注入由独立开关控制** — `include_timestamp` 控制时间戳是否注入冒号前；`include_sender_info` 同时控制发送者信息和 `[系统提示]` 是否注入冒号前。两个开关独立可控，用户可根据需要裁剪元数据区的信息量
+
+**👆 戳一戳事件双层标注机制与引用消息格式重构**:
+- **戳一戳双层标注** — 戳一戳事件的文本标注从单一模式重构为双层：① 持久化层（`[戳一戳事件]`）— 由 `message_processor.py` 的 `build_persistent_poke_event_text()` 构建，注入到冒号前元数据区，包含发送者→目标者的完整身份信息（`Name(ID:xxx) 戳了戳 Name(ID:yyy)` 或 `Name(ID:xxx) 戳了戳你`），随消息一起保存到自定义聊天历史，不会被填充率超限丢弃或过滤清理移除；② 运行时提示层（`[戳一戳提示]`）— 由 `main.py` 在处理当前消息时动态追加到分隔符之外，仅在当前轮次对 AI 可见，不进入持久化存储。两层标注分工明确：持久化层保证历史上下文的完整性，运行时层保证当前轮次的即时提示
+- **引用消息格式重构** — 引用消息的构建从简单的 `[引用: 原文]` 格式升级为三段式结构：`[引用: Name(ID:xxx): 原文...]\n>>>\n`。`>>>` 符号作为引用块结束的可视标识，同时追加换行使被引用内容与用户新消息正文物理分行。当被引用消息来源为 AI 自身时，发送者名称后自动追加 `(你)` 标注（格式：`Name(ID:xxx)(你)`），帮助 AI 识别自己的历史发言；当引用内容无法获取时（如消息已被删除或不在数据库中），保留发送者框架并标注 `(无法获取引用内容)`；仅当发送者和内容全部缺失时才跳过引用标记
+- **多条引用独立解析** — 消息链中存在多个引用组件时，每个引用独立提取和格式化，不再合并为单一引用块；当引用消息嵌套（引用中包含引用）时跳过递归展开，保留原始引用格式避免无限循环
+- **过滤规则与全部文档同步更新** — `message_cleaner.py` 中的内容过滤正则模式同步适配新的引用消息格式（`>>>` 分隔符不破坏现有匹配），`MESSAGE_WORKFLOW.md` 新增引用消息格式完整章节，`ARCHITECTURE.md` 同步引用消息解析说明
+
+**👤 用户名称解析全链路兜底**:
+- **统一兜底策略** — 在 `message_processor.py`、`main.py` 的群聊消息处理、Smart 并发批量保存、戳一戳事件构建、转发消息解析、引用消息构建、@ 提及解析等所有涉及用户名称展示的路径上，统一实施相同的名称兜底检查：当 `sender_name` / `user_name` / `target_name` 解析结果为 `None`、空字符串、仅空白、或与对应的 `user_id` 完全相同时，名称字段替换为 `"未知用户"`，原始 ID 字段独立保留不覆盖。确保前端展示和日志排查两不误
+- **戳一戳发送者/目标者独立兜底** — `build_persistent_poke_event_text()` 和戳一戳事件缓存构建中，发送者名称和目标的名称各自独立执行兜底检查，不会因其中一个为空而影响另一个的展示
+- **转发消息发送者兜底** — `forward_message_parser.py` 解析转发消息中各条子消息的发送者名称时，同样执行名称兜底检查，转发消息内的每条子消息独立受保护
+- **Smart 并发批量消息名称保护** — Smart 并发批量保存消息到历史存储时，每条消息独立执行名称兜底，同一批次中某条消息的名称异常不影响其他消息的正常保存和展示
+
+**🔄 主动对话重复启动防护**:
+- **后台循环 Task 身份识别** — `proactive_chat_manager.py` 的 `_background_check_loop()` 在启动时记录当前 `asyncio.Task` 对象身份（`_own_task = asyncio.current_task()`），循环的 while 条件从仅检查 `cls._is_running` 升级为同时校验 `cls._background_task is _own_task`（要求两者严格 `is` 相等）。当插件类被重复加载（例如插件重载）后，新加载的类会创建新的后台 task 并设置 `cls._background_task = 新task`，旧 task 在循环条件检查时发现 `cls._background_task is _own_task` 为 `False`，自动退出循环。解决了旧版中"类重载后旧循环因仅检查 `_is_running`（仍为 True）而继续运行"导致的双循环并发冲突——两个循环同时对同一 `_chat_states` 执行检查和触发主动对话，造成重复发送、状态竞争和 API 费用翻倍
+- **普通回复时主动对话状态双重保险关闭** — `record_bot_reply(is_proactive=False)` 方法中新增主动对话活跃状态检查：当记录普通回复（非主动对话）时，检查 `state.get("proactive_active", False)`，如果为 `True`（说明主动对话流程异常退出未清理其活跃标记），普通回复主动将其置为 `False` 并输出 debug 日志。这作为一道双重保险，防止残留的 `proactive_active=True` 标记干扰后续主动对话的正常触发（如阻止新主动对话启动、导致 `check_and_handle_reply_after_proactive` 中误判）
+
+**🔧 多轮工具调用链路修复**:
+- **LLM_RESULT 误判为最终回复修复** — 修复多轮工具调用中一个关键 Bug：当 AI 在调用工具之前先说一段话（如"让我搜索一下相关信息"），然后调用工具，最后生成最终回复——这种多轮场景下，第一段中间话的类型同样是 `LLM_RESULT`。旧版 `on_decorating_result()` 在收到任何 `LLM_RESULT` 时都强制完成并保存，导致第一段中间话被误当最终回复保存，后续的工具调用结果和真正的 AI 最终回复全部丢失。修复后：`on_decorating_result()` 仅对非 `LLM_RESULT` 类型（如 `GENERAL_RESULT` 异常终止响应）执行强制保存；`LLM_RESULT` 类型的文本累积到内部缓冲区但不触发强制完成。正常的多轮工具调用完成流程由 `on_llm_response` 设置 `_agent_done_flags` → `after_message_sent` 统一构建交错记录并保存。异常终止时（AI 错误标记或非 LLM 终端响应），通过 `_finalize_bot_reply_save()` 兜底保存所有已累积的中间文本和已完成的工具调用记录
+- **工具循环异常时反馈结果保存修复** — 修复工具循环调用过程中出现报错（如工具执行超时、返回值格式错误）时，已完成的前几轮工具调用记录和 AI 的中间回复文本无法正常保存到历史的问题：异常处理路径中通过 `_finalize_bot_reply_save()` 构建交错排列的工具调用记录（按照工具调用的实际执行顺序，文本块与工具调用块交替排列），确保异常中断场景下不丢失已完成的上下文
+
+**📊 概率过滤信息描述纠正**:
+- **"概率过滤失败"→"概率过滤未通过"** — 全面替换概率过滤链路中的措辞：日志输出（`[概率过滤-缓存]`、`[戳一戳缓存]` 等）、Web 流程图节点标签（`flow-data.js` 中的 `failLabel` 和 `desc`）、代码注释中的相关描述统一从"概率过滤失败"改为"概率过滤未通过"。概率过滤未命中是概率模型的正常随机行为（表示"本轮不回复"而非"功能出错"），"未通过"比"失败"更准确地反映业务语义，避免用户在日志和 Web 面板中看到"失败"字样而误以为系统故障
+
+**🌐 IPV6 全面兼容与边界管控**:
+- **全安全机制 IPV6 适配** — Web 面板的所有安全机制均已完整适配 IPv6 地址：IP 访问控制（白名单/黑名单）、IP 封禁管理（手动封禁+自动封禁）、防爬虫检测（UA 匹配+频率限制+扫描路径识别）、速率限制（已登录请求次数窗口）、暴力破解防护（登录失败分级锁定）。`web/security.py` 中新增 `_normalize_ip()` 静态方法，将 IPv4 保持点分十进制、IPv6 压缩为 RFC 5952 规范形式，所有 IP 比较和存储统一走规范化管道。`web/server.py` 中 `_get_client_ip()` 在提取客户端真实 IP 后同样调用 `_normalize_ip()` 进行规范化
+- **IP 配置边界校验与警告** — 配置加载时（`web/security.py` 的 `_validate_ip_list()`），对 IP 白名单/黑名单/受保护 IP 列表中的每个条目进行合法性校验：非法的 IPv4/IPv6 地址（如包含 CIDR 网段、非法字符、格式错误）会被识别并输出明确的 WARNING 日志（`配置警告：xxx 中包含 yyy，不是合法的 IPv4/IPv6 地址。仅支持精确地址匹配，不支持 CIDR 网段/子网`）；合法条目自动规范化为标准形式后存储
+- **Web 面板监听地址双栈自动化** — 监听地址配置 `web_panel_host` 设为 `0.0.0.0` 或 `::` 时，`server.py` 将 `_host` 设为 `None`（aiohttp 双栈模式），同时监听 IPv4 和 IPv6 所有网络接口。启动日志输出本机所有非链路本地（过滤 `fe80::`）的 IPv4 和 IPv6 地址
+- **封禁 IP 错误页增强** — 被封 IP（支持 IPv4 和 IPv6）访问面板时，中间件将请求统一重定向至 `/error?code=blocked`，错误页每 5 秒自动轮询 `/api/auth/verify` 检测解封状态，封禁到期后自动跳转至登录页（已认证用户直达面板）。手动封禁可通过 Web 面板「IP 封禁管理」解封
+- **`localhost` 归一化为 `127.0.0.1`** — Web 面板启动日志输出中，将 `localhost` 统一归一化为 `127.0.0.1` 独立一行显示，避免部分环境（如配置了 IPv6 优先的系统）`localhost` 解析到 `::1` 导致浏览器点击链接时的行为不一致
+
+**🔧 Web 面板 UX 全面增强**:
+
+**自动刷新机制重构**:
+- **会话列表 3 秒自动刷新** — `session-mgr.js` 中新增 `startAutoRefresh()` / `stopAutoRefresh()` 方法：进入会话列表页自动启动 3 秒间隔的自动刷新（仅在列表页且非编辑模式时执行）；进入会话详情页自动暂停列表刷新（`stopAutoRefresh()`）；返回列表自动恢复刷新（`startAutoRefresh()`）；编辑模式（配置面板打开、文件编辑）期间设置 `_editMode=true`，自动刷新检查到编辑模式直接跳过本轮刷新，避免编辑过程中列表跳变
+- **聊天记录增量更新** — `session-mgr.js` 的聊天记录查看面板改为增量更新策略：通过比较新旧消息列表的内容哈希（取每条消息的 `content` + `sender_name` + `timestamp` 拼接后做快速比对），仅对新增/变更的消息条目进行 DOM 局部渲染，而非全量替换。保留用户当前滚动位置（更新前后记录 `scrollTop` 并恢复）。如果增量更新过程中检测到数据不一致（如消息 ID 集合变化超过阈值），自动回退为全量重建确保数据完整性
+- **心跳状态自动/手动刷新** — `app.js` 的心跳状态面板支持两套刷新机制：① 自动刷新定时器（`_heartbeatAutoRefreshTimer`）永不停歇，仅通过 `_heartbeatAutoRefreshPaused` 标志位控制是否执行 DOM 更新渲染。Leader 标签页每次心跳 ping 成功后（`/api/auth/heartbeat` 返回 ok），广播 `session-ok` 事件（通过 `BroadcastChannel` API）；Follower 标签页接收 `session-ok` 广播后同步更新 `lastHeartbeatSuccessAt` 和 `lastHeartbeatStatus`，解决 Follower 长期不更新"最近一次心跳成功"时间戳的问题。② 手动刷新按钮（🔄）触发 `_loadHeartbeatStatus()` 完整重新加载。`_loadHeartbeatStatus()` 新增兜底逻辑：只要 `verify` 成功（会话有效），且 `_authMonitor.lastHeartbeatSuccessAt` 尚未记录过成功时间（初始状态为 null），直接用 `Date.now()` 初始化，确保首次加载即显示有意义的时间戳而非"尚未成功"
+- **图表页面 3 秒自动刷新开关** — `panel.html` 的图表区新增自动刷新开关 UI（含绿色圆点 `dot active` 状态指示器 + checkbox），用户可自由启停。`charts.js` 中 `startAutoRefresh()` 读取开关状态，仅在开关开启时执行定时更新
+- **速率窗口心跳/自动刷新豁免** — 后端 `web/security.py` 的 `check_authenticated_rate()` 新增 `is_auto_refresh` 参数（默认 `False`）：心跳请求（`is_heartbeat=True`）和自动刷新请求（`is_auto_refresh=True`）直接放行，不参与速率窗口计数、不消耗速率配额。前端 `api.js` 中所有自动刷新请求通过 `api.fetch()` 的 `autoRefresh` 选项自动注入 `X-GCP-Auto-Refresh: 1` 请求头，后端 `server.py` 的认证中间件检测该头并设置 `is_auto_refresh=True`
+- **无自动刷新页面提示** — 访问日志页刷新按钮旁新增无自动刷新机制提示文字（`本页无自动刷新，有新日志产生时请手动点击刷新按钮获取最新信息`），通过 CSS class `log-refresh-hint` 适配桌面/平板/手机三端及明暗双主题
+- **`api.verify` 支持 options 参数** — `api.js` 中 `verify()` 方法新增 `options` 参数（`{ autoRefresh: boolean }`），传递给底层 `api.fetch()` 以触发自动刷新头注入
+
+**页面交互与布局修复**:
+- **全页面手动刷新 + toast 反馈** — 所有数据页面（会话管理、图表、访问日志、封禁管理、文件管理等）的手动刷新按钮补充完整：点击后通过 `Utils.toast()` 显示操作反馈（"刷新成功"/"刷新失败"）；编辑模式下手动刷新被守卫跳过（`if (this._editMode) return`），避免覆盖用户正在编辑的内容；手动刷新始终调用数据的全量重载方法（而非增量更新），确保用户主动刷新时看到完整最新数据
+- **会话列表计数移至右侧** — 会话卡片的群聊/私聊计数标签（如 `12 群聊 / 3 私聊`）从卡片的左侧区域移至右侧，与操作按钮（重置、详情、删除）在同一视觉行，整体层次更清晰
+- **按钮布局位移修复** — 修复配置保存按钮与其他控件之间的间距异常（由于 CSS flex 布局 `gap` 属性的计算差异导致按钮在部分浏览器中偏移）
+- **插件重启期间自动刷新静默容错** — 自动刷新请求在网络错误或服务端返回 5xx 时静默忽略（不弹 toast、不改变 UI 状态），`api.fetch()` 中对自动刷新请求的 `onError` 回调仅 `console.debug` 输出。重启完成后首次成功的自动刷新自动恢复所有 UI 数据
+
+**图表与主题适配**:
+- **柱状图始终重绘适配主题** — `charts.js` 中移除柱状图的主题色缓存守卫逻辑：原先在明暗主题切换时，如果图表数据未变化则跳过重绘导致柱子颜色与新主题不匹配。修复后图表每次 `updateChart()` 都执行完整重绘（`chart.destroy()` + 重新 `new Chart()`），使用当前主题的 CSS 变量（`var(--accent)` 等）动态设置颜色
+- **概率柱状图统一红色** — 概率分布图（回复概率、主动对话概率、戳一戳概率等）的柱子颜色从主题色（明暗切换时变化）改为固定红色系（`#ef4444` 及其透明度变体），与其他图表（蓝色系）形成视觉区分，用户可一眼识别概率相关数据
+- **"图表无会话"手动刷新修复** — 修复 `charts.js` 中当图表页面无会话数据时（`buildChartData()` 返回空数组），手动刷新按钮被守卫 `if (!hasData) return` 错误拦截的问题：移除该守卫，用户可在任意状态下手动刷新以尝试重新加载数据（如会话刚创建、数据尚未在图表中体现等情况）
+- **主题切换时图表立即重绘** — `app.js` 的主题切换逻辑中新增图表重绘触发：调用 `charts.js` 的 `updateChart()` 使柱状图颜色立即适配新主题
+
+**悬浮窗与移动端优化**:
+- **悬浮窗拖拽超屏与内容截断修复** — `app.js` 中悬浮窗（`prompt-floater`）的拖拽逻辑从仅检查 `mousedown`/`mousemove` 扩展为同时支持 `touchstart`/`touchmove`/`touchend` 移动端触摸事件。拖拽边界限制增强：`left` 不小于 `0`、不大于 `window.innerWidth - floater.offsetWidth`；`top` 不小于 `0`、不大于 `window.innerHeight - floater.offsetHeight`。内容区域 `max-height` 动态计算确保不超出视口
+- **悬浮窗默认宽度防撑大** — `main.css` 中为悬浮窗新增 `min-width: 280px` 和 `max-width: 90vw` 约束，防止内容过长时悬浮窗被撑大到超出可视范围
+- **移动端自定义缩放拖拽手柄** — `panel.html` 的悬浮窗右下角新增 `prompt-floater-resize-handle` 自定义手柄元素，`tech-tree.css` 中桌面端隐藏该手柄（使用浏览器原生 `resize: both`），移动端（`max-width: 768px`）隐藏原生 resize 并显示自定义大尺寸手柄（`40px × 40px`），方便手指操作
+
+**访问日志与封禁管理**:
+- **访问日志桌面端表格附注列优化** — `main.css` 中访问日志表格的附注列（`note` 列）从固定列宽改为 `auto` 自适应，长文本通过 `text-overflow: ellipsis` + `overflow: hidden` + `white-space: nowrap` 截断溢出，保留完整内容在 `title` 属性中供 hover 查看。移动端卡片布局不受影响
+- **封禁 IP 备注 128 字符限制** — Web 前端封禁原因输入框（`#ban-reason-input`）新增 `maxlength="128"` 属性并实时显示字符计数器（如 `45/128`），服务端 `web/server.py` 的封禁接口在写入存储前同步截断超过 128 字符的原因文本（取前 128 字符 + `...`）
+- **封禁列表桌面端短列 nowrap** — `main.css` 中封禁列表的短列（来源 IP、封禁时间、到期时间、状态标签）添加 `white-space: nowrap` 防止列宽过窄时文字换行导致行高参差不齐，原因列保持 `white-space: normal` + `word-break: break-word` 允许自动换行
+- **封禁原因自动换行不溢出** — 封禁列表的原因列文字通过 `word-break: break-word` + `overflow-wrap: break-word` 自动换行，不会撑破表格或溢出到相邻列
+
+**其他 UX 增强**:
+- **Web 面板启动日志三级地址输出** — 启动日志从仅显示 `localhost:端口` 升级为完整三级地址输出：第一级本地（`localhost:端口` + `127.0.0.1:端口`）、第二级内网（本机所有 IPv4 地址 + 非 `fe80::` 的 IPv6 地址，格式 `➜ 内网:`）、第三级公网（通过 ipify/ifconfig.me/icanhazip 三个来源并发获取公网 IP 并去重，格式 `➜ 公网:`）。获取超时 3 秒，任一来源成功即显示。架构文档 `ARCHITECTURE.md` 同步更新了完整的访问地址说明表格
+- **Web UI 前端缩放按钮** — `panel.html` 的流程图页面（tech-tree）左上角新增缩放控件组（`#zoom-ctrl`）：`+` 放大（每次 `scale + 0.15`，上限 `3.0`）、`⊡` 适应屏幕（重置 `scale = 1.0`）、`−` 缩小（每次 `scale - 0.15`，下限 `0.3`）。仅在流程图页面显示（`app.js` 的 `switchPage()` 中通过 `classList.toggle('hidden')` 控制），配置面板打开时自动隐藏（`body.config-panel-open #zoom-ctrl { display: none }`）
+
+**🔑 AstrBot v4 平台重启认证升级与 Web 重置行为修正**:
+- **JWT 优先 + 密码降级两级认证** — Web 面板触发的插件重载和 AstrBot 重启操作，认证方式从单一密码登录升级为两级策略：第一优先级通过 dashboard 配置中的 `jwt_secret` 直接签发 HS256 JWT token，调用 AstrBot 仪表盘 REST API（重载：`POST /api/plugin/reload`，重启：`POST /api/stat/restart-core`）；JWT 签发失败时自动降级为密码登录（`POST /api/auth/login` → 从 `data.token` 提取 token），兼容旧版 AstrBot v3。JWT 优先策略避免每次重启都需传输明文密码，同时绕过了某些 AstrBot v4 版本中密码登录接口的兼容性变更
+- **Web 端重启状态轮询反馈** — `web/server.py` 中新增 `GET /api/restart-status` 接口，返回当前重启/重载操作的状态对象（`{type, status, message, timestamp}`，status 枚举：`pending` → `in_progress` → `success` / `failed`）。前端 `app.js` 在触发重启/重载后启动 2 秒间隔的轮询（最多 60 次 = 2 分钟），状态栏文案根据返回值动态更新（如"插件已重置，AstrBot 重启中...等待服务恢复..."），一旦轮询到服务器恢复（新进程启动）立即 `location.reload()` 刷新页面
+- **会话管理重置行为修正** — Web 面板「会话管理」中每张会话卡片上的「重置」按钮（调用 `POST /api/commands/reset-here`）的行为从"等同于聊天指令 `gcp_reset_here`"修正为仅清除运行时状态：调用插件实例的 `_clear_session_runtime()` 清除注意力数据、情绪追踪、概率状态、冷却计时、Smart 并发待合并注册记录和窗口缓冲残留，但**不删除聊天记录文件**、**不设置历史截止时间戳**（`history_cutoff.json`）。重置后自动触发插件重载（reload 模式）使清理立即生效。聊天指令 `gcp_reset_here` 保持原有行为（删文件 + 设截止戳）。两种重置方式的职责明确区分：Web 按钮 = 轻量运行时重置，聊天指令 = 完整历史清除
+- **`reset_here` 与 `clear_image_cache` 的 reload 分支补全** — `_handle_cmd_reset_here()` 和 `_handle_cmd_clear_image_cache()` 的 reload 模式分支此前缺失实际的重载触发调用（仅设置了 `auth_mgr.mark_web_initiated_reload()` 但未调用 `_create_deferred_reload_task()`），修复后补全该调用，reload 分支行为与 restart 分支一致
+- **cutoff 日志补全** — `gcp_reset_here` 和 `gcp_reset` 操作中的历史截止时间戳（`history_cutoff.json`）创建/更新操作现在输出明确的 INFO 日志（`[会话重置] 已设置历史截止戳: {session_id} → {cutoff_time}`），方便排查跨重置操作的历史记录过滤问题
+
+**🔧 戳一戳消息后提示词注入修复**:
+- **反戳后元数据注入不生效修复** — 修复戳一戳消息处理流程中一个隐蔽 Bug：当插件收到戳一戳消息并触发直接反戳（`poke_reverse_on_poke_probability > 0`，即随机反戳概率 > 0）后，旧版代码在发送反戳动作后通过 `event.stop_event()` + `return` 直接终止了整个消息处理链路（包括 `main.py` 中后续的 `include_sender_info`、`include_timestamp` 等元数据注入代码）。这导致：尽管用户在后端配置中开启了发送者信息注入和时间戳注入，但被反戳处理拦截的消息上这两类元数据完全不生效，保存到历史的戳一戳事件文本缺失发送者名称和时间戳。修复后，反戳动作改为通过内部的 `poke_reply_in_progress` 标记控制重复反戳，不再通过 `stop_event()` 中断链路，后续的元数据注入、消息缓存、历史保存等步骤正常执行
+
+**💾 gcp_clear_image_cache 旧版缓存兼容清理**:
+- **旧版残留路径兼容清理** — `web/server.py` 的 `_resolve_image_cache_file()` 方法优先返回当前主缓存文件路径（`image_cache/descriptions.jsonl`），若不存在则检测旧版残留路径（`image_description_cache.json`）。`gcp_clear_image_cache` 指令和 Web 面板的图片缓存清理按钮（`POST /api/session/clear-image-cache` 和 `POST /api/commands/clear-image-cache`）均通过 `_clear_image_cache_storage()` 调用此方法，确保从旧版本升级的用户不会留下无法通过正常清理流程移除的孤立缓存文件
+
+**🐛 其他细节修复**:
+- **`proactive_system_prompt` 变量名拆分遗漏修复** — `proactive_chat_manager.py` 的 `_save_proactive_to_history()` 中，保存到历史的系统消息文本使用了不一致的变量引用路径：部分分支引用旧版 `proactive_system_prompt`（此变量在 v1.2.0 重构时已拆分为 `proactive_marker` + `proactive_prompt`），导致特定配置组合下（如重试场景 + 注意力信息注入）主动对话保存到历史的系统提示词拼接异常。修复后统一使用 `proactive_marker + proactive_prompt` 拼接
+- **内容过滤规则正则回溯优化** — `content_filter.py` 中部分 Range 过滤正则表达式（`A*B` 模式）在文本中包含大量重复标记边界符号（如 `{{` `}}`）时可能触发灾难性回溯的超时问题，修复后在各规则的 `*` 部分增加了非贪婪量词限定和原子组保护
+- **Web 面板幽灵会话根治** — `web/server.py` 的 `_collect_runtime_sessions()` 在收集会话 key 时新增 `_SAFE_SESSION_RE` 正则校验（拒绝空字符串、None、纯空白、含路径遍历字符的异常 key），从源头杜绝异常 key 进入会话列表。同时 `message_cache_manager.py` 的 `cache_message()` 新增 `chat_id` 防御性校验，拒绝无效 chat_id 以避免产生幽灵缓存条目。双重防护确保前端的幽灵会话问题彻底根除（此前仅前端做空数据保护层）
+- **编辑保存直接覆盖源文件** — Web 面板文件管理中的在线编辑保存逻辑（`POST /api/files/save`）改为直接覆盖源文件而非创建带有时间戳后缀的备份副本，避免编辑后文件路径变化导致引用该文件的其他功能（如自定义提示词文件）失效
+
+**📚 文档全面补充与更新**:
+- **关闭平台「只 @ 机器人是否触发等待」提示补充** — `CONFIG_REFERENCE.md` 的群聊等待窗口配置章节、`ARCHITECTURE.md` 的平台配置建议章节、`_conf_schema.json` 的 `enable_group_wait_window` 配置 hint、`README.md` 的快速开始章节中均新增/强化了关闭平台 `empty_mention_waiting` 开关的提醒说明：平台的空 @ 等待是群级别拦截，会劫持任意用户的消息并人工插入 @bot 后重新入队，与本插件冲突且会导致认错发送者。使用本插件的等待窗口功能前必须先关闭平台侧的同名开关
+- **全部说明文档版本号更新** — `README.md`、`CHANGELOG.md`、`docs/ARCHITECTURE.md`、`docs/CONFIG_REFERENCE.md`、`docs/MESSAGE_WORKFLOW.md`、`docs/PROJECT_STRUCTURE.md`、`docs/DESKTOP_COMPATIBILITY.md` 中的所有版本引用从 V1.2.3.hotfix.1 更新为 V1.2.3.hotfix.2
+- **架构文档全面更新** — `ARCHITECTURE.md` 扩充了以下章节：第三方插件注入隔离机制（逐插件追踪 → handler wrapper → 具名标记 → 全字段覆盖的完整链路）、Web 面板安全机制（IPV6 全面适配、双栈自动化、速率窗口豁免）、AstrBot v4 重启认证流程（JWT 优先+密码降级）、Web 面板访问地址输出（本地/内网/公网三级）、消息元数据区机制、戳一戳双层标注架构、引用消息三段式格式
+- **配置项文档补充** — `CONFIG_REFERENCE.md` 新增/补充了 IPV6 兼容性说明（IP 名单、监听地址、安全机制）、`empty_mention_waiting` 关闭提醒、Web 面板各项新功能的行为说明
+- **消息工作流程文档更新** — `MESSAGE_WORKFLOW.md` 补充了消息元数据区注入流程、戳一戳双层标注机制、引用消息解析流程、工具调用多轮链路（正常完成 vs 异常终止的差异路径）
+- **项目结构文档更新** — `PROJECT_STRUCTURE.md` 更新了模块列表（新增 `web/auth.py`、`web/security.py` 等之前未列出的模块）和版本信息
+
+**修改文件**:
+- `utils/reply_handler.py` — 缓存友好的提示词拼接顺序重排，位置引用从"上方"改为"下方"，覆盖/拼接模式同步适配，新增防回声约束
+- `utils/proactive_chat_manager.py` — 后台循环 Task 身份识别防双循环并发，普通回复时主动对话状态双重保险关闭，`proactive_system_prompt` 变量拆分修复，缓存友好的提示词拼接
+- `utils/decision_ai.py` — 缓存友好的提示词拼接顺序重排，位置引用从"上方"改为"下方"，覆盖/拼接模式同步适配
+- `utils/frequency_adjuster.py` — 缓存友好的提示词拼接顺序重排
+- `private_chat/private_chat_utils/private_chat_reply_handler.py` — 缓存友好的提示词拼接顺序重排，覆盖/拼接模式同步适配，新增防回声约束
+- `private_chat/private_chat_utils/private_chat_proactive_chat_manager.py` — 同步主模块的主动对话防护和提示词优化
+- `utils/image_handler.py` — 新增视频/语音/文件三类媒体的提取、标记内联、缓存剥离前富化管线，纯语音/文件消息防丢弃
+- `utils/message_processor.py` — 消息格式重构为冒号前元数据区+冒号后用户内容区，时间戳/发送者信息/戳一戳事件统一注入元数据区，新增兜底名称检查，完整实现戳一戳持久化事件构建
+- `utils/message_cache_manager.py` — 新增 `chat_id` 防御性校验拒绝无效 key 防止幽灵会话
+- `utils/message_cleaner.py` — 过滤规则正则回溯优化，适配新引用消息格式（`>>>` 分隔符）
+- `utils/content_filter.py` — 过滤规则正则回溯优化（非贪婪量词+原子组保护）
+- `utils/probability_manager.py` — 概率过滤信息描述从"失败"纠正为"未通过"
+- `utils/context_manager.py` — 上下文构建适配元数据区格式，冒号前元数据区正确传递到 AI
+- `utils/forward_message_parser.py` — 转发消息发送者名称兜底检查
+- `utils/system_prompt_rewriter.py` — 平台提示词清洗适配新消息格式
+- `main.py` — 逐插件上下文追踪从 monkey-patch 升级为 handler wrapper 架构（`_gcp_instrumented_call_event_hook` → `_install_per_plugin_context_tracking`），全字段追踪覆盖（system_prompt/extra_user_content_parts/image_urls/audio_urls），逐插件具名标记合并管道（`_merge_per_plugin_prompt_injections` / `_merge_per_plugin_context_injections`），戳一戳消息反戳后元数据注入修复（不再通过 `stop_event()` 中断链路），多轮工具调用 LLM_RESULT 误判修复（`on_decorating_result` 不再强制完成 LLM_RESULT），工具调用异常兜底保存（`_finalize_bot_reply_save`），反戳后消息保存/缓存更新/名称兜底全覆盖，Smart 并发批量名称兜底
+- `web/server.py` — AstrBot v4 重启认证 JWT 优先+密码降级（`_do_deferred_reload` / `_do_deferred_restart`），重启状态轮询接口（`GET /api/restart-status`），会话管理重置行为修正（仅清运行时/不删文件/不设截止戳），`reset_here` 与 `clear_image_cache` 的 reload 分支补全，Web 面板启动日志三级地址输出（本地/内网/公网），`localhost` 归一化为 `127.0.0.1`，客户端 IP 规范化管道（`_get_client_ip` + `_normalize_ip`），双栈自动启用，幽灵会话根源修复（`_SAFE_SESSION_RE` 校验），封禁原因 128 字符截断，速率窗口自动刷新豁免（`X-GCP-Auto-Refresh` 头检测）
+- `web/security.py` — IP 规范化方法（`_normalize_ip`），IP 合法性校验与边界警告（`_validate_ip_list`），速率限制自动刷新豁免（`check_authenticated_rate` 新增 `is_auto_refresh` 参数），全安全机制 IPv6 适配
+- `web/auth.py` — IP 规范化比较（登录、封禁等场景的 IP 匹配）
+- `web/templates/panel.html` — 图表自动刷新开关 UI（含绿色圆点指示器），缩放按钮控件（`#zoom-ctrl`），悬浮窗拖拽手柄（`prompt-floater-resize-handle`），访问日志无自动刷新提示文字
+- `web/static/js/app.js` — 心跳状态面板完整重构（自动/手动刷新双机制、Leader 广播+Follower 接收、`_loadHeartbeatStatus` 首次加载兜底、增量更新 DOM），主题切换触发图表立即重绘，重启状态轮询反馈，悬浮窗拖拽超屏修复+移动端触摸支持，封禁原因 128 字符限制+计数器，缩放按钮页面切换显隐控制，全页面手动刷新+toast 反馈，插件重启期间自动刷新静默容错
+- `web/static/js/session-mgr.js` — 会话列表 3 秒自动刷新（进出详情自动暂停/恢复），编辑模式禁刷新，聊天记录内容比对增量更新+回退全量重建逻辑，幽灵会话计数与清理
+- `web/static/js/charts.js` — 柱状图始终重绘移除主题色缓存守卫，概率柱状图统一红色，无会话手动刷新去守卫，3 秒自动刷新开关
+- `web/static/js/api.js` — `X-GCP-Auto-Refresh` 请求头自动注入，`verify()` 支持 options 参数，心跳请求不计入速率窗口
+- `web/static/js/flow-data.js` — 概率过滤节点标签从"概率过滤失败"改为"概率未通过"
+- `web/static/js/tech-tree.js` — 流程图缩放控件交互逻辑
+- `web/static/js/prompt-data.js` — 第三方注入标记预览同步更新为具名配对格式
+- `web/static/css/main.css` — 悬浮窗默认宽度约束（min/max-width），移动端拖拽手柄样式，访问日志附注列 auto 列宽+截断溢出，封禁列表短列 nowrap+原因列自动换行，自动刷新开关样式（`.auto-refresh-toggle`），无自动刷新提示文字样式（`.log-refresh-hint`）
+- `web/static/css/tech-tree.css` — 缩放按钮样式（桌面/移动端适配），悬浮窗 resize handle 样式（桌面端隐藏/移动端显示大尺寸手柄），配置面板打开时缩放按钮隐藏
+- `_conf_schema.json` — 配置项 hint 全面修订（IPV6 地址说明、IP 名单边界警告、`empty_mention_waiting` 关闭提醒、概率过滤用语纠正），新增 Web 面板相关配置项 hint 补充
+- `metadata.yaml` — 更新版本号到 V1.2.3.hotfix.2，更新插件简介
+- `README.md` — 更新版本号、更新亮点章节、更新日志章节
+- `CHANGELOG.md` — 更新为 V1.2.3.hotfix.2 版本更新记录
+- `docs/ARCHITECTURE.md` — 全面扩充第三方插件注入隔离、Web 安全机制、AstrBot v4 兼容性、消息元数据区、Web 面板访问地址等章节
+- `docs/CONFIG_REFERENCE.md` — 补充 IPV6 兼容性说明、`empty_mention_waiting` 关闭提醒、Web 面板各功能行为说明
+- `docs/MESSAGE_WORKFLOW.md` — 补充消息元数据区注入流程、戳一戳双层标注、引用消息格式、工具调用多轮链路
+- `docs/PROJECT_STRUCTURE.md` — 更新模块列表和版本信息
+- `docs/DESKTOP_COMPATIBILITY.md` — 更新版本兼容性表格
+- 所有 Python 模块 — 统一更新文件头版本号到 V1.2.3.hotfix.2
+
+---
+
 ### V1.2.3.hotfix.1 (2026-05-23)
 
 **AI 回复纲领行动导向重写（杜绝判断文本泄露）+ 内容过滤配置说明补充 + Smart 并发可靠性修复 + 上下文清洗精准化 + 戳一戳消息保存修复 + Web 面板空白会话修复与浏览器兼容性增强 + 判断型 AI 推理日志优化 + 概率日志修复 + 文档全面更新**

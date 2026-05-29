@@ -3,7 +3,7 @@
 负责提取和提醒AI当前可用的工具
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 from typing import List, Dict, Optional

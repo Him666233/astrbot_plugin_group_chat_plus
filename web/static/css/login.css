@@ -136,7 +136,8 @@
         transparent 100%);
 }
 
-.login-container:has(.login-upgrade-notice) {
+.login-container:has(.login-upgrade-notice),
+.login-container.has-upgrade-notice {
     width: auto;
     min-width: 380px;
 }

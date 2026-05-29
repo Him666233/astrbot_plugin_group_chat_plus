@@ -12,7 +12,7 @@
 {"u":"图片URL","d":"文字描述","t":时间戳}
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 import json
@@ -240,6 +240,13 @@ class ImageDescriptionCache:
         try:
             if self._cache_file.exists():
                 self._cache_file.unlink()
+            # 兼容清理旧版残留路径 image_description_cache.json
+            legacy_path = self._cache_dir.parent / "image_description_cache.json"
+            if legacy_path.exists():
+                legacy_path.unlink()
+                logger.info(
+                    "[图片缓存] 已清理旧版缓存文件 image_description_cache.json"
+                )
             self._entry_count = 0
             logger.info("[图片缓存] 缓存已清空")
             return True

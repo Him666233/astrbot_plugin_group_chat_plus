@@ -10,7 +10,7 @@
 - 详细的保存日志便于调试
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 from typing import List, Dict, Any, Optional
@@ -1401,6 +1401,7 @@ class ContextManager:
         include_timestamp: bool = True,
         include_sender_info: bool = True,
         window_buffered_messages: list = None,
+        poke_notice: str = "",
     ) -> str:
         """
         将历史消息格式化为AI可理解的文本
@@ -1635,6 +1636,14 @@ class ContextManager:
                 logger.warning(f"[上下文格式化] 窗口缓冲消息拼接失败，降级忽略: {e}")
 
             result = "\n".join(formatted_parts)
+
+            # 戳一戳提示追加在分隔符之外（与消息内容分离，仅运行时提示 AI）
+            if poke_notice and poke_notice.strip():
+                try:
+                    result = result.rstrip() + "\n\n" + poke_notice.strip()
+                except Exception:
+                    pass
+
             if DEBUG_MODE:
                 logger.info(f"上下文格式化完成,总长度: {len(result)} 字符")
             return result
@@ -1753,6 +1762,39 @@ class ContextManager:
                 )
                 cleaned_message = re.sub(
                     r"\[第三方插件补充信息\][\s\S]*?\[第三方插件补充信息结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 🆕 逐插件标记清理（新格式，含描述文本）
+                cleaned_message = re.sub(
+                    r"\[第三方插件补充 - [^\]]+\]",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件补充 - [^\]]+ 结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 逐插件 context 完整消息（开头标记+描述）
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 - [^\]]+\]\n以下对话记录来自插件 '[^']+' 的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 - [^\]]+ 结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 回退路径 context 完整消息（开头标记+描述）
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文\]\n以下对话记录来自其他插件的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 结束\]",
                     "",
                     cleaned_message,
                 )
@@ -2055,6 +2097,39 @@ class ContextManager:
                     "",
                     cleaned_message,
                 )
+                # 🆕 逐插件标记清理（新格式，含描述文本）
+                cleaned_message = re.sub(
+                    r"\[第三方插件补充 - [^\]]+\]",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件补充 - [^\]]+ 结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 逐插件 context 完整消息（开头标记+描述）
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 - [^\]]+\]\n以下对话记录来自插件 '[^']+' 的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 - [^\]]+ 结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 回退路径 context 完整消息（开头标记+描述）
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文\]\n以下对话记录来自其他插件的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 结束\]",
+                    "",
+                    cleaned_message,
+                )
                 cleaned_message = re.sub(
                     r"当前平台共有 \d+ 个可用工具:[\s\S]*?(?=请根据上述对话|请开始回复|====|$)",
                     "",
@@ -2327,6 +2402,39 @@ class ContextManager:
                 )
                 cleaned_message = re.sub(
                     r"\[第三方插件补充信息\][\s\S]*?\[第三方插件补充信息结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 🆕 逐插件标记清理（新格式，含描述文本）
+                cleaned_message = re.sub(
+                    r"\[第三方插件补充 - [^\]]+\]",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件补充 - [^\]]+ 结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 逐插件 context 完整消息（开头标记+描述）
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 - [^\]]+\]\n以下对话记录来自插件 '[^']+' 的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 - [^\]]+ 结束\]",
+                    "",
+                    cleaned_message,
+                )
+                # 回退路径 context 完整消息（开头标记+描述）
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文\]\n以下对话记录来自其他插件的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+                    "",
+                    cleaned_message,
+                )
+                cleaned_message = re.sub(
+                    r"\[第三方插件注入上下文 结束\]",
                     "",
                     cleaned_message,
                 )

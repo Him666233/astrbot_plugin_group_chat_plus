@@ -10,7 +10,7 @@
 6. 失败处理和冷却机制
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 
 v1.2.0 更新：
 - 支持其他插件的 on_llm_request 钩子注入（如 emotionai）
@@ -1221,7 +1221,7 @@ class ProactiveChatManager:
                 )
             return
 
-        # 🆕 v1.2.0: 关闭主动对话检测（已判定失败）
+        # 🆕 v1.2.0: 关闭主动对话检测（已判定不通过）
         state["proactive_active"] = False
         # 标记为已记录
         state["proactive_outcome_recorded"] = True
@@ -2409,7 +2409,7 @@ class ProactiveChatManager:
         # 5. 概率判断
         roll = random.random()
         if roll >= final_prob:
-            return False, f"概率判断失败（{roll:.2f} >= {final_prob:.2f}）"
+            return False, f"未通过概率筛选（{roll:.2f} >= {final_prob:.2f}）"
 
         return True, f"触发成功（{roll:.2f} < {final_prob:.2f}）"
 
@@ -2853,13 +2853,16 @@ class ProactiveChatManager:
         if cls._debug_mode:
             logger.info("🔄 [主动对话后台任务] 已启动")
 
+        # 记录当前 task 身份，防止类被重复加载后旧循环继续运行
+        _own_task = asyncio.current_task()
+
         # 🆕 v1.2.0 定期保存和衰减计时器
         last_save_time = time.time()
         last_decay_time = time.time()
         save_interval = 300  # 每5分钟保存一次
         decay_interval = 3600  # 每小时检查一次衰减
 
-        while cls._is_running:
+        while cls._is_running and cls._background_task is _own_task:
             try:
                 # 获取当前配置
                 if hasattr(config_getter, "config"):
@@ -2989,8 +2992,8 @@ class ProactiveChatManager:
                                 context, config, plugin_instance, chat_key
                             )
                         else:
-                            # 如果概率判断失败，重置计时器
-                            if "概率判断失败" in reason:
+                            # 如果未通过概率筛选，重置计时器
+                            if "未通过概率筛选" in reason:
                                 state = cls.get_chat_state(chat_key)
                                 state["last_bot_reply_time"] = time.time()
                                 if cls._debug_mode:
@@ -3009,8 +3012,10 @@ class ProactiveChatManager:
             except Exception as e:
                 logger.error(f"[主动对话后台任务] 发生错误: {e}", exc_info=True)
 
-        if cls._debug_mode:
-            logger.info("🛑 [主动对话后台任务] 已停止")
+        cls._is_running = False
+        cls._background_task = None
+
+        logger.info("🛑 [主动对话后台任务] 已停止")
 
     @classmethod
     async def trigger_proactive_chat(
@@ -3063,6 +3068,14 @@ class ProactiveChatManager:
                 is_private = chat_type == "private"
             else:
                 logger.error(f"[主动对话触发] 无法识别的 chat_key 格式: {chat_key}")
+                return
+
+            # 防御性校验：拒绝空的 chat_id，防止幽灵会话
+            if not chat_id or not str(chat_id).strip():
+                logger.error(
+                    f"[主动对话触发] 解析到无效的 chat_id={chat_id!r} "
+                    f"(chat_key={chat_key!r})，已拒绝以避免幽灵会话"
+                )
                 return
 
             # ⚠️ 关键修复：获取正确的platform_id用于构造unified_msg_origin
@@ -3445,19 +3458,9 @@ class ProactiveChatManager:
                 )
 
             # 🔧 优化：根据是否是重试场景，使用不同的标记
-            if last_content and attempts_count > 0:
-                # 重试场景：使用"再次尝试"标记而不是"主动发起新话题"
-                proactive_system_prompt = f"[🔄再次尝试对话]\n{proactive_prompt}"
-            else:
-                # 首次主动对话：使用原有的"主动发起新话题"标记
-                proactive_system_prompt = f"[🎯主动发起新话题]\n{proactive_prompt}"
-
-            proactive_system_prompt = MessageCleaner.mark_proactive_chat_message(
-                proactive_system_prompt
-            )
-
-            # 🆕 v1.2.x: 如果开启了时间戳功能，在提示词最前面添加当前时间
-
+            # 指令（proactive_prompt）将进入 system_prompt；
+            # 标记（proactive_marker）留在 user prompt。
+            proactive_marker = ""
             if cls._include_timestamp:
                 try:
                     dt = datetime.now()
@@ -3472,11 +3475,18 @@ class ProactiveChatManager:
                     ]
                     weekday = weekday_names[dt.weekday()]
                     current_time_str = dt.strftime(f"%Y-%m-%d {weekday} %H:%M:%S")
-                    proactive_system_prompt = (
-                        f"[{current_time_str}] {proactive_system_prompt}"
-                    )
+                    proactive_marker = f"[{current_time_str}] "
                 except Exception as e:
                     logger.warning(f"[主动对话] 生成时间戳失败: {e}")
+
+            if last_content and attempts_count > 0:
+                proactive_marker += "[🔄再次尝试对话]"
+            else:
+                proactive_marker += "[🎯主动发起新话题]"
+
+            proactive_marker = MessageCleaner.mark_proactive_chat_message(
+                proactive_marker
+            )
 
             # ========== 步骤1.5: 🆕 注入注意力用户信息（如果启用）==========
 
@@ -3705,7 +3715,7 @@ class ProactiveChatManager:
                             )
 
                         # 将注意力信息添加到提示词中
-                        proactive_system_prompt += attention_info
+                        proactive_marker += attention_info
 
                         if debug_mode or cls._debug_mode:
                             logger.info(
@@ -4330,7 +4340,7 @@ class ProactiveChatManager:
 
             formatted_context = await ContextManager.format_context_for_ai(
                 history_messages,
-                proactive_system_prompt,
+                proactive_marker,
                 self_id or "",
                 include_timestamp=cls._include_timestamp,
                 include_sender_info=cls._include_sender_info,
@@ -4594,7 +4604,7 @@ class ProactiveChatManager:
                         )
 
                     if not judge_pass:
-                        # AI判断不通过 → 不触发冷却，重置计时器（与概率筛选失败一致）
+                        # AI判断不通过 → 不触发冷却，重置计时器（与未通过概率筛选一致）
                         logger.info(
                             f"[主动对话-AI预判断] 群{chat_key} - AI判断当前不适合主动对话，跳过本次触发"
                         )
@@ -4625,7 +4635,9 @@ class ProactiveChatManager:
                     )
                     return
 
-            # 注入情绪状态（如果启用，放在AI预判断之后避免影响判断）
+            # 更新情绪状态（如果启用，放在AI预判断之后避免影响判断）。
+            # 情绪提示改为在 on_llm_request 中追加到 system_prompt。
+            _proactive_mood_hint = None
             if (
                 hasattr(plugin_instance, "mood_enabled")
                 and plugin_instance.mood_enabled
@@ -4633,11 +4645,17 @@ class ProactiveChatManager:
                 and plugin_instance.mood_tracker
             ):
                 if debug_mode:
-                    logger.info("[主动对话-步骤4.6] 注入情绪状态")
+                    logger.info("[主动对话-步骤4.6] 更新情绪状态")
 
-                final_message = plugin_instance.mood_tracker.inject_mood_to_prompt(
-                    chat_id, final_message, formatted_context
+                plugin_instance.mood_tracker.update_mood_from_context(
+                    chat_id, formatted_context
                 )
+                current_mood = plugin_instance.mood_tracker.get_current_mood(chat_id)
+                if current_mood != "平静":
+                    _proactive_mood_hint = (
+                        f"[系统信息-情绪参考: {current_mood}"
+                        "（在你的人格基调上自然体现，不要偏离人格设定）]"
+                    )
 
             # ========== 步骤5: 调用AI生成回复 ==========
             if debug_mode:
@@ -4727,13 +4745,19 @@ class ProactiveChatManager:
                     virtual_event.set_extra(PLUGIN_CUSTOM_SYSTEM_PROMPT, system_prompt)
                     virtual_event.set_extra(PLUGIN_CUSTOM_PROMPT, final_message)
                     virtual_event.set_extra(PLUGIN_IMAGE_URLS, [])
+                    # 情绪提示通过 event extra 传递给 on_llm_request
+                    if _proactive_mood_hint:
+                        virtual_event.set_extra(
+                            "_group_chat_plus_mood_hint", _proactive_mood_hint
+                        )
                     # 🔧 主动对话无用户消息，传空字符串作为向量检索查询词，
                     #    避免 final_message（完整上下文）触发 token 超限截断警告。
                     #    main.py 的 on_llm_request 钩子（priority=-1）会把
                     #    req.prompt 换回 final_message 供 AI 推理使用。
                     virtual_event.set_extra(PLUGIN_CURRENT_MESSAGE, "")
                     # 🆕 v1.2.2-hotfix.1: 静态指令通过 extra 传递，由 on_llm_request 追加到 system_prompt
-                    _proactive_static_instructions = (
+                    _proactive_static_instructions = proactive_prompt
+                    _proactive_static_instructions += (
                         "\n\n[系统指令-历史上下文识别]\n"
                         "- 标有「【禁止重复-你的历史回复】」的是你之前说过的话，不要重复相同句式或观点\n"
                         "- 相似度超过50%必须换角度\n"
@@ -5109,19 +5133,23 @@ class ProactiveChatManager:
                 logger.info(f"[主动对话保存] unified_msg_origin: {unified_msg_origin}")
 
             # ⚠️ 【重要】保存的内容不包含记忆信息
-            # 这里保存的是原始的 proactive_system_prompt（步骤1构造的）
+            # 这里保存的是 proactive_marker + proactive_prompt（等价于旧版 proactive_system_prompt）
             # 而不是注入了记忆的 final_message（步骤4-5使用的）
             # 这样可以避免记忆内容污染官方对话历史，防止AI根据上下文反向污染记忆库
 
+            # 新版本把标记和指令拆开了，这里拼回旧版 proactive_system_prompt 的格式
+            # proactive_marker 已是 mark_proactive_chat_message 编码后的结果
+            combined_prompt = proactive_marker + "\n" + proactive_prompt
+
             # 清理系统提示词，但保留主动对话标记（让AI能理解这是主动发起的对话）
-            # 系统提示词格式: "[🎯主动发起新话题]\n{实际提示内容}"
+            # 系统提示词格式: "PROACTIVE_CHAT_MARKER\n[🎯主动发起新话题]\n{实际提示内容}"
             # 使用 clean_message_preserve_proactive 保留主动对话标记，但清理其他系统提示词
             user_message = MessageCleaner.clean_message_preserve_proactive(
-                proactive_system_prompt
+                combined_prompt
             )
             if not user_message:
-                # 如果清理后为空，使用原始提示词
-                user_message = proactive_system_prompt.strip()
+                # 如果清理后为空，使用拼接后的提示词
+                user_message = combined_prompt.strip()
 
             # 确保记忆内容没有被意外混入
             # user_message 应该只包含主动对话标记和基础提示，不包含 "=== 背景信息 ===" 部分
@@ -5504,7 +5532,7 @@ class ProactiveChatManager:
 
                     # 保存主动对话系统提示
                     system_msg = AstrBotMessage()
-                    system_msg.message_str = proactive_system_prompt
+                    system_msg.message_str = combined_prompt
                     system_msg.platform_name = used_platform
                     system_msg.timestamp = int(time.time())
                     system_msg.type = (

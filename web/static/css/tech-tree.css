@@ -5,11 +5,13 @@
     flex: 1;
     min-height: 0;
     display: flex;
+    overflow: hidden; /* fallback for browsers without overflow: clip */
     overflow: clip;
     position: relative;
 }
 #tech-tree-canvas {
     flex: 1;
+    overflow: hidden; /* fallback for browsers without overflow: clip */
     overflow: clip;
     position: relative;
     z-index: 1;
@@ -193,6 +195,7 @@
     flex-direction: column;
     align-items: center;
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     pointer-events: auto;
     z-index: 1;
@@ -443,6 +446,7 @@
 .breadcrumb-separator {
     font-size: 12px;
     color: var(--text-muted);
+    -webkit-user-select: none;
     user-select: none;
     opacity: 0.5;
 }
@@ -502,6 +506,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    -webkit-overscroll-behavior: contain; /* Safari < 16 fallback */
     overscroll-behavior: contain;
     padding: 14px;
 }
@@ -553,6 +558,7 @@
     color: var(--text-secondary);
     cursor: pointer;
     background: var(--bg-input);
+    -webkit-user-select: none;
     user-select: none;
     transition: background .15s;
     display: flex;
@@ -602,8 +608,10 @@
 .prompt-floater {
     position: fixed;
     z-index: 9999;
-    min-width: 360px;
-    max-width: 560px;
+    width: 520px;
+    min-width: 300px;
+    max-width: calc(100vw - 40px);
+    max-height: calc(100vh - 40px);
     background: var(--bg-card);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
@@ -628,6 +636,7 @@
     background: var(--glass-bg);
     border-bottom: 1px solid var(--glass-border);
     cursor: move;
+    -webkit-user-select: none;
     user-select: none;
     flex-shrink: 0;
 }
@@ -659,7 +668,6 @@
     overflow-y: auto;
     padding: 12px;
     min-height: 120px;
-    max-height: 50vh;
 }
 .prompt-floater-tip {
     font-size: 11px;
@@ -675,6 +683,31 @@
     color: var(--text-secondary);
     white-space: pre-wrap;
     word-break: break-all;
+}
+
+.prompt-floater-resize-handle {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 28px;
+    height: 28px;
+    cursor: nwse-resize;
+    z-index: 10;
+}
+.prompt-floater-resize-handle::after {
+    content: '';
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+    width: 10px;
+    height: 10px;
+    border-right: 2px solid var(--text-muted);
+    border-bottom: 2px solid var(--text-muted);
+}
+
+/* 桌面端隐藏自定义手柄，用原生 resize */
+@media (min-width: 768px) {
+    .prompt-floater-resize-handle { display: none; }
 }
 
 /* ===== Smart Search ===== */
@@ -728,6 +761,7 @@
     border-radius: 12px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     z-index: 500;
+    -webkit-overscroll-behavior: contain; /* Safari < 16 fallback */
     overscroll-behavior: contain;
 }
 .flow-search-results.hidden { display: none; }
@@ -851,7 +885,9 @@
         width: 100% !important;
         min-width: unset !important;
         max-width: unset !important;
+        height: min(72vh, calc(100vh - 120px)); /* fallback for browsers without dvh */
         height: min(72vh, calc(100dvh - 120px));
+        max-height: min(72vh, calc(100vh - 120px)); /* fallback for browsers without dvh */
         max-height: min(72vh, calc(100dvh - 120px));
         border-left: none;
         border-top: 1px solid var(--glass-border);
@@ -929,16 +965,9 @@
         align-items: center;
     }
 
-    /* 搜索结果移动端：底部抽屉样式 */
+    /* 搜索结果移动端：限制最大高度，仍跟随搜索框 */
     .flow-search-results {
-        position: fixed;
-        top: auto;
-        left: 8px;
-        right: 8px;
-        bottom: 0;
-        max-height: 60vh;
-        border-radius: 16px 16px 0 0;
-        margin-top: 0;
+        max-height: 50vh;
     }
     .flow-search-item {
         padding: 14px;
@@ -947,14 +976,14 @@
     .flow-search-item-name { font-size: 14px; }
     .flow-search-item-path { font-size: 12px; }
 
-    /* 浮动提示框在移动端全宽 */
+    /* 浮动提示框在移动端 */
     .prompt-floater {
-        min-width: unset;
+        min-width: 280px;
         max-width: calc(100vw - 24px);
-        width: calc(100vw - 24px);
+        max-height: calc(100vh - 24px);
+        width: calc(100vw - 60px);
         resize: none;
         left: 12px !important;
-        right: 12px !important;
     }
 
     .pipeline-title { left: 10px !important; font-size: 10px; gap: 2px; }
@@ -967,5 +996,114 @@
     .config-panel {
         height: 85vh !important;
         max-height: 85vh !important;
+    }
+}
+
+/* ===== Zoom Controls ===== */
+#zoom-ctrl {
+    position: fixed;
+    bottom: 88px;
+    right: 16px;
+    z-index: 119;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: auto;
+}
+#zoom-ctrl.hidden {
+    display: none;
+}
+#zoom-ctrl button {
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    color: var(--text-primary);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition), border-color var(--transition), transform 0.1s ease;
+    -webkit-user-select: none;
+    user-select: none;
+}
+#zoom-ctrl button:hover {
+    background: var(--glass-bg-hover);
+    border-color: var(--glass-border-hover);
+}
+#zoom-ctrl button:active {
+    transform: scale(0.92);
+    background: var(--glass-bg-active);
+}
+#zoom-ctrl .zoom-ctrl-fit {
+    font-size: 14px;
+    font-weight: bold;
+}
+
+/* 配置面板打开时隐藏缩放按钮 */
+body.config-panel-open #zoom-ctrl {
+    display: none;
+}
+
+/* 平板端 */
+@media (min-width: 768px) and (max-width: 1099px) {
+    #zoom-ctrl {
+        bottom: 84px;
+        right: 14px;
+        gap: 3px;
+    }
+    #zoom-ctrl button {
+        width: 32px;
+        height: 32px;
+        font-size: 16px;
+    }
+    #zoom-ctrl .zoom-ctrl-fit {
+        font-size: 13px;
+    }
+}
+
+/* 手机端 */
+@media (max-width: 767px) {
+    #zoom-ctrl {
+        bottom: 64px;
+        right: 10px;
+        gap: 3px;
+    }
+    #zoom-ctrl button {
+        width: 32px;
+        height: 32px;
+        font-size: 16px;
+        /* 增大触摸目标 */
+        min-width: 40px;
+        min-height: 40px;
+        padding: 0;
+    }
+    #zoom-ctrl .zoom-ctrl-fit {
+        font-size: 13px;
+    }
+}
+
+/* ========== backdrop-filter 不支持时的背景回退 ========== */
+@supports not (backdrop-filter: blur(1px)) {
+    .stage-card {
+        background: var(--bg-secondary);
+    }
+    .flow-node--stage:hover .stage-card {
+        background: var(--bg-hover);
+    }
+
+    #zoom-ctrl button {
+        background: var(--bg-secondary);
+    }
+    #zoom-ctrl button:hover {
+        background: var(--bg-hover);
+    }
+    #zoom-ctrl button:active {
+        background: var(--bg-card);
     }
 }

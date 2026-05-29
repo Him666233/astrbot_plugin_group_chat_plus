@@ -20,12 +20,23 @@ const Charts = {
         this._bindEvents();
         this._setupAutoRefresh();
         await this._loadCharts(true);
+        this._bindThemeChange();
+    },
+
+    /** 监听主题切换，立即重绘 canvas 图表（颜色依赖 CSS 变量） */
+    _bindThemeChange() {
+        if (this._themeBound) return;
+        this._themeBound = true;
+        window.addEventListener('themeChanged', () => {
+            if (this._initialized) this._loadCharts(false);
+        });
     },
 
     /** 销毁（切换视图时调用） */
     destroy() {
         if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
         this._initialized = false;
+        this._themeBound = false;
     },
 
     /** 设置自动刷新 */
@@ -33,8 +44,8 @@ const Charts = {
         if (this._refreshTimer) clearInterval(this._refreshTimer);
         if (this._autoRefresh) {
             this._refreshTimer = setInterval(() => {
-                if (this._session) this._loadCharts(false);
-            }, 10000);
+                this._loadCharts(false);
+            }, 3000);
         }
     },
 
@@ -65,6 +76,8 @@ const Charts = {
     /** 绑定事件 */
     _bindEvents() {
         const select = document.getElementById('chart-session-select');
+        const refreshBtn = document.getElementById('btn-refresh-charts');
+
         if (select && !select._chartsBound) {
             select._chartsBound = true;
             select.addEventListener('change', () => {
@@ -72,6 +85,25 @@ const Charts = {
                 this._prevData = {};
                 this._initialized = false;
                 this._loadCharts(true);
+            });
+        }
+
+        // 手动刷新按钮（始终可用，无会话时只刷新全局概览）
+        if (refreshBtn && !refreshBtn._chartsBound) {
+            refreshBtn._chartsBound = true;
+            refreshBtn.addEventListener('click', async () => {
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '刷新中...';
+                try {
+                    this._initialized = false;
+                    await this._loadCharts(true);
+                    Utils.toast('数据已刷新', 'success', 2000);
+                } catch (e) {
+                    Utils.toast('刷新失败', 'error', 3000);
+                } finally {
+                    refreshBtn.disabled = false;
+                    refreshBtn.textContent = '🔄 刷新';
+                }
             });
         }
 
@@ -128,20 +160,25 @@ const Charts = {
         }
 
         // 自动刷新：原地更新，不重建 DOM，不产生闪烁
-        const [overviewRes, attentionRes, probRes, moodRes, proactiveRes, detailRes] = await Promise.allSettled([
-            Api.dataOverview(),
-            Api.dataAttention(this._session),
-            Api.dataProbability(this._session),
-            Api.dataMood(this._session),
-            Api.dataProactive(),
-            this._session ? Api.sessionDetail(this._session) : Promise.resolve(null),
-        ]);
-
-        this._updateOverview(overviewRes.value, detailRes.value, attentionRes.value);
-        this._updateAttention(attentionRes.value);
-        this._updateProbability(probRes.value);
-        this._updateMood(moodRes.value);
-        this._updateProactive(proactiveRes.value);
+        // 无会话时仅刷新全局概览，避免无效 API 调用
+        if (this._session) {
+            const [overviewRes, attentionRes, probRes, moodRes, proactiveRes, detailRes] = await Promise.allSettled([
+                Api.dataOverview({ autoRefresh: true }),
+                Api.dataAttention(this._session, { autoRefresh: true }),
+                Api.dataProbability(this._session, { autoRefresh: true }),
+                Api.dataMood(this._session, { autoRefresh: true }),
+                Api.dataProactive({ autoRefresh: true }),
+                Api.sessionDetail(this._session, { autoRefresh: true }),
+            ]);
+            this._updateOverview(overviewRes.value, detailRes.value, attentionRes.value);
+            this._updateAttention(attentionRes.value);
+            this._updateProbability(probRes.value);
+            this._updateMood(moodRes.value);
+            this._updateProactive(proactiveRes.value);
+        } else {
+            const overviewRes = await Api.dataOverview({ autoRefresh: true });
+            this._updateOverview(overviewRes, null, null);
+        }
     },
 
     // ==================== 构建（首次渲染）====================
@@ -243,7 +280,7 @@ const Charts = {
                 ? `当前为<strong>传统模式</strong>：回复后概率提升按整个会话计算，持续 <strong>${d.probability_duration || 0}s</strong>，再次成功回复会刷新计时。`
                 : `当前为<strong>注意力模式</strong>：回复后加成已由注意力机制按用户接管，<strong>after_reply_probability</strong> 不参与当前会话计算。`;
             card.appendChild(modeNote);
-            this._drawBarChart(canvas, labels, values, 'var(--text-primary)');
+            this._drawBarChart(canvas, labels, values, 'var(--accent-red)');
 
             const stats = document.createElement('div');
             stats.className = 'stats-row';
@@ -278,7 +315,7 @@ const Charts = {
                 return;
             }
 
-            this._drawBarChart(canvas, [mood.current_mood || '平静'], [mood.intensity || 0], '#cc3333');
+            this._drawBarChart(canvas, [mood.current_mood || '平静'], [mood.intensity || 0], 'var(--accent-red)');
 
             const stats = document.createElement('div');
             stats.className = 'stats-row';
@@ -367,7 +404,7 @@ const Charts = {
             const key = data.map(d => d.attention_score || 0).join(',');
 
             const canvas = document.querySelector('#chart-attention canvas');
-            if (canvas && key !== this._prevData['att-data']) {
+            if (canvas) {
                 this._drawBarChart(canvas, data.map(d => d.user_id || 'unknown'),
                     data.map(d => d.attention_score || 0), 'var(--accent-red)');
                 this._prevData['att-data'] = key;
@@ -388,8 +425,8 @@ const Charts = {
             const { labels, values } = this._probLabelsValues(d);
             const key = values.join(',');
             const canvas = document.querySelector('#chart-probability canvas');
-            if (canvas && key !== this._prevData['prob-data']) {
-                this._drawBarChart(canvas, labels, values, 'var(--text-primary)');
+            if (canvas) {
+                this._drawBarChart(canvas, labels, values, 'var(--accent-red)');
                 this._prevData['prob-data'] = key;
             }
 
@@ -414,8 +451,8 @@ const Charts = {
             const intensity = mood.intensity || 0;
 
             const canvas = document.querySelector('#chart-mood canvas');
-            if (canvas && (moodName !== this._prevData['mood-name'] || intensity !== this._prevData['mood-intensity'])) {
-                this._drawBarChart(canvas, [moodName], [intensity], '#cc3333');
+            if (canvas) {
+                this._drawBarChart(canvas, [moodName], [intensity], 'var(--accent-red)');
             }
 
             this._setTextIfChanged('mood-name', moodName);
@@ -437,7 +474,7 @@ const Charts = {
             const key = `${totalSuccess},${totalFailure},${totalCooldown}`;
 
             const canvas = document.querySelector('#chart-proactive canvas');
-            if (canvas && key !== this._prevData['pro-data']) {
+            if (canvas) {
                 this._drawBarChart(canvas, ['成功', '失败', '冷却中'], [totalSuccess, totalFailure, totalCooldown], 'var(--accent-green)');
                 this._prevData['pro-data'] = key;
             }

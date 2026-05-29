@@ -22,7 +22,7 @@ v1.2.0 更新：
 - 新增清理：历史判断记录、兴趣话题检测提示等
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 import re
@@ -349,7 +349,9 @@ class MessageCleaner:
         return bool(re.match(pattern, cleaned, flags=re.IGNORECASE))
 
     @staticmethod
-    def extract_raw_message_from_event(event: AstrMessageEvent) -> str:
+    def extract_raw_message_from_event(
+        event: AstrMessageEvent, self_id: str = None
+    ) -> str:
         """
         从事件中提取纯净的原始消息（不含任何系统添加的内容）
 
@@ -380,7 +382,9 @@ class MessageCleaner:
                         raw_parts.append("[图片]")
                     elif isinstance(component, Reply):
                         # 引用消息组件，提取引用信息
-                        reply_text = MessageCleaner._format_reply_component(component)
+                        reply_text = MessageCleaner._format_reply_component(
+                            component, self_id=self_id
+                        )
                         if reply_text:
                             raw_parts.append(reply_text)
                     elif isinstance(component, Forward):
@@ -454,7 +458,7 @@ class MessageCleaner:
             return ""
 
     @staticmethod
-    def _format_reply_component(reply_component) -> str:
+    def _format_reply_component(reply_component, self_id: str = None) -> str:
         """
         格式化引用消息组件为文本表示
 
@@ -491,22 +495,37 @@ class MessageCleaner:
             elif hasattr(reply_component, "message"):
                 message_content = reply_component.message
 
+            # 检测被引用消息的发送者是否为AI自己
+            if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
+                sender_nickname = None
+            is_self = self_id and sender_id and str(sender_id) == str(self_id)
+            self_suffix = "(你)" if is_self else ""
+
             # 🆕 构建引用消息格式（与其他消息格式保持一致：发送者名字(ID:xxx)）
             if sender_nickname and sender_id and message_content:
-                # 完整格式：[引用 发送者名字(ID:xxx): 消息内容]
-                return f"[引用 {sender_nickname}(ID:{sender_id}): {message_content}]"
+                # 完整格式：[引用 发送者名字(你)(ID:xxx): 消息内容]
+                return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
             elif sender_id and message_content:
                 # 有ID但没有昵称
-                return f"[引用 用户(ID:{sender_id}): {message_content}]"
+                return (
+                    f"[引用 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
+                )
             elif sender_nickname and message_content:
                 # 有昵称但没有ID（兼容情况）
-                return f"[引用 {sender_nickname}: {message_content}]"
+                return f"[引用 {sender_nickname}{self_suffix}: {message_content}]"
             elif message_content:
                 # 只有消息内容
                 return f"[引用消息: {message_content}]"
             else:
-                # 什么都没有
-                return "[引用消息]"
+                # 内容无法提取，但有发送者信息时保留引用框架
+                if sender_nickname and sender_id:
+                    return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_id:
+                    return f"[引用 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_nickname:
+                    return f"[引用 {sender_nickname}{self_suffix}: (无法获取引用内容)]"
+                else:
+                    return "[引用消息]"
 
         except Exception as e:
             if DEBUG_MODE:
@@ -547,7 +566,7 @@ class MessageCleaner:
         """
         处理缓存消息中的图片
 
-        概率筛选失败时，缓存的消息需要特殊处理图片：
+        未通过概率筛选时，缓存的消息需要特殊处理图片：
         - 如果消息只包含图片（纯图片），不缓存（返回 False）
         - 如果消息是文本+图片，移除图片标记，只保留文本
         - 如果消息只有文本，直接保留

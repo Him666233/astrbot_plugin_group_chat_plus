@@ -9,7 +9,7 @@
 5. 图片处理（支持多模态直传和图片转文字，含省钱缓存）
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 import asyncio
@@ -170,6 +170,10 @@ class PrivateChatMain:
         Args:
             event: AstrBot消息事件对象，包含完整的私信消息信息
         """
+        logger.warning(
+            "[私信处理] 你打开私信模块干嘛呢？还没做完，看到这个信息就赶紧去把私信相关的那个模块部分的开关关掉，不要完全担心内容损坏，这边内容直接return返回了不会有任何处理，不过还是赶紧去关掉好一点，免得出现一些其他的稀奇古怪的问题，等我把这个模块做好了再说吧"
+        )
+        return
         if self.private_chat_debug_mode:
             logger.info("[私信处理] 收到私信消息，开始处理")
 
@@ -521,6 +525,7 @@ class PrivateChatMain:
             self.image_to_text_timeout,
             image_cache_to_use,
             self.max_images_per_message,
+            self_id=str(event.get_self_id()),
         )
 
         # 图片处理器返回 False 表示应丢弃此消息

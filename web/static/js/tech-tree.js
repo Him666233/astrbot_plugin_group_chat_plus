@@ -247,6 +247,18 @@ const TechTree = {
         tooltip.innerHTML = '<div class="flow-tooltip-name"></div><div class="flow-tooltip-desc"></div>';
         canvas.appendChild(tooltip);
         this._tooltip = tooltip;
+
+        // Zoom controls — find existing element in HTML, wire click handlers
+        const zoomCtrl = document.getElementById('zoom-ctrl');
+        if (zoomCtrl) {
+            zoomCtrl.classList.remove('hidden');
+            const btnIn = zoomCtrl.querySelector('.zoom-ctrl-in');
+            const btnFit = zoomCtrl.querySelector('.zoom-ctrl-fit');
+            const btnOut = zoomCtrl.querySelector('.zoom-ctrl-out');
+            if (btnIn) btnIn.onclick = (e) => { e.stopPropagation(); this._zoomIn(); };
+            if (btnOut) btnOut.onclick = (e) => { e.stopPropagation(); this._zoomOut(); };
+            if (btnFit) btnFit.onclick = (e) => { e.stopPropagation(); this._zoomToFit(); };
+        }
     },
 
     _setSVGSize(w, h) {
@@ -313,7 +325,9 @@ const TechTree = {
 
         const totalW = maxX + 300;
         const totalH = TOP_MARGIN + pipelines.length * PIPELINE_V_GAP + WAVE_AMP + 100;
-        this._setSVGSize(Math.max(totalW, 1200), Math.max(totalH, 800));
+        this._contentW = Math.max(totalW, 1200);
+        this._contentH = Math.max(totalH, 800);
+        this._setSVGSize(this._contentW, this._contentH);
 
         pipelines.forEach((pipeline, pi) => {
             const baseY = TOP_MARGIN + pi * PIPELINE_V_GAP;
@@ -1085,6 +1099,101 @@ const TechTree = {
         this._renderBreadcrumb();
     },
 
+    _zoomIn() {
+        const canvas = document.getElementById('tech-tree-canvas');
+        if (!canvas) return;
+        this._zoomAtPoint(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.25);
+    },
+
+    _zoomOut() {
+        const canvas = document.getElementById('tech-tree-canvas');
+        if (!canvas) return;
+        this._zoomAtPoint(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.25);
+    },
+
+    _zoomAtPoint(sx, sy, factor) {
+        const oldS = this._baseScale;
+        const newS = Math.max(0.5, Math.min(2.5, oldS * factor));
+        if (newS === oldS) return;
+
+        const oldTX = this._baseTranslateX + this._panX;
+        const oldTY = this._baseTranslateY + this._panY;
+
+        const ratio = newS / oldS;
+        this._baseTranslateX = sx - (sx - oldTX) * ratio - this._panX;
+        this._baseTranslateY = sy - (sy - oldTY) * ratio - this._panY;
+        this._baseScale = newS;
+        this._applyViewportTransform();
+    },
+
+    _zoomToFit() {
+        const canvas = document.getElementById('tech-tree-canvas');
+        if (!canvas) return;
+
+        const vw = canvas.clientWidth;
+        const vh = canvas.clientHeight;
+        const pad = 48;
+
+        // Calculate actual bounding box of visible nodes
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const container = this._viewLevel === 0 ? this._nodesLevel0 : this._nodesLevel1;
+        if (container) {
+            const nodes = container.querySelectorAll('.flow-node, .flow-step-node');
+            nodes.forEach(node => {
+                const l = parseFloat(node.style.left) || 0;
+                const t = parseFloat(node.style.top) || 0;
+                const w = node.offsetWidth || 180;
+                const h = node.offsetHeight || 72;
+                minX = Math.min(minX, l);
+                minY = Math.min(minY, t);
+                maxX = Math.max(maxX, l + w);
+                maxY = Math.max(maxY, t + h);
+            });
+        }
+        // Also include pipeline titles in overview mode
+        if (this._viewLevel === 0 && this._nodesLevel0) {
+            const titles = this._nodesLevel0.querySelectorAll('.pipeline-title');
+            titles.forEach(el => {
+                const l = parseFloat(el.style.left) || 0;
+                const t = parseFloat(el.style.top) || 0;
+                const w = el.offsetWidth || 120;
+                const h = el.offsetHeight || 24;
+                minX = Math.min(minX, l);
+                minY = Math.min(minY, t);
+                maxX = Math.max(maxX, l + w);
+                maxY = Math.max(maxY, t + h);
+            });
+        }
+
+        let cw, ch, cx, cy;
+        if (isFinite(minX)) {
+            cw = maxX - minX;
+            ch = maxY - minY;
+            cx = minX;
+            cy = minY;
+        } else if (this._contentW && this._contentH) {
+            cw = this._contentW;
+            ch = this._contentH;
+            cx = 0;
+            cy = 0;
+        } else {
+            return;
+        }
+
+        const fitS = Math.min((vw - pad * 2) / cw, (vh - pad * 2) / ch);
+        const newS = Math.max(0.5, Math.min(2.5, fitS));
+
+        this._baseScale = newS;
+        this._baseTranslateX = (vw - cw * newS) / 2 - cx * newS;
+        this._baseTranslateY = (vh - ch * newS) / 2 - cy * newS;
+        this._panX = 0;
+        this._panY = 0;
+        this._applyViewportTransform();
+        this._viewport.style.transition = 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+        clearTimeout(this._fitTransitionTimer);
+        this._fitTransitionTimer = setTimeout(() => { this._viewport.style.transition = ''; }, 500);
+    },
+
     // ==================== Config Panel ====================
 
     _selectStep(step) {
@@ -1224,17 +1333,27 @@ const TechTree = {
         }
     },
 
-    _showTooltip(name, desc, event) {
+    _showTooltip(name, desc, event, side) {
         if (!this._tooltip) return;
         this._tooltip.querySelector('.flow-tooltip-name').textContent = name;
         this._tooltip.querySelector('.flow-tooltip-desc').textContent = desc;
-        this._tooltip.style.left = (event.clientX + 14) + 'px';
+        if (side === 'left') {
+            this._tooltip.style.left = 'auto';
+            this._tooltip.style.right = (window.innerWidth - event.clientX + 14) + 'px';
+        } else {
+            this._tooltip.style.left = (event.clientX + 14) + 'px';
+            this._tooltip.style.right = 'auto';
+        }
         this._tooltip.style.top = (event.clientY + 14) + 'px';
         this._tooltip.classList.add('show');
     },
 
     _hideTooltip() {
-        if (this._tooltip) this._tooltip.classList.remove('show');
+        if (this._tooltip) {
+            this._tooltip.classList.remove('show');
+            this._tooltip.style.left = '';
+            this._tooltip.style.right = '';
+        }
     },
 
     _updateAllStatuses() {
@@ -1504,8 +1623,10 @@ const TechTree = {
         const floater = document.createElement('div');
         floater.className = 'prompt-floater';
         const count = Object.keys(this._floaters).length;
-        floater.style.top = (80 + count * 30) + 'px';
-        floater.style.left = Math.max(20, window.innerWidth - 580 - count * 30) + 'px';
+        const initTop = Math.min(80 + count * 30, window.innerHeight - 200);
+        const initLeft = Math.max(20, Math.min(window.innerWidth - 580 - count * 30, window.innerWidth - 380));
+        floater.style.top = initTop + 'px';
+        floater.style.left = initLeft + 'px';
         const titlebar = document.createElement('div');
         titlebar.className = 'prompt-floater-titlebar';
         const title = document.createElement('span');
@@ -1529,8 +1650,14 @@ const TechTree = {
         pre.textContent = data.content;
         body.appendChild(pre);
         floater.appendChild(body);
-        floater.addEventListener('mousedown', () => this._bringFloaterToTop(floater));
+        const bringTop = () => this._bringFloaterToTop(floater);
+        floater.addEventListener('mousedown', bringTop);
+        floater.addEventListener('touchstart', bringTop, { passive: true });
+        const resizeHandle = document.createElement('div');
+        resizeHandle.className = 'prompt-floater-resize-handle';
+        floater.appendChild(resizeHandle);
         this._enableDrag(floater, titlebar);
+        this._enableResize(floater, resizeHandle);
         document.body.appendChild(floater);
         this._floaters[promptKey] = floater;
         this._bringFloaterToTop(floater);
@@ -1555,26 +1682,87 @@ const TechTree = {
     },
 
     _enableDrag(floater, handle) {
-        let sX, sY, sL, sT;
+        let sX, sY, sL, sT, sW, sH;
+        const clamp = (floater) => {
+            const r = floater.getBoundingClientRect();
+            const w = r.width, h = r.height;
+            const maxLeft = window.innerWidth - w;
+            const maxTop = window.innerHeight - h;
+            let left = parseFloat(floater.style.left) || 0;
+            let top = parseFloat(floater.style.top) || 0;
+            left = Math.max(0, Math.min(left, maxLeft));
+            top = Math.max(0, Math.min(top, maxTop));
+            floater.style.left = left + 'px';
+            floater.style.top = top + 'px';
+        };
         const down = (e) => {
             if (e.target.classList.contains('prompt-floater-close')) return;
             e.preventDefault();
-            sX = e.clientX; sY = e.clientY;
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            sX = clientX; sY = clientY;
             const r = floater.getBoundingClientRect();
             sL = r.left; sT = r.top;
+            sW = r.width; sH = r.height;
             document.addEventListener('mousemove', move);
             document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, { passive: false });
+            document.addEventListener('touchend', up);
             this._bringFloaterToTop(floater);
         };
         const move = (e) => {
-            floater.style.left = (sL + e.clientX - sX) + 'px';
-            floater.style.top = (sT + e.clientY - sY) + 'px';
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            floater.style.left = (sL + clientX - sX) + 'px';
+            floater.style.top = (sT + clientY - sY) + 'px';
+        };
+        const up = (e) => {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            document.removeEventListener('touchmove', move);
+            document.removeEventListener('touchend', up);
+            clamp(floater);
+        };
+        handle.addEventListener('mousedown', down);
+        handle.addEventListener('touchstart', down, { passive: false });
+    },
+
+    _enableResize(floater, handle) {
+        let rX, rY, rW, rH, rL, rT;
+        const down = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            rX = clientX; rY = clientY;
+            const rect = floater.getBoundingClientRect();
+            rW = rect.width; rH = rect.height;
+            rL = parseFloat(floater.style.left) || rect.left;
+            rT = parseFloat(floater.style.top) || rect.top;
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, { passive: false });
+            document.addEventListener('touchend', up);
+            this._bringFloaterToTop(floater);
+        };
+        const move = (e) => {
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            let newW = rW + clientX - rX;
+            let newH = rH + clientY - rY;
+            newW = Math.max(280, Math.min(newW, window.innerWidth - rL - 12));
+            newH = Math.max(160, Math.min(newH, window.innerHeight - rT - 12));
+            floater.style.width = newW + 'px';
+            floater.style.height = newH + 'px';
         };
         const up = () => {
             document.removeEventListener('mousemove', move);
             document.removeEventListener('mouseup', up);
+            document.removeEventListener('touchmove', move);
+            document.removeEventListener('touchend', up);
         };
         handle.addEventListener('mousedown', down);
+        handle.addEventListener('touchstart', down, { passive: false });
     },
 
     // ==================== Viewport Pan & Transform ====================
@@ -1930,11 +2118,22 @@ const TechTree = {
             }, { passive: false });
         }
 
-        // Mouse wheel → pan
+        // Mouse wheel → pan (Ctrl+wheel → zoom)
         canvas.addEventListener('wheel', (e) => {
             // Don't intercept when scrolling inside config panel
             if (e.target.closest('.config-panel')) return;
             e.preventDefault();
+
+            if (e.ctrlKey || e.metaKey) {
+                // Ctrl+wheel → zoom centered on cursor
+                const rect = canvas.getBoundingClientRect();
+                const sx = e.clientX - rect.left;
+                const sy = e.clientY - rect.top;
+                const factor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
+                this._zoomAtPoint(sx, sy, factor);
+                return;
+            }
+
             this._panX -= e.deltaX;
             this._panY -= e.deltaY;
             // Apply immediately without CSS transition for smooth feel

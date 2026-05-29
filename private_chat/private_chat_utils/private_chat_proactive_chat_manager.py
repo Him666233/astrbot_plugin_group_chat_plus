@@ -10,7 +10,7 @@
 6. 失败处理和冷却机制
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 
 v1.2.0 更新：
 - 支持其他插件的 on_llm_request 钩子注入（如 emotionai）
@@ -1168,7 +1168,7 @@ class ProactiveChatManager:
                 )
             return
 
-        # 🆕 v1.2.0: 关闭主动对话检测（已判定失败）
+        # 🆕 v1.2.0: 关闭主动对话检测（已判定不通过）
         state["proactive_active"] = False
         # 标记为已记录
         state["proactive_outcome_recorded"] = True
@@ -2295,7 +2295,7 @@ class ProactiveChatManager:
         # 5. 概率判断
         roll = random.random()
         if roll >= final_prob:
-            return False, f"概率判断失败（{roll:.2f} >= {final_prob:.2f}）"
+            return False, f"未通过概率筛选（{roll:.2f} >= {final_prob:.2f}）"
 
         return True, f"触发成功（{roll:.2f} < {final_prob:.2f}）"
 
@@ -2726,13 +2726,16 @@ class ProactiveChatManager:
         if cls._debug_mode:
             logger.info("🔄 [主动对话后台任务] 已启动")
 
+        # 记录当前 task 身份，防止类被重复加载后旧循环继续运行
+        _own_task = asyncio.current_task()
+
         # 🆕 v1.2.0 定期保存和衰减计时器
         last_save_time = time.time()
         last_decay_time = time.time()
         save_interval = 300  # 每5分钟保存一次
         decay_interval = 3600  # 每小时检查一次衰减
 
-        while cls._is_running:
+        while cls._is_running and cls._background_task is _own_task:
             try:
                 # 获取当前配置
                 if hasattr(config_getter, "config"):
@@ -2862,8 +2865,8 @@ class ProactiveChatManager:
                                 context, config, plugin_instance, chat_key
                             )
                         else:
-                            # 如果概率判断失败，重置计时器
-                            if "概率判断失败" in reason:
+                            # 如果未通过概率筛选，重置计时器
+                            if "未通过概率筛选" in reason:
                                 state = cls.get_chat_state(chat_key)
                                 state["last_bot_reply_time"] = time.time()
                                 if cls._debug_mode:
@@ -2882,8 +2885,10 @@ class ProactiveChatManager:
             except Exception as e:
                 logger.error(f"[主动对话后台任务] 发生错误: {e}", exc_info=True)
 
-        if cls._debug_mode:
-            logger.info("🛑 [主动对话后台任务] 已停止")
+        cls._is_running = False
+        cls._background_task = None
+
+        logger.info("🛑 [主动对话后台任务] 已停止")
 
     @classmethod
     async def trigger_proactive_chat(

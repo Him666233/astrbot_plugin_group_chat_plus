@@ -381,10 +381,11 @@ html {
     margin-bottom: 12px;
 }
 .log-section-header h3 { font-size: 15px; font-weight: 600; }
+.log-refresh-hint { font-size: 12px; color: var(--text-secondary); max-width: 360px; line-height: 1.4; }
 
 .log-table {
     width: 100%;
-    table-layout: fixed;
+    table-layout: auto;
     border-collapse: collapse;
     font-size: 13px;
 }
@@ -400,12 +401,13 @@ html {
     padding: 6px 10px;
     border-bottom: 1px solid var(--border-color);
     color: var(--text-secondary);
+    vertical-align: middle;
 }
 .log-table tr:hover td { background: var(--bg-hover); }
-.log-path { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-path { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-note {
     display: inline-block;
-    max-width: 360px;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -419,7 +421,7 @@ html {
 }
 .log-note-brute {
     display: inline-block;
-    max-width: 360px;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -444,9 +446,12 @@ html {
 .status-warn { background: rgba(224,32,32,0.12); color: var(--accent-red); }
 .status-error { background: rgba(224,32,32,0.2); color: var(--accent-red); }
 
-/* 附注列：不设宽限制，自然占满表格剩余空间 */
+/* 附注列：自然宽度，内容过多时截断 */
 .log-note-cell {
-    max-width: none;
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* 移动端附注：完整显示，允许换行 */
@@ -637,6 +642,22 @@ html {
     margin-bottom: 12px;
     color: var(--text-primary);
 }
+.settings-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.settings-section-header h3 {
+    margin-bottom: 0;
+}
+.settings-section-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
 
 /* ========== Heartbeat Status Badges ========== */
 .heartbeat-status-badge {
@@ -796,6 +817,7 @@ html {
     font-size: 12px;
     color: var(--text-muted);
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
 }
 .auto-refresh-toggle input[type="checkbox"] {
@@ -838,6 +860,7 @@ html {
     font-weight: 600;
     color: var(--accent-red);
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-color);
@@ -1002,6 +1025,7 @@ html {
 
 #session-detail {
     overflow-y: auto;
+    -webkit-overscroll-behavior: contain; /* Safari < 16 fallback */
     overscroll-behavior: contain;
     padding: 16px 24px;
 }
@@ -1130,6 +1154,28 @@ html {
     display: flex;
     gap: 8px;
     align-items: center;
+}
+
+/* ========== Charts Header Right ========== */
+.charts-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.charts-header-right .auto-refresh-toggle {
+    white-space: nowrap;
+}
+
+/* ========== File Refresh Notice ========== */
+.file-refresh-notice {
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    line-height: 1.6;
+    flex-shrink: 0;
 }
 
 /* ========== File Browser Layout ========== */
@@ -1264,6 +1310,7 @@ html {
     .mobile-topbar-version {
         font-size: 11px;
     }
+    .log-refresh-hint { font-size: 11px; max-width: 200px; }
 }
 
 /* ===== 移动端 (≤767px) ===== */
@@ -1479,10 +1526,12 @@ html {
     .chat-history-viewer { max-height: 280px; }
 
     .file-editor.file-editor--history {
+        min-height: min(60vh, 520px); /* fallback for browsers without dvh */
         min-height: min(60dvh, 520px);
     }
 
     .file-editor.file-editor--history .file-editor-textarea {
+        min-height: max(240px, 38vh); /* fallback for browsers without dvh */
         min-height: max(240px, 38dvh);
     }
 
@@ -1503,6 +1552,8 @@ html {
     #log-table-container { overflow-x: auto; }
     #ban-list-container { overflow-x: auto; }
     .log-pagination { flex-direction: column; gap: 8px; align-items: flex-end; }
+    .log-refresh-hint { font-size: 10px; max-width: 100%; white-space: normal; }
+    .log-section-header { flex-wrap: wrap; gap: 8px; }
 
     /* === 设置 === */
     #settings-container { padding: 12px 12px 100px 12px !important; }
@@ -1556,5 +1607,12 @@ html {
     .file-editor-textarea {
         scroll-margin-top: 20px;
         scroll-margin-bottom: 20px;
+    }
+}
+
+/* ========== backdrop-filter 不支持时的背景回退 ========== */
+@supports not (backdrop-filter: blur(1px)) {
+    .config-file-badge {
+        background: var(--bg-secondary);
     }
 }

@@ -1,15 +1,33 @@
 """
-图片处理器模块
-负责处理消息中的图片，包括检测、过滤和转文字
+多媒体消息处理模块
+负责处理消息中的各类媒体内容：
+- 图片：检测、过滤、转文字（AI 描述）或多模态直传
+- 视频：文件路径提取，内联标记注入
+- 语音/音频：文件路径提取，内联标记注入
+- 文件：文件路径与名称提取，内联标记注入
+
+同时负责缓存剥离前的标记富化（将文件路径注入占位标记中）
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 import asyncio
 from typing import List, Optional, Tuple, Any
 from astrbot.api.all import *
 from astrbot.api.message_components import Face, At, AtAll, Reply
+
+# 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
+try:
+    from astrbot.core.message.components import Video, Record, File
+except ImportError:
+    try:
+        from astrbot.api.message_components import Video, Record, File
+    except ImportError:
+        Video = None
+        Record = None
+        File = None
+
 from .image_description_cache import ImageDescriptionCache
 from .ai_error_formatter import format_ai_error
 
@@ -19,13 +37,14 @@ DEBUG_MODE: bool = False
 
 class ImageHandler:
     """
-    图片处理器
+    多媒体消息处理器
 
     主要功能：
-    1. 检测消息中的图片
-    2. 过滤纯图片消息或移除图片
-    3. 调用AI将图片转为文字描述
-    4. 将描述融入原消息
+    1. 检测消息中的图片，过滤纯图片或移除图片
+    2. 调用AI将图片转为文字描述，或将图片URL直传给多模态AI
+    3. 提取视频、语音(Record)、文件(File)组件的文件路径
+    4. 将媒体文件路径内联注入到消息文本的占位标记中（如 [视频: /path]）
+    5. 将图片描述融入原消息
     """
 
     @staticmethod
@@ -46,6 +65,7 @@ class ImageHandler:
         timeout: int = 60,
         image_description_cache: Optional[ImageDescriptionCache] = None,
         max_images_per_message: int = 10,
+        self_id: str = None,
     ) -> Tuple[bool, str, List[str], bool]:
         """
         处理消息中的图片
@@ -62,6 +82,7 @@ class ImageHandler:
             timeout: 图片转文字超时时间（秒）
             image_description_cache: 图片描述缓存实例（可选，用于省钱）
             max_images_per_message: 单条消息最大处理图片数
+            self_id: 机器人自身的用户ID，用于标记引用消息发送者是否为AI自己
 
         Returns:
             (是否继续处理, 处理后的消息, 图片URL列表, 图片是否保留)
@@ -87,7 +108,9 @@ class ImageHandler:
             # 如果没有图片，从消息链提取完整文本（含引用内容），不使用 get_message_outline()
             # 因为 get_message_outline() 通常不包含引用消息（Reply 组件）的内容
             if not has_image:
-                text_content = ImageHandler._extract_text_only(message_chain)
+                text_content = ImageHandler._extract_text_only(
+                    message_chain, self_id=self_id
+                )
                 if not text_content:
                     # 兜底：message chain 提取为空时才使用 get_message_outline()
                     text_content = event.get_message_outline()
@@ -110,7 +133,9 @@ class ImageHandler:
                     return False, "", [], False
                 else:
                     # 如果是图文混合,移除图片只保留文字
-                    text_only = ImageHandler._extract_text_only(message_chain)
+                    text_only = ImageHandler._extract_text_only(
+                        message_chain, self_id=self_id
+                    )
                     if DEBUG_MODE:
                         logger.info(f"移除图片后的消息: {text_only}")
                     return True, text_only, [], False
@@ -156,7 +181,9 @@ class ImageHandler:
                     return False, "", [], False
                 else:
                     # 如果是图文混合,移除图片只保留文字
-                    text_only = ImageHandler._extract_text_only(message_chain)
+                    text_only = ImageHandler._extract_text_only(
+                        message_chain, self_id=self_id
+                    )
                     if DEBUG_MODE:
                         logger.info(
                             f"非适用范围内的图文混合,移除图片保留文字: {text_only}"
@@ -173,13 +200,32 @@ class ImageHandler:
                     logger.info("未配置图片转文字提供商ID,提取图片URL传递给多模态AI")
                 # 提取图片URL
                 image_urls = await ImageHandler._extract_image_urls(image_components)
-                # 提取文本内容（不包含图片）
-                text_content = ImageHandler._extract_text_only(message_chain)
+                # 提取文本内容 — 保留 [图片] 标记作为占位符，与视频/语音/文件标记行为一致
+                # 多模态AI通过image_urls直接看到图片，但文本中的[图片]标记标明位置，
+                # 保存到历史时标记也会保留，确保上下文链中图片位置信息不丢失
+                text_parts = []
+                for comp in message_chain:
+                    if isinstance(comp, Plain):
+                        text_parts.append(ImageHandler._coerce_plain_text(comp.text))
+                    elif isinstance(comp, Image):
+                        text_parts.append("[图片]")
+                    else:
+                        fmt = ImageHandler._format_special_component(
+                            comp, self_id=self_id
+                        )
+                        if fmt:
+                            text_parts.append(fmt)
+                text_content = "".join(text_parts)
                 if DEBUG_MODE:
                     logger.info(
                         f"🟢 [多模态模式] 提取到 {len(image_urls)} 张图片，文本内容: {text_content[:100] if text_content else '(无文本)'}"
                     )
-                return True, text_content, image_urls, True  # 多模态: 图片保留为URL
+                return (
+                    True,
+                    text_content,
+                    image_urls,
+                    True,
+                )  # 多模态: 图片保留为URL，文本保留[图片]标记
 
             # === 第四步：配置了图片转文字提供商ID，尝试转换图片 ===
             if DEBUG_MODE:
@@ -195,6 +241,7 @@ class ImageHandler:
                 timeout,
                 image_description_cache,
                 getattr(event, "session_id", ""),
+                self_id=self_id,
             )
 
             # 如果转换失败或超时,进行降级处理（过滤图片）
@@ -208,7 +255,9 @@ class ImageHandler:
                         if isinstance(comp, Image):
                             fallback_parts.append("[图片（识别失败）]")
                         else:
-                            fmt = ImageHandler._format_special_component(comp)
+                            fmt = ImageHandler._format_special_component(
+                                comp, self_id=self_id
+                            )
                             if fmt:
                                 fallback_parts.append(fmt)
                     fallback_text = (
@@ -220,7 +269,9 @@ class ImageHandler:
                     return True, fallback_text, [], False
                 else:
                     # 如果是图文混合,只保留文字
-                    text_only = ImageHandler._extract_text_only(message_chain)
+                    text_only = ImageHandler._extract_text_only(
+                        message_chain, self_id=self_id
+                    )
                     if DEBUG_MODE:
                         logger.info(f"降级处理: 移除图片,保留文字: {text_only}")
                     return True, text_only, [], False  # 图片转文字失败，图片被移除
@@ -270,6 +321,15 @@ class ImageHandler:
             elif isinstance(component, Reply):
                 # 引用消息也视为有文字内容，防止「引用+图片」的消息被当作纯图片丢弃
                 has_text = True
+            elif Video is not None and isinstance(component, Video):
+                # 视频消息视为有内容，防止纯视频消息被丢弃
+                has_text = True
+            elif Record is not None and isinstance(component, Record):
+                # 语音消息视为有内容，防止纯语音消息被丢弃
+                has_text = True
+            elif File is not None and isinstance(component, File):
+                # 文件消息视为有内容，防止纯文件消息被丢弃
+                has_text = True
 
         # 限制单条消息处理的图片数量，防止恶意刷图
         if len(image_components) > max_images:
@@ -282,12 +342,15 @@ class ImageHandler:
         return has_image, has_text, image_components
 
     @staticmethod
-    def _format_special_component(component: BaseMessageComponent) -> str:
+    def _format_special_component(
+        component: BaseMessageComponent, self_id: str = None
+    ) -> str:
         """
         格式化特殊消息组件为文本表示
 
         Args:
             component: 消息组件
+            self_id: 机器人自身的用户ID，用于标记引用消息发送者是否为AI自己
 
         Returns:
             格式化后的文本，如果不是特殊组件返回空字符串
@@ -300,6 +363,8 @@ class ImageHandler:
             return "[At:all]"
         elif isinstance(component, Reply):
             # 格式化引用消息，保留引用内容让AI理解上下文
+            # [引用 >>> 发送者: 内容] 格式，>>> 明确分隔引用标记与引用内容
+            # 末尾追加 \n 使引用内容与正文之间有明显间隔
             try:
                 message_content = getattr(component, "message_str", None) or getattr(
                     component, "message", None
@@ -310,28 +375,59 @@ class ImageHandler:
                 if not sender_nickname and hasattr(component, "sender"):
                     sender_nickname = getattr(component.sender, "nickname", None)
                 sender_id = getattr(component, "sender_id", None)
+                if (
+                    sender_nickname
+                    and sender_id
+                    and str(sender_nickname) == str(sender_id)
+                ):
+                    sender_nickname = None
+                is_self = self_id and sender_id and str(sender_id) == str(self_id)
+                self_suffix = "(你)" if is_self else ""
+                reply_text = ""
                 if message_content:
                     if sender_nickname and sender_id:
-                        return f"[引用 {sender_nickname}(ID:{sender_id}): {message_content}]"
+                        reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
                     elif sender_id:
-                        return f"[引用 用户(ID:{sender_id}): {message_content}]"
+                        reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
                     elif sender_nickname:
-                        return f"[引用 {sender_nickname}: {message_content}]"
+                        reply_text = f"[引用 >>> {sender_nickname}{self_suffix}: {message_content}]"
                     else:
-                        return f"[引用消息: {message_content}]"
-                return "[引用消息]"
+                        reply_text = f"[引用 >>> {message_content}]"
+                elif sender_nickname and sender_id:
+                    reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_id:
+                    reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_nickname:
+                    reply_text = (
+                        f"[引用 >>> {sender_nickname}{self_suffix}: (无法获取引用内容)]"
+                    )
+                if reply_text:
+                    return reply_text.rstrip() + "\n"
+                return ""
             except Exception:
-                return "[引用消息]"
+                return ""
+        elif Video is not None and isinstance(component, Video):
+            return "[视频]"
+        elif Record is not None and isinstance(component, Record):
+            return "[语音]"
+        elif File is not None and isinstance(component, File):
+            file_name = getattr(component, "name", "") or ""
+            if file_name:
+                return f"[文件: {file_name}]"
+            return "[文件]"
         else:
             return ""
 
     @staticmethod
-    def _extract_text_only(message_chain: List[BaseMessageComponent]) -> str:
+    def _extract_text_only(
+        message_chain: List[BaseMessageComponent], self_id: str = None
+    ) -> str:
         """
         从消息链提取纯文字，过滤图片
 
         Args:
             message_chain: 消息链
+            self_id: 机器人自身的用户ID，用于标记引用消息发送者是否为AI自己
 
         Returns:
             纯文字内容
@@ -346,7 +442,9 @@ class ImageHandler:
                 continue
             else:
                 # 其他类型的组件,尝试转为文本表示
-                formatted = ImageHandler._format_special_component(component)
+                formatted = ImageHandler._format_special_component(
+                    component, self_id=self_id
+                )
                 if formatted:
                     text_parts.append(formatted)
 
@@ -386,6 +484,130 @@ class ImageHandler:
         return image_urls
 
     @staticmethod
+    async def extract_media_urls(
+        event: AstrMessageEvent,
+    ) -> Tuple[List[str], List[str], List[dict]]:
+        """
+        从消息事件中提取非图片媒体文件的路径/URL（结构化返回）
+
+        Args:
+            event: 消息事件
+
+        Returns:
+            (audio_urls, video_paths, file_infos)
+            - audio_urls: 语音文件路径列表（传给 ProviderRequest.audio_urls）
+            - video_paths: 视频文件路径列表（按消息链顺序）
+            - file_infos: 文件信息列表 [{"name": str, "path": str}, ...]（按消息链顺序）
+        """
+        audio_urls: List[str] = []
+        video_paths: List[str] = []
+        file_infos: List[dict] = []
+
+        try:
+            if not hasattr(event, "message_obj") or not hasattr(
+                event.message_obj, "message"
+            ):
+                return audio_urls, video_paths, file_infos
+
+            message_chain = event.message_obj.message
+            for component in message_chain:
+                # 语音/音频组件 → audio_urls
+                if Record is not None and isinstance(component, Record):
+                    try:
+                        audio_path = await component.convert_to_file_path()
+                        if audio_path:
+                            audio_urls.append(audio_path)
+                            if DEBUG_MODE:
+                                logger.info(f"[媒体提取] 语音文件: {audio_path}")
+                    except Exception as e:
+                        logger.warning(f"[媒体提取] 提取语音文件路径失败: {e}")
+
+                # 视频组件 → video_paths
+                elif Video is not None and isinstance(component, Video):
+                    try:
+                        video_path = await component.convert_to_file_path()
+                        if video_path:
+                            video_paths.append(video_path)
+                            if DEBUG_MODE:
+                                logger.info(f"[媒体提取] 视频文件: {video_path}")
+                    except Exception as e:
+                        logger.warning(f"[媒体提取] 提取视频文件路径失败: {e}")
+
+                # 文件组件 → file_infos
+                elif File is not None and isinstance(component, File):
+                    try:
+                        file_path = await component.get_file()
+                        file_name = getattr(component, "name", "") or ""
+                        if not file_name and file_path:
+                            import os
+
+                            file_name = os.path.basename(file_path)
+                        file_infos.append(
+                            {
+                                "name": file_name,
+                                "path": file_path or "",
+                            }
+                        )
+                        if DEBUG_MODE:
+                            logger.info(f"[媒体提取] 文件: {file_name} -> {file_path}")
+                    except Exception as e:
+                        logger.warning(f"[媒体提取] 提取文件信息失败: {e}")
+
+        except Exception as e:
+            logger.warning(f"[媒体提取] 提取媒体URL时出错: {e}")
+
+        return audio_urls, video_paths, file_infos
+
+    @staticmethod
+    def enrich_media_markers(
+        message_text: str,
+        audio_urls: List[str],
+        video_paths: List[str],
+        file_infos: List[dict],
+    ) -> str:
+        """
+        将媒体文件路径内联注入到消息文本的占位标记中
+
+        解析成功时:  [语音] → [语音: /path/to/audio.amr]
+                     [视频] → [视频: /path/to/video.mp4]
+                     [文件: name] → [文件: name, /path/to/file]
+                     [文件] → [文件: /path/to/file]
+        解析失败时:  占位标记保持原样（无路径追加），充当降级占位符
+
+        Args:
+            message_text: 含占位标记的消息文本
+            audio_urls: 语音文件路径列表（与文本中 [语音] 出现顺序对应）
+            video_paths: 视频文件路径列表（与文本中 [视频] 出现顺序对应）
+            file_infos: 文件信息列表（与文本中 [文件: ...] 出现顺序对应）
+
+        Returns:
+            内联了文件路径的富文本
+        """
+        result = message_text
+
+        # 按顺序逐一替换 [语音] → [语音: path]
+        for audio_path in audio_urls:
+            result = result.replace("[语音]", f"[语音: {audio_path}]", 1)
+
+        # 按顺序逐一替换 [视频] → [视频: path]
+        for video_path in video_paths:
+            result = result.replace("[视频]", f"[视频: {video_path}]", 1)
+
+        # 按顺序逐一替换 [文件: name] → [文件: name, path] 或 [文件] → [文件: path]
+        for fi in file_infos:
+            name = fi.get("name", "")
+            path = fi.get("path", "")
+            if name:
+                old = f"[文件: {name}]"
+                new = f"[文件: {name}, {path}]" if path else old
+            else:
+                old = "[文件]"
+                new = f"[文件: {path}]" if path else old
+            result = result.replace(old, new, 1)
+
+        return result
+
+    @staticmethod
     async def _convert_images_to_text(
         message_chain: List[BaseMessageComponent],
         context: Context,
@@ -395,6 +617,7 @@ class ImageHandler:
         timeout: int = 60,
         image_description_cache: Optional[ImageDescriptionCache] = None,
         session_id: str = "",
+        self_id: str = None,
     ) -> Optional[str]:
         """
         将图片转换为文字描述
@@ -407,6 +630,8 @@ class ImageHandler:
             image_components: 图片组件列表
             timeout: 超时时间（秒）
             image_description_cache: 图片描述缓存实例（可选）
+            session_id: 会话ID
+            self_id: 机器人自身的用户ID，用于标记引用消息发送者是否为AI自己
 
         Returns:
             转换后的文本，失败返回None
@@ -513,7 +738,9 @@ class ImageHandler:
                         result_parts.append("[图片]")
                 else:
                     # 其他组件使用统一的格式化方法
-                    formatted = ImageHandler._format_special_component(component)
+                    formatted = ImageHandler._format_special_component(
+                        component, self_id=self_id
+                    )
                     if formatted:
                         result_parts.append(formatted)
 

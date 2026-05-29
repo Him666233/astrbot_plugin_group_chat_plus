@@ -11,7 +11,7 @@
 5. 跨天时间段支持
 
 作者: Him666233
-版本: V1.2.3.hotfix.1
+版本: V1.2.3.hotfix.2
 """
 
 import json
