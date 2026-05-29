@@ -1631,6 +1631,11 @@ class ProactiveChatManager:
         decay_amount = cls._complaint_decay_on_success
         state["total_proactive_failures"] = max(0, old_total_failures - decay_amount)
 
+        # 🔧 修复：重置连续尝试计数和内容，防止 check_and_handle_reply_after_proactive
+        # 中的 has_attempts 分支再次执行衰减（双倍衰减 bug）
+        state["proactive_attempts_count"] = 0
+        state["last_proactive_content"] = None
+
         # 调试模式：总是输出衰减信息
         if cls._debug_mode and old_total_failures > 0:
             logger.info(

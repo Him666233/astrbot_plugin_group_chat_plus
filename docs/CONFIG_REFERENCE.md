@@ -533,10 +533,10 @@
 | `fatigue_threshold_light` | int | `3` | 轻度疲劳的消息数阈值 |
 | `fatigue_threshold_medium` | int | `5` | 中度疲劳的消息数阈值 |
 | `fatigue_threshold_heavy` | int | `8` | 重度疲劳的消息数阈值 |
-| `fatigue_probability_decrease_light` | float | `0.15` | 轻度疲劳的概率衰减 |
-| `fatigue_probability_decrease_medium` | float | `0.25` | 中度疲劳的概率衰减 |
-| `fatigue_probability_decrease_heavy` | float | `0.4` | 重度疲劳的概率衰减 |
-| `fatigue_closing_probability` | float | `0.35` | 疲劳时 AI 发出结束语（如"我先忙了"）的概率 |
+| `fatigue_probability_decrease_light` | float | `0.1` | 轻度疲劳的概率衰减 |
+| `fatigue_probability_decrease_medium` | float | `0.2` | 中度疲劳的概率衰减 |
+| `fatigue_probability_decrease_heavy` | float | `0.35` | 重度疲劳的概率衰减 |
+| `fatigue_closing_probability` | float | `0.3` | 中度/重度疲劳时 AI 发出结束语（如"我先忙了"）的概率。轻度疲劳不触发 |
 
 ---
 

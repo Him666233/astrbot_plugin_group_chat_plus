@@ -469,7 +469,7 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 | `enable_conversation_fatigue` | 启用对话疲劳 |
 | `fatigue_threshold_light` / `medium` / `heavy` | 轻/中/重疲劳的消息数阈值 |
 | `fatigue_probability_decrease_light` / `medium` / `heavy` | 对应的概率衰减量 |
-| `fatigue_closing_probability` | 疲劳时发出结束语的概率 |
+| `fatigue_closing_probability` | 中度/重度疲劳时发出结束语的概率。轻度疲劳不触发 |
 
 ### 7.5 决策结果
 
