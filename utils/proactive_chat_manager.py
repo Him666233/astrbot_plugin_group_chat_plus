@@ -36,6 +36,7 @@ from astrbot.core.provider.entities import ProviderRequest
 from astrbot.api.all import AstrBotMessage, MessageType, MessageMember
 
 from .ai_error_formatter import format_ai_error
+from .message_processor import MessageProcessor  # 🆕 v1.2.3.hotfix.2
 
 # 🆕 v1.2.0: 导入钩子调用相关模块
 from astrbot.core.star.star_handler import EventType
@@ -4031,8 +4032,15 @@ class ProactiveChatManager:
                     if isinstance(cached_msg, dict):
                         try:
                             msg_obj = AstrBotMessage()
-                            msg_obj.message_str = ContextManager._content_to_safe_text(
-                                cached_msg.get("content", "")
+                            msg_obj.message_str = (
+                                MessageProcessor.format_message_for_context_display(
+                                    ContextManager._content_to_safe_text(
+                                        cached_msg.get("content", "")
+                                    ),
+                                    cached_msg.get("mention_info"),
+                                    cached_msg.get("is_at_all_message", False),
+                                    cached_msg.get("persistent_poke_event_text", ""),
+                                )
                             )
                             msg_obj.platform_name = platform_name
                             msg_obj.timestamp = cached_msg.get(
@@ -4216,8 +4224,15 @@ class ProactiveChatManager:
                     if isinstance(cached_msg, dict):
                         try:
                             msg_obj = AstrBotMessage()
-                            msg_obj.message_str = ContextManager._content_to_safe_text(
-                                cached_msg.get("content", "")
+                            msg_obj.message_str = (
+                                MessageProcessor.format_message_for_context_display(
+                                    ContextManager._content_to_safe_text(
+                                        cached_msg.get("content", "")
+                                    ),
+                                    cached_msg.get("mention_info"),
+                                    cached_msg.get("is_at_all_message", False),
+                                    cached_msg.get("persistent_poke_event_text", ""),
+                                )
                             )
                             msg_obj.platform_name = (
                                 platform_id  # 🔧 修复：使用platform_id

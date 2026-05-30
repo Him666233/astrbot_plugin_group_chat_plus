@@ -224,14 +224,16 @@ class MessageCacheManager:
     def get_cached_messages(
         self,
         chat_id: str,
-        exclude_current: bool = True,
+        current_message_id: Optional[str] = None,
     ) -> List[dict]:
         """
         获取缓存消息（用于拼接上下文）
 
         Args:
             chat_id: 会话ID
-            exclude_current: 是否排除最后一条（当前消息）
+            current_message_id: 当前消息的 message_id，如果提供则从缓存中排除该条消息。
+                在上下文构建阶段，当前消息尚未加入缓存，此参数通常无需传递；
+                显式传入可防止并发场景下的潜在重复。
 
         Returns:
             过滤后的缓存消息列表
@@ -239,14 +241,17 @@ class MessageCacheManager:
         if chat_id not in self.pending_messages_cache:
             return []
 
-        cached_messages = self.pending_messages_cache[chat_id]
+        cached_messages = list(self.pending_messages_cache[chat_id])
 
-        # 如果排除当前消息且至少有2条消息
-        if exclude_current and len(cached_messages) > 1:
-            cached_messages = cached_messages[:-1]
-        elif exclude_current:
-            # 只有1条消息，排除后为空
-            return []
+        # 🔧 v1.2.3.hotfix.3: 使用显式 message_id 过滤代替位置排除
+        # 旧逻辑假设"缓存最后一条=当前消息"，但实际流程中当前消息在上下文构建后
+        # 才加入缓存，导致缓存里只有1条消息时被全量误删，AI 看不到缓存上下文。
+        if current_message_id:
+            cached_messages = [
+                msg
+                for msg in cached_messages
+                if msg.get("message_id") != current_message_id
+            ]
 
         # 过滤掉窗口缓冲消息（与 get_regular_cached_messages 保持一致）
         cached_messages = [
@@ -265,7 +270,7 @@ class MessageCacheManager:
         chat_id: str,
         history_messages: Optional[List[AstrBotMessage]],
         event: AstrMessageEvent,
-        exclude_current: bool = True,
+        current_message_id: Optional[str] = None,
     ) -> Tuple[List[AstrBotMessage], int, int]:
         """
         将缓存消息合并到历史消息
@@ -274,7 +279,9 @@ class MessageCacheManager:
             chat_id: 会话ID
             history_messages: 历史消息列表
             event: 消息事件（用于提取平台信息）
-            exclude_current: 是否排除当前消息
+            current_message_id: 当前消息的 message_id，如果提供则从缓存中排除该条。
+                在上下文构建阶段，当前消息尚未加入缓存，此参数通常无需传递；
+                显式传入可防止并发场景下的潜在重复。
 
         Returns:
             (merged_messages, cached_count, dedup_skipped_count)
@@ -288,12 +295,12 @@ class MessageCacheManager:
         # 获取缓存消息（仅普通缓存，排除窗口缓冲消息）
         try:
             cached_messages = self.get_regular_cached_messages(
-                chat_id, exclude_current=exclude_current
+                chat_id, current_message_id=current_message_id
             )
         except Exception:
             # 降级：使用所有缓存消息（老行为）
             cached_messages = self.get_cached_messages(
-                chat_id, exclude_current=exclude_current
+                chat_id, current_message_id=current_message_id
             )
 
         if not cached_messages:
@@ -330,27 +337,72 @@ class MessageCacheManager:
                     ):
                         history_message_ids.add(msg_id)
 
-            # 检查每条缓存消息是否重复（只检查 message_id）
+            # 构建 content+sender+timestamp 去重集合（作为 message_id 去重的补充）
+            # 🔧 v1.2.3.hotfix.2: Step A 已将缓存消息合并进 history_messages，
+            # 但 message_id 被重写为 cached_{timestamp} 格式，与原始 proc_xxx ID 不同。
+            # 仅靠 message_id 去重会漏掉这些消息。这里额外构建 content 指纹集合做二次去重。
+            history_content_fps: Set[str] = set()
+            for msg in history_messages:
+                if isinstance(msg, AstrBotMessage):
+                    _h_content = getattr(msg, "message_str", "") or ""
+                    _h_sender = ""
+                    if hasattr(msg, "sender") and msg.sender:
+                        _h_sender = getattr(msg.sender, "user_id", "") or ""
+                    _h_ts = getattr(msg, "timestamp", 0) or 0
+                    if _h_content:
+                        history_content_fps.add(
+                            f"c:{_h_content}|s:{_h_sender}|t:{_h_ts}"
+                        )
+
+            # 检查每条缓存消息是否重复（message_id 优先，content 指纹兜底）
             for cached_msg in cached_messages:
                 if isinstance(cached_msg, dict):
                     cached_msg_id = cached_msg.get("message_id")
 
-                    # 只使用 message_id 判断是否重复
+                    # 第一层：message_id 去重
+                    is_dup = False
                     if cached_msg_id and not str(cached_msg_id).startswith("cached_"):
                         if cached_msg_id in history_message_ids:
-                            dedup_skipped += 1
-                            if self.debug_mode:
-                                content = cached_msg.get("content", "")
-                                logger.info(
-                                    f"  [缓存去重] 跳过重复消息（message_id已存在）: {content[:50]}..."
-                                )
-                            continue
+                            is_dup = True
+
+                    # 第二层：content+sender+timestamp 指纹去重
+                    if not is_dup:
+                        _c_content = ContextManager._content_to_safe_text(
+                            cached_msg.get("content", "")
+                        ).strip()
+                        _c_sender = str(cached_msg.get("sender_id", "") or "")
+                        _c_ts = cached_msg.get("message_timestamp") or cached_msg.get(
+                            "timestamp", 0
+                        )
+                        if _c_content:
+                            _c_fp = f"c:{_c_content}|s:{_c_sender}|t:{_c_ts}"
+                            if _c_fp in history_content_fps:
+                                is_dup = True
+
+                    if is_dup:
+                        dedup_skipped += 1
+                        if self.debug_mode:
+                            content = cached_msg.get("content", "")
+                            logger.info(f"  [缓存去重] 跳过重复消息: {content[:50]}...")
+                        continue
 
                     # 未重复，添加到合并列表
                     cached_messages_to_merge.append(cached_msg)
                     # 记录到去重集合
                     if cached_msg_id and not str(cached_msg_id).startswith("cached_"):
                         history_message_ids.add(cached_msg_id)
+                    # 同时记录 content 指纹
+                    _c_content = ContextManager._content_to_safe_text(
+                        cached_msg.get("content", "")
+                    ).strip()
+                    _c_sender = str(cached_msg.get("sender_id", "") or "")
+                    _c_ts = cached_msg.get("message_timestamp") or cached_msg.get(
+                        "timestamp", 0
+                    )
+                    if _c_content:
+                        history_content_fps.add(
+                            f"c:{_c_content}|s:{_c_sender}|t:{_c_ts}"
+                        )
         else:
             cached_messages_to_merge = cached_messages
 
@@ -665,14 +717,16 @@ class MessageCacheManager:
     def get_regular_cached_messages(
         self,
         chat_id: str,
-        exclude_current: bool = True,
+        current_message_id: Optional[str] = None,
     ) -> List[dict]:
         """
         获取普通缓存消息（排除窗口缓冲消息，用于合并到历史上下文）
 
         Args:
             chat_id: 会话ID
-            exclude_current: 是否排除最后一条（当前消息）
+            current_message_id: 当前消息的 message_id，如果提供则从缓存中排除该条。
+                在上下文构建阶段，当前消息尚未加入缓存，此参数通常无需传递；
+                显式传入可防止并发场景下的潜在重复。
 
         Returns:
             过滤后的普通缓存消息列表（不含 window_buffered=True 的消息）
@@ -680,13 +734,17 @@ class MessageCacheManager:
         if chat_id not in self.pending_messages_cache:
             return []
 
-        cached_messages = self.pending_messages_cache[chat_id]
+        cached_messages = list(self.pending_messages_cache[chat_id])
 
-        # 如果排除当前消息且至少有2条消息
-        if exclude_current and len(cached_messages) > 1:
-            cached_messages = cached_messages[:-1]
-        elif exclude_current:
-            return []
+        # 🔧 v1.2.3.hotfix.3: 使用显式 message_id 过滤代替位置排除
+        # 旧逻辑假设"缓存最后一条=当前消息"，但实际流程中当前消息在上下文构建后
+        # 才加入缓存，导致缓存里只有1条消息时被全量误删，AI 看不到缓存上下文。
+        if current_message_id:
+            cached_messages = [
+                msg
+                for msg in cached_messages
+                if msg.get("message_id") != current_message_id
+            ]
 
         # 过滤掉窗口缓冲消息
         regular_messages = [

@@ -7114,69 +7114,13 @@ class ChatPlus(Star):
         # max_context > 0: 限制为指定数量
 
         # 🆕 v1.2.0: 准备缓存消息用于新的统一获取方法
+        # 🔧 v1.2.3.hotfix.2: 缓存消息不再在此处（Step A）准备并传入
+        # get_history_messages_with_fallback。该函数返回后由
+        # merge_cache_to_history (Step C) 统一负责缓存消息的读取、
+        # 过滤（排除 window_buffered 和当前消息）、去重和合并。
+        # 此变更避免了 Step A / Step C 双路径同时合并导致的缓存
+        # 消息重复和 window_buffered 消息错位问题。
         cached_astrbot_messages_for_fallback = []
-        if not (isinstance(max_context, int) and max_context == 0):
-            if (
-                chat_id in self.pending_messages_cache
-                and len(self.pending_messages_cache[chat_id]) > 0
-            ):
-                # 🔧 修复：读取所有缓存消息（不排除最后一条）
-                # 因为最后一条可能不是当前消息，而是之前未回复的消息
-                # 去重逻辑会在 context_manager 中处理
-                cached_messages_raw = (
-                    ProactiveChatManager.filter_expired_cached_messages(
-                        self.pending_messages_cache[chat_id]
-                    )
-                )
-                for cached_msg in cached_messages_raw:
-                    if isinstance(cached_msg, dict):
-                        try:
-                            msg_obj = AstrBotMessage()
-                            # 🔧 v1.2.3.hotfix.2: 使用 format_message_for_context_display
-                            # 与 merge_cache_to_history 保持一致，确保缓存消息的 @ 解析、
-                            # @全体成员说明、戳一戳事件文本在两个转换路径中格式统一。
-                            msg_obj.message_str = (
-                                MessageProcessor.format_message_for_context_display(
-                                    ContextManager._content_to_safe_text(
-                                        cached_msg.get("content", "")
-                                    ),
-                                    cached_msg.get("mention_info"),
-                                    cached_msg.get("is_at_all_message", False),
-                                    cached_msg.get("persistent_poke_event_text", ""),
-                                )
-                            )
-                            msg_obj.platform_name = event.get_platform_name()
-                            msg_obj.timestamp = cached_msg.get(
-                                "message_timestamp"
-                            ) or cached_msg.get("timestamp", time.time())
-                            msg_obj.type = (
-                                MessageType.GROUP_MESSAGE
-                                if not event.is_private_chat()
-                                else MessageType.FRIEND_MESSAGE
-                            )
-                            if not event.is_private_chat():
-                                msg_obj.group_id = event.get_group_id()
-                            msg_obj.self_id = event.get_self_id()
-                            msg_obj.session_id = (
-                                event.session_id
-                                if hasattr(event, "session_id")
-                                else chat_id
-                            )
-                            msg_obj.message_id = (
-                                f"cached_{cached_msg.get('timestamp', time.time())}"
-                            )
-                            sender_id = cached_msg.get("sender_id", "")
-                            sender_name = cached_msg.get("sender_name", "未知用户")
-                            if sender_id:
-                                msg_obj.sender = MessageMember(
-                                    user_id=sender_id, nickname=sender_name
-                                )
-                            cached_astrbot_messages_for_fallback.append(msg_obj)
-                        except Exception as e:
-                            if self.debug_mode:
-                                logger.warning(f"转换缓存消息失败: {e}")
-                    elif isinstance(cached_msg, AstrBotMessage):
-                        cached_astrbot_messages_for_fallback.append(cached_msg)
 
         # 🆕 v1.2.0: 使用新的统一方法获取历史消息（优先官方存储，回退自定义存储）
         if isinstance(max_context, int) and max_context == 0:
@@ -7435,12 +7379,15 @@ class ChatPlus(Star):
                 logger.info("  跳过缓存合并: max_context_messages=0")
         else:
             # 使用缓存管理器合并缓存消息
+            # 🔧 v1.2.3.hotfix.3: 不再使用 exclude_current 位置排除；
+            # 当前消息在上下文构建阶段尚未入缓存，传入 current_message_id=None
+            # 表示不排除任何缓存消息（若有并发场景可通过显式 message_id 精确排除）
             history_messages, cached_count, dedup_skipped = (
                 self.cache_manager.merge_cache_to_history(
                     chat_id=chat_id,
                     history_messages=history_messages,
                     event=event,
-                    exclude_current=True,  # 排除当前消息（最后一条）
+                    current_message_id=None,
                 )
             )
 
@@ -7669,7 +7616,7 @@ class ChatPlus(Star):
                 chat_id=chat_id,
                 history_messages=refreshed_msgs,
                 event=event,
-                exclude_current=True,
+                current_message_id=None,
             )
 
             if (
@@ -9907,13 +9854,13 @@ class ChatPlus(Star):
                 # 不拦截消息传播，仅本插件结束处理
                 return
 
-        # 🆕 @消息提前检查是否已被其他插件处理，避免后续耗时操作（如图片转文字）
-        # 注意：只检查真正的@消息，不检查触发关键词消息
-        if is_at_message:
+        # 🆕 @消息/关键词触发提前检查是否已被其他插件处理，避免后续耗时操作（如图片转文字）
+        if is_at_message or has_trigger_keyword:
             if ReplyHandler.check_if_already_replied(event):
-                logger.info("@消息已被其他插件处理,跳过后续流程")
+                trigger_label = "@消息" if is_at_message else "关键词触发消息"
+                logger.info(f"{trigger_label}已被其他插件处理,跳过后续流程")
                 if self.debug_mode:
-                    logger.info("【步骤3.7】@消息已被处理,退出")
+                    logger.info(f"【步骤3.7】{trigger_label}已被处理,退出")
                     logger.info("=" * 60)
                 return
 

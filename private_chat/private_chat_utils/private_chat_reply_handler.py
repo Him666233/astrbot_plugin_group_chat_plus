@@ -544,7 +544,9 @@ class ReplyHandler:
         """
         检查消息是否已被其他插件处理
 
-        用于@消息兼容，避免重复回复
+        通过 _has_send_oper 标记判断，该标记在 event.send() 被调用后永久置为 True，
+        不受框架 clear_result() 影响（框架在 handler 之间会清除 event.result，
+        导致 get_result() 始终返回 None，因此不能依赖 get_result()）。
 
         Args:
             event: 消息事件
@@ -552,46 +554,4 @@ class ReplyHandler:
         Returns:
             True=已有回复，False=尚未回复
         """
-        try:
-            # 检查event的result字段
-            # 如果已经有result,说明已经被处理了
-            result = event.get_result()
-
-            if result is None:
-                return False
-
-            # AstrBot 会将字符串结果转换为 MessageEventResult
-            if isinstance(result, MessageEventResult):
-                has_stream = bool(getattr(result, "async_stream", None))
-                has_chain = bool(getattr(result, "chain", []) or [])
-                is_llm = bool(
-                    getattr(result, "is_llm_result", None) and result.is_llm_result()
-                )
-                is_stopped = bool(
-                    getattr(result, "result_type", None) == EventResultType.STOP
-                )
-                is_stream_state = bool(
-                    getattr(result, "result_content_type", None)
-                    in {
-                        ResultContentType.STREAMING_RESULT,
-                        ResultContentType.STREAMING_FINISH,
-                    }
-                )
-
-                if has_stream or has_chain or is_llm or is_stopped or is_stream_state:
-                    logger.info("检测到该消息已经被其他插件处理")
-                    return True
-
-                return False
-
-            # 未知类型的结果，保持向后兼容：只要非空视为已处理
-            if result:
-                logger.info("检测到该消息已经被其他插件处理")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"检查消息是否已回复时发生错误: {e}")
-            # 发生错误时,为安全起见,返回True避免重复回复
-            return True
+        return getattr(event, "_has_send_oper", False)
