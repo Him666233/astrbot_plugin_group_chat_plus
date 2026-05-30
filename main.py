@@ -7132,8 +7132,18 @@ class ChatPlus(Star):
                     if isinstance(cached_msg, dict):
                         try:
                             msg_obj = AstrBotMessage()
-                            msg_obj.message_str = ContextManager._content_to_safe_text(
-                                cached_msg.get("content", "")
+                            # 🔧 v1.2.3.hotfix.2: 使用 format_message_for_context_display
+                            # 与 merge_cache_to_history 保持一致，确保缓存消息的 @ 解析、
+                            # @全体成员说明、戳一戳事件文本在两个转换路径中格式统一。
+                            msg_obj.message_str = (
+                                MessageProcessor.format_message_for_context_display(
+                                    ContextManager._content_to_safe_text(
+                                        cached_msg.get("content", "")
+                                    ),
+                                    cached_msg.get("mention_info"),
+                                    cached_msg.get("is_at_all_message", False),
+                                    cached_msg.get("persistent_poke_event_text", ""),
+                                )
                             )
                             msg_obj.platform_name = event.get_platform_name()
                             msg_obj.timestamp = cached_msg.get(

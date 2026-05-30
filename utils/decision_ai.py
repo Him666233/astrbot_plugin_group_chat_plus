@@ -787,6 +787,19 @@ class DecisionAI:
             # 动态内容（格式化消息、发送者信息、增强上下文）放在后面。
             # 这样AI服务商的前缀缓存（prefix caching）可以命中静态部分，降低调用成本。
             # 即使AI服务商不支持前缀缓存，此顺序调整也不影响功能。
+
+            # 🆕 v1.2.3.hotfix.2: 构建发送者再确认（追加在 dynamic_prompt 末尾，
+            # 确保决策 AI 在读完所有历史/缓存消息后仍明确当前发送者，避免因混淆
+            # 发送者而给出错误的 yes/no 判断）
+            _decision_sender_tail = ""
+            if include_sender_info and sender_name:
+                _decision_sender_tail = (
+                    f"\n\n[确认] 当前消息发送者是 {sender_name}（ID:{sender_id}），"
+                    f"请基于此人的消息内容判断是否回复。"
+                    f"历史中【📦近期未回复】标记的缓存消息也需纳入判断考量——"
+                    f"如果当前消息内容很少但结合缓存消息能看出明确的对话意图，应倾向于回复。"
+                )
+
             if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
                 custom_prompt = extra_prompt.strip()
                 custom_prompt, protocol_injected = (
@@ -808,6 +821,7 @@ class DecisionAI:
                     + formatted_message
                     + proactive_hint
                     + enhanced_context
+                    + _decision_sender_tail
                 )
                 # 覆盖模式下 system_prompt 仅含 persona（用户自定义 prompt 已替代系统指令）
                 combined_system_prompt = persona_prompt
@@ -860,6 +874,7 @@ class DecisionAI:
                     + formatted_message
                     + proactive_hint
                     + enhanced_context
+                    + _decision_sender_tail
                 )
 
                 if DEBUG_MODE:

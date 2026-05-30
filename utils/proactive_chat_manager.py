@@ -4004,6 +4004,64 @@ class ProactiveChatManager:
                 if debug_mode:
                     logger.info(f"[主动对话] 错误详情: {e}", exc_info=True)
 
+            # 🆕 v1.2.3.hotfix.2: 始终准备缓存消息（无论官方存储是否有历史），
+            # 确保后续上下文拼接不会遗漏被过滤掉但缓存了的消息。
+            cached_astrbot_messages_for_fallback = []
+            cached_messages_raw_for_merge = []  # 保留原始 dict，供后续去重合并使用
+            if (
+                hasattr(plugin_instance, "pending_messages_cache")
+                and chat_id in plugin_instance.pending_messages_cache
+                and len(plugin_instance.pending_messages_cache[chat_id]) > 0
+            ):
+                # 🔧 修复：过滤过期的缓存消息，避免使用已过期但未清理的消息
+                cached_messages_raw = cls.filter_expired_cached_messages(
+                    plugin_instance.pending_messages_cache[chat_id]
+                )
+                # 过滤掉窗口缓冲消息（主动对话只关注普通缓存）
+                cached_messages_raw = [
+                    msg
+                    for msg in cached_messages_raw
+                    if not (isinstance(msg, dict) and msg.get("window_buffered", False))
+                ]
+                for cached_msg in cached_messages_raw:
+                    # 保存原始 dict（供去重合并）
+                    if isinstance(cached_msg, dict):
+                        cached_messages_raw_for_merge.append(cached_msg)
+                    # 同时构建 AstrBotMessage（供 fallback API 和直接追加）
+                    if isinstance(cached_msg, dict):
+                        try:
+                            msg_obj = AstrBotMessage()
+                            msg_obj.message_str = ContextManager._content_to_safe_text(
+                                cached_msg.get("content", "")
+                            )
+                            msg_obj.platform_name = platform_name
+                            msg_obj.timestamp = cached_msg.get(
+                                "message_timestamp"
+                            ) or cached_msg.get("timestamp", time.time())
+                            msg_obj.type = (
+                                MessageType.FRIEND_MESSAGE
+                                if is_private
+                                else MessageType.GROUP_MESSAGE
+                            )
+                            if not is_private:
+                                msg_obj.group_id = chat_id
+                            msg_obj.self_id = self_id
+                            msg_obj.session_id = chat_id
+                            msg_obj.message_id = (
+                                f"cached_{cached_msg.get('timestamp', time.time())}"
+                            )
+                            sender_id = cached_msg.get("sender_id", "")
+                            sender_name = cached_msg.get("sender_name", "未知用户")
+                            if sender_id:
+                                msg_obj.sender = MessageMember(
+                                    user_id=sender_id, nickname=sender_name
+                                )
+                            cached_astrbot_messages_for_fallback.append(msg_obj)
+                        except Exception as e:
+                            logger.warning(f"[主动对话] 转换缓存消息失败: {e}")
+                    elif isinstance(cached_msg, AstrBotMessage):
+                        cached_astrbot_messages_for_fallback.append(cached_msg)
+
             # 如果从官方对话系统获取不到历史，尝试从自定义存储获取（作为fallback）
             # 但如果配置为0，则不获取任何历史
             if not history_messages and not (
@@ -4013,61 +4071,7 @@ class ProactiveChatManager:
                     logger.info("[主动对话] 官方对话系统无历史，尝试从自定义存储获取")
 
                 # 🆕 v1.2.0: 使用新的统一方法获取历史消息（优先官方存储，回退自定义存储）
-                # 先准备缓存消息
-                cached_astrbot_messages_for_fallback = []
-                if (
-                    hasattr(plugin_instance, "pending_messages_cache")
-                    and chat_id in plugin_instance.pending_messages_cache
-                    and len(plugin_instance.pending_messages_cache[chat_id]) > 0
-                ):
-                    # 🔧 修复：过滤过期的缓存消息，避免使用已过期但未清理的消息
-                    cached_messages_raw = cls.filter_expired_cached_messages(
-                        plugin_instance.pending_messages_cache[chat_id]
-                    )
-                    # 过滤掉窗口缓冲消息（主动对话只关注普通缓存）
-                    cached_messages_raw = [
-                        msg
-                        for msg in cached_messages_raw
-                        if not (
-                            isinstance(msg, dict) and msg.get("window_buffered", False)
-                        )
-                    ]
-                    for cached_msg in cached_messages_raw:
-                        if isinstance(cached_msg, dict):
-                            try:
-                                msg_obj = AstrBotMessage()
-                                msg_obj.message_str = (
-                                    ContextManager._content_to_safe_text(
-                                        cached_msg.get("content", "")
-                                    )
-                                )
-                                msg_obj.platform_name = platform_name
-                                msg_obj.timestamp = cached_msg.get(
-                                    "message_timestamp"
-                                ) or cached_msg.get("timestamp", time.time())
-                                msg_obj.type = (
-                                    MessageType.FRIEND_MESSAGE
-                                    if is_private
-                                    else MessageType.GROUP_MESSAGE
-                                )
-                                if not is_private:
-                                    msg_obj.group_id = chat_id
-                                msg_obj.self_id = self_id
-                                msg_obj.session_id = chat_id
-                                msg_obj.message_id = (
-                                    f"cached_{cached_msg.get('timestamp', time.time())}"
-                                )
-                                sender_id = cached_msg.get("sender_id", "")
-                                sender_name = cached_msg.get("sender_name", "未知用户")
-                                if sender_id:
-                                    msg_obj.sender = MessageMember(
-                                        user_id=sender_id, nickname=sender_name
-                                    )
-                                cached_astrbot_messages_for_fallback.append(msg_obj)
-                            except Exception as e:
-                                logger.warning(f"[主动对话] 转换缓存消息失败: {e}")
-                        elif isinstance(cached_msg, AstrBotMessage):
-                            cached_astrbot_messages_for_fallback.append(cached_msg)
+                # cached_astrbot_messages_for_fallback 已在上方统一准备
 
                 # 使用新的统一方法获取历史消息
                 history_messages = await ContextManager.get_history_messages_by_params_with_fallback(
@@ -4140,68 +4144,64 @@ class ProactiveChatManager:
                                 )
                             continue
 
-            # 🆕 v1.2.0: 缓存消息已在 get_history_messages_by_params_with_fallback 中处理
-            # 以下代码保留用于兼容性，但实际上缓存已经在上面合并
+            # 🆕 v1.2.3.hotfix.2: 合并缓存消息到历史上下文
+            # 缓存消息已在上面统一准备（cached_astrbot_messages_for_fallback），
+            # 无论官方存储是否有历史都需要合并，避免遗漏被过滤掉的消息。
             cached_messages_to_merge = []
-            if debug_mode:
-                logger.info("[主动对话] 缓存消息已在统一方法中合并，跳过重复合并")
 
-            # 以下为兼容性占位代码
-            if False:  # 保留原有逻辑结构，但不执行
-                history_contents = set()
-                if history_messages:
-                    for msg in history_messages:
-                        if isinstance(msg, AstrBotMessage) and hasattr(
-                            msg, "message_str"
-                        ):
-                            content = msg.message_str
-                            history_contents.add(content)
-                            if ":" in content and len(content) > 20:
-                                parts = content.split(":", 2)
-                                if len(parts) >= 3:
-                                    raw_content = parts[2].strip()
-                                    if raw_content:
-                                        history_contents.add(raw_content)
-                        elif isinstance(msg, dict) and "content" in msg:
-                            history_contents.add(
-                                ContextManager._make_content_hashable(msg["content"])
-                            )
+            # 构建历史消息去重集合
+            history_contents = set()
+            if history_messages:
+                for msg in history_messages:
+                    if isinstance(msg, AstrBotMessage) and hasattr(msg, "message_str"):
+                        content = msg.message_str
+                        history_contents.add(content)
+                        if ":" in content and len(content) > 20:
+                            parts = content.split(":", 2)
+                            if len(parts) >= 3:
+                                raw_content = parts[2].strip()
+                                if raw_content:
+                                    history_contents.add(raw_content)
+                    elif isinstance(msg, dict) and "content" in msg:
+                        history_contents.add(
+                            ContextManager._make_content_hashable(msg["content"])
+                        )
 
-                    # 检查缓存消息是否已在历史中（去重
-                    for cached_msg in cached_astrbot_messages_for_fallback:
-                        if isinstance(cached_msg, dict) and "content" in cached_msg:
-                            cached_content = ContextManager._content_to_safe_text(
-                                cached_msg.get("content", "")
-                            ).strip()
-                            if cached_content:
-                                # 检查是否重复
-                                if (
-                                    ContextManager._make_content_hashable(
-                                        cached_msg.get("content", "")
-                                    )
-                                    not in history_contents
-                                ):
-                                    cached_messages_to_merge.append(cached_msg)
-                                elif debug_mode:
-                                    logger.info(
-                                        f"[主动对话] 跳过重复的缓存消息: {cached_content[:50]}..."
-                                    )
-                elif cached_astrbot_messages_for_fallback:
-                    # 如果没有历史消息，所有缓存消息都需要合并
-                    cached_messages_to_merge = cached_astrbot_messages_for_fallback
+                # 检查缓存消息是否已在历史中（去重，使用原始 dict 列表）
+                for cached_msg in cached_messages_raw_for_merge:
+                    if isinstance(cached_msg, dict) and "content" in cached_msg:
+                        cached_content = ContextManager._content_to_safe_text(
+                            cached_msg.get("content", "")
+                        ).strip()
+                        if cached_content:
+                            # 检查是否重复
+                            if (
+                                ContextManager._make_content_hashable(
+                                    cached_msg.get("content", "")
+                                )
+                                not in history_contents
+                            ):
+                                cached_messages_to_merge.append(cached_msg)
+                            elif debug_mode:
+                                logger.info(
+                                    f"[主动对话] 跳过重复的缓存消息: {cached_content[:50]}..."
+                                )
+            elif cached_messages_raw_for_merge:
+                # 如果没有历史消息，所有缓存消息都需要合并
+                cached_messages_to_merge = cached_messages_raw_for_merge
 
-                if debug_mode and cached_messages_to_merge:
-                    logger.info(
-                        f"[主动对话] 将合并 {len(cached_messages_to_merge)} 条缓存消息到历史上下文"
-                    )
+            if debug_mode and cached_messages_to_merge:
+                logger.info(
+                    f"[主动对话] 将合并 {len(cached_messages_to_merge)} 条缓存消息到历史上下文"
+                )
 
-            # 转换缓存消息为 AstrBotMessage 对象
+            # 转换缓存消息为 AstrBotMessage 对象并追加到历史
             if cached_messages_to_merge:
                 if history_messages is None:
                     history_messages = []
 
-                # 获取 self_id
-                self_id = None
+                # 获取 self_id（使用局部变量 _merge_self_id 避免覆盖外部 self_id）
+                _merge_self_id = None
                 if history_messages:
                     for msg in history_messages:
                         if (
@@ -4209,7 +4209,7 @@ class ProactiveChatManager:
                             and hasattr(msg, "self_id")
                             and msg.self_id
                         ):
-                            self_id = msg.self_id
+                            _merge_self_id = msg.self_id
                             break
 
                 for cached_msg in cached_messages_to_merge:
@@ -4230,7 +4230,7 @@ class ProactiveChatManager:
                             )
                             if not is_private:
                                 msg_obj.group_id = chat_id
-                            msg_obj.self_id = self_id or ""
+                            msg_obj.self_id = _merge_self_id or ""
                             msg_obj.session_id = chat_id
                             msg_obj.message_id = (
                                 f"cached_{cached_msg.get('timestamp', time.time())}"
@@ -4249,14 +4249,9 @@ class ProactiveChatManager:
                                 f"[主动对话] 转换缓存消息失败: {e}，跳过该消息"
                             )
 
-                if debug_mode:
-                    logger.info(
-                        f"[主动对话] ✅ 已合并 {len(cached_messages_to_merge)} 条缓存消息到历史上下文"
-                    )
-                elif cls._debug_mode:
-                    logger.info(
-                        f"[主动对话] 已合并 {len(cached_messages_to_merge)} 条缓存消息（来自主动回复模式）"
-                    )
+                logger.info(
+                    f"[主动对话] ✅ 已合并 {len(cached_messages_to_merge)} 条缓存消息到历史上下文"
+                )
 
             # 🆕 优化：合并后按时间戳排序（确保时间线连续）
             # 这样可以形成完整的时间线，避免上下文跳跃

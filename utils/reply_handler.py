@@ -318,6 +318,20 @@ class ReplyHandler:
             # 这样AI服务商的前缀缓存（prefix caching）可以命中静态部分，降低调用成本。
             # 注意: 视频/文件路径已通过 enrich_media_markers 内联注入到 formatted_message
 
+            # 🆕 v1.2.3.hotfix.2: 构建对话对象再确认 + 反元兜底（追加在 prompt 末尾，
+            # 确保 AI 在读完所有历史/缓存/窗口缓冲消息后仍明确当前对话对象和输出要求）
+            _sender_tail = ""
+            if include_sender_info and sender_name:
+                _sender_tail = (
+                    f"\n\n[对话对象确认] 你正在和 {sender_name}（ID:{sender_id}）对话，"
+                    f"请围绕 ta 的话题回复，不要混淆历史中其他用户的发言。"
+                    f"历史中【📦近期未回复】标记的缓存消息也是完整对话的一部分"
+                    f"——特别是当前消息内容较少时（如仅@你、空消息），"
+                    f"需要主动结合这些缓存消息来理解对方的意图。"
+                    f"\n\n[最终要求] 直接输出你要说的那句话。"
+                    f"禁止输出任何解释、判断过程、过渡句或思考内容。像真人聊天一样，直接说。"
+                )
+
             if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
                 # 覆盖模式：用户自定义提示词在前（静态），动态内容在后
                 # 🔧 v1.2.2-hotfix.1: sender_emphasis 提前到 formatted_message 之前，
@@ -335,6 +349,7 @@ class ReplyHandler:
                     + fatigue_closing_prompt
                     + pending_reply_hint
                     + single_at_message_reply_hint
+                    + _sender_tail
                     + "\n\n---\n以上是消息上下文，请直接输出你的回复（不要无脑复读用户的消息，除非场景确实需要）"
                 )
                 if DEBUG_MODE:
@@ -358,6 +373,7 @@ class ReplyHandler:
                     + fatigue_closing_prompt
                     + pending_reply_hint
                     + single_at_message_reply_hint
+                    + _sender_tail
                     + "\n\n---\n以上是消息上下文，请直接输出你的回复（不要无脑复读用户的消息，除非场景确实需要）"
                 )
 
