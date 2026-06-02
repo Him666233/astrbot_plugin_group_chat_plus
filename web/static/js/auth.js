@@ -3,6 +3,18 @@
  */
 
 const Auth = {
+    _isEmbed() {
+        return new URLSearchParams(window.location.search).get('embed') === '1';
+    },
+
+    _loginPath() {
+        return this._isEmbed() ? '/?embed=1' : '/';
+    },
+
+    _panelPath() {
+        return this._isEmbed() ? '/panel?embed=1' : '/panel';
+    },
+
     init() {
         const btnLogin = document.getElementById('btn-login');
         if (btnLogin) btnLogin.addEventListener('click', () => this.doLogin());
@@ -34,7 +46,7 @@ const Auth = {
         if (!res.password_changed) {
             App.showPage('password-change');
         } else {
-            window.location.href = '/panel';
+            window.location.href = this._panelPath();
         }
     },
 
@@ -53,7 +65,7 @@ const Auth = {
         this._hideError('pw-change-error');
         Utils.alert(res.msg || '密码修改成功，请重新登录').then(() => {
             Api.clearToken();
-            window.location.href = '/';
+            window.location.href = this._loginPath();
         });
     },
 

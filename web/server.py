@@ -365,6 +365,15 @@ class WebPanelServer:
         "form-action 'none'; "
         "frame-ancestors 'none';"
     )
+    _CSP_LOGIN_EMBED_TEMPLATE = (
+        "default-src 'none'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "script-src 'self' 'nonce-{nonce}'; "
+        "connect-src 'self'; "
+        "form-action 'none'; "
+        "frame-ancestors 'self' http://127.0.0.1:* http://localhost:*;"
+    )
 
     # ---- 面板页 CSP 模板（script-src 使用 nonce，style-src 保留 unsafe-inline 供动态 UI）----
     _CSP_PANEL_TEMPLATE = (
@@ -375,6 +384,15 @@ class WebPanelServer:
         "connect-src 'self'; "
         "form-action 'none'; "
         "frame-ancestors 'none';"
+    )
+    _CSP_PANEL_EMBED_TEMPLATE = (
+        "default-src 'none'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "script-src 'self' 'nonce-{nonce}'; "
+        "connect-src 'self'; "
+        "form-action 'none'; "
+        "frame-ancestors 'self' http://127.0.0.1:* http://localhost:*;"
     )
 
     # ---- 错误页 CSP 模板（script-src 使用 nonce）----
@@ -389,14 +407,20 @@ class WebPanelServer:
     )
 
     def _add_security_headers(
-        self, response: web.Response, csp: str = None
+        self, response: web.Response, csp: str = None, allow_frame: bool = False
     ) -> web.Response:
         """向响应添加安全头"""
         for k, v in self._SECURITY_HEADERS.items():
+            if allow_frame and k == "X-Frame-Options":
+                continue
             response.headers[k] = v
         if csp:
             response.headers["Content-Security-Policy"] = csp
         return response
+
+    @staticmethod
+    def _is_embed_request(request: web.Request) -> bool:
+        return request.query.get("embed") == "1"
 
     @staticmethod
     def _generate_nonce() -> str:
@@ -575,19 +599,26 @@ class WebPanelServer:
                 ip, request.method, path, response.status, note=access_note
             )
             if path in {"/", "/error"}:
-                return self._add_security_headers(response)
+                return self._add_security_headers(
+                    response,
+                    allow_frame=path == "/" and self._is_embed_request(request),
+                )
             return response
 
         if path == self._PANEL_PAGE:
             if not auth_result or not auth_result.ok:
-                response = web.HTTPFound("/")
+                login_path = "/?embed=1" if self._is_embed_request(request) else "/"
+                response = web.HTTPFound(login_path)
                 self._clear_auth_cookie(request, response)
                 return response
             request["user"] = auth_result.payload
             request["client_ip"] = ip
             response = await handler(request)
             self.security.log_access(ip, request.method, path, response.status)
-            return self._add_security_headers(response)
+            return self._add_security_headers(
+                response,
+                allow_frame=self._is_embed_request(request),
+            )
 
         if not auth_token:
             self.security.log_access(ip, request.method, path, 401)
@@ -965,11 +996,15 @@ class WebPanelServer:
         """返回登录页（公开，无需认证），使用 nonce-based CSP"""
         content = self._render_login_page()
         if content:
+            embed = self._is_embed_request(request)
             nonce = self._generate_nonce()
             content = self._inject_nonce(content, nonce)
-            csp = self._build_csp(nonce, self._CSP_LOGIN_TEMPLATE)
+            csp_template = (
+                self._CSP_LOGIN_EMBED_TEMPLATE if embed else self._CSP_LOGIN_TEMPLATE
+            )
+            csp = self._build_csp(nonce, csp_template)
             response = web.Response(text=content, content_type="text/html")
-            return self._add_security_headers(response, csp)
+            return self._add_security_headers(response, csp, allow_frame=embed)
         return web.Response(text="登录页文件缺失", status=500)
 
     async def _handle_panel_page(self, request: web.Request):
@@ -979,11 +1014,15 @@ class WebPanelServer:
         except Exception:
             return web.Response(text="面板文件读取失败", status=500)
         if content is not None:
+            embed = self._is_embed_request(request)
             nonce = self._generate_nonce()
             content = self._inject_nonce(content, nonce)
-            csp = self._build_csp(nonce, self._CSP_PANEL_TEMPLATE)
+            csp_template = (
+                self._CSP_PANEL_EMBED_TEMPLATE if embed else self._CSP_PANEL_TEMPLATE
+            )
+            csp = self._build_csp(nonce, csp_template)
             response = web.Response(text=content, content_type="text/html")
-            return self._add_security_headers(response, csp)
+            return self._add_security_headers(response, csp, allow_frame=embed)
         return web.Response(text="面板文件缺失", status=500)
 
     async def _handle_favicon(self, request: web.Request):

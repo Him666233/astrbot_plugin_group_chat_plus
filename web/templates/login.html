@@ -77,6 +77,14 @@
     (function() {
         'use strict';
 
+        var isEmbed = new URLSearchParams(window.location.search).get('embed') === '1';
+        function loginPath() {
+            return isEmbed ? '/?embed=1' : '/';
+        }
+        function panelPath() {
+            return isEmbed ? '/panel?embed=1' : '/panel';
+        }
+
         // 工具函数
         function showError(id, msg) {
             var el = document.getElementById(id);
@@ -102,20 +110,20 @@
 
         // 跳转到面板页
         function navigateToPanel() {
-            window.location.href = '/panel';
+            window.location.href = panelPath();
         }
 
         function handleAuthFailure(res) {
             Api.clearToken();
             if (!res) {
-                window.location.href = '/';
+                window.location.href = loginPath();
                 return;
             }
             var msg = res.msg || '登录已失效，请重新登录';
             if (typeof Utils !== 'undefined' && Utils.alert) {
-                Utils.alert(msg).then(function() { window.location.href = '/'; });
+                Utils.alert(msg).then(function() { window.location.href = loginPath(); });
             } else {
-                window.location.href = '/';
+                window.location.href = loginPath();
             }
         }
 
@@ -201,11 +209,11 @@
                 if (typeof Utils !== 'undefined' && Utils.alert) {
                     Utils.alert(res.msg || '密码修改成功，请重新登录').then(function() {
                         Api.clearToken();
-                        window.location.href = '/';
+                        window.location.href = loginPath();
                     });
                 } else {
                     Api.clearToken();
-                    window.location.href = '/';
+                    window.location.href = loginPath();
                 }
             } catch(e) {
                 showError('pw-change-error', '网络错误，请重试');

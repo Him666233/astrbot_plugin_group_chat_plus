@@ -40,6 +40,11 @@ const App = {
         if (page) page.classList.remove('hidden');
     },
 
+    loginPath() {
+        const isEmbed = new URLSearchParams(window.location.search).get('embed') === '1';
+        return isEmbed ? '/?embed=1' : '/';
+    },
+
     /** 切换主界面视图 */
     showView(name) {
         this._currentView = name;
@@ -858,7 +863,7 @@ const App = {
                     errEl.classList.add('hidden');
                     Api.clearToken();
                     setTimeout(() => {
-                        window.location.href = '/';
+                        window.location.href = App.loginPath();
                     }, 1500);
                 } else {
                     errEl.textContent = res.msg || '修改失败';
@@ -1995,7 +2000,7 @@ const App = {
         this._authMonitor?.stop?.();
         const { showAlert = true } = options;
         const redirect = () => {
-            window.location.href = '/';
+            window.location.href = this.loginPath();
         };
         if (!showAlert || !message || typeof Utils === 'undefined') {
             redirect();
