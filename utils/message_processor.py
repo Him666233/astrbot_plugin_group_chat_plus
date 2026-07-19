@@ -7,13 +7,13 @@ v1.0.4 更新：
 - 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import re
 from datetime import datetime
 from astrbot.api.all import *
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -40,17 +40,33 @@ class MessageProcessor:
                 return ""
 
             sender_id = str(poke_info.get("sender_id", "") or "")
-            sender_name = str(poke_info.get("sender_name", "") or "").strip() or "未知用户"
+            sender_name = str(poke_info.get("sender_name", "") or "").strip()
+            if not sender_name or sender_name == sender_id:
+                sender_name = "未知用户"
+            sender_role = str(poke_info.get("sender_group_role", "") or "").strip()
             target_id = str(poke_info.get("target_id", "") or "")
-            target_name = str(poke_info.get("target_name", "") or "").strip() or "未知用户"
+            target_name = str(poke_info.get("target_name", "") or "").strip()
+            if not target_name or target_name == target_id:
+                target_name = "未知用户"
+            target_role = str(poke_info.get("target_group_role", "") or "").strip()
             is_poke_bot = bool(poke_info.get("is_poke_bot", False))
 
-            sender_text = (
-                f"{sender_name}(ID:{sender_id})" if sender_id else sender_name
-            )
-            target_text = (
-                f"{target_name}(ID:{target_id})" if target_id else target_name
-            )
+            if sender_id:
+                sender_text = f"{sender_name}(ID:{sender_id})"
+                if sender_role:
+                    sender_text += f"[{sender_role}]"
+            else:
+                sender_text = sender_name or "未知用户"
+                if sender_role and sender_text != "未知用户":
+                    sender_text += f"[{sender_role}]"
+            if target_id:
+                target_text = f"{target_name}(ID:{target_id})"
+                if target_role:
+                    target_text += f"[{target_role}]"
+            else:
+                target_text = target_name or "未知用户"
+                if target_role and target_text != "未知用户":
+                    target_text += f"[{target_role}]"
 
             if perspective == "assistant":
                 if not target_text:
@@ -100,9 +116,12 @@ class MessageProcessor:
                 continue
             if mention.get("resolved"):
                 user_name = str(mention.get("user_name", "") or "").strip()
-                inline_map[user_id] = user_name or "解析失败"
+                if user_name and user_name != user_id:
+                    inline_map[user_id] = user_name
+                else:
+                    inline_map[user_id] = "未知用户"
             else:
-                inline_map[user_id] = "解析失败"
+                inline_map[user_id] = "未知用户"
         return inline_map
 
     @staticmethod
@@ -118,6 +137,7 @@ class MessageProcessor:
         if not isinstance(mentions, list) or not mentions:
             return message_text
 
+        # 构建队列（包含 all → "全体成员"、解析失败等全部逻辑）
         mention_queue = []
         for mention in mentions:
             if not isinstance(mention, dict):
@@ -125,41 +145,48 @@ class MessageProcessor:
             user_id = str(mention.get("user_id", "") or "").strip()
             if not user_id:
                 continue
+            group_role = str(mention.get("group_role", "") or "").strip()
             if user_id.lower() == "all":
-                mention_queue.append({"user_id": "all", "resolved_name": None})
+                mention_queue.append({"user_id": "all", "resolved_name": "全体成员", "group_role": ""})
                 continue
             if mention.get("is_bot"):
-                mention_queue.append({"user_id": user_id, "resolved_name": "你"})
+                mention_queue.append({"user_id": user_id, "resolved_name": "你", "group_role": group_role})
                 continue
             if mention.get("resolved"):
                 user_name = str(mention.get("user_name", "") or "").strip()
                 mention_queue.append(
-                    {"user_id": user_id, "resolved_name": user_name or "解析失败"}
+                    {
+                        "user_id": user_id,
+                        "resolved_name": user_name
+                        if (user_name and user_name != user_id)
+                        else "未知用户",
+                        "group_role": group_role,
+                    }
                 )
             else:
-                mention_queue.append({"user_id": user_id, "resolved_name": "解析失败"})
+                mention_queue.append({"user_id": user_id, "resolved_name": "未知用户", "group_role": group_role})
 
         if not mention_queue:
             return message_text
 
-        queue_index = 0
+        # 将队列转为查表字典（同 ID 保留首次出现的 (resolved_name, group_role)），消除顺序依赖
+        lookup = {}
+        for entry in mention_queue:
+            uid = entry["user_id"]
+            if uid not in lookup:
+                lookup[uid] = (entry["resolved_name"], entry.get("group_role", ""))
 
         def _replace(match: re.Match) -> str:
-            nonlocal queue_index
             token_id = str(match.group(1) or "").strip()
             token_resolved = match.group(2)
             if token_resolved is not None:
                 return match.group(0)
-
-            while queue_index < len(mention_queue):
-                candidate = mention_queue[queue_index]
-                queue_index += 1
-                if candidate["user_id"] != token_id:
-                    continue
-                resolved_name = candidate.get("resolved_name")
-                if resolved_name:
-                    return f"[At:{token_id}|{resolved_name}]"
-                return match.group(0)
+            resolved = lookup.get(token_id)
+            if resolved:
+                name, role = resolved
+                if role:
+                    return f"[At:{token_id}|{name}|{role}]"
+                return f"[At:{token_id}|{name}]"
             return match.group(0)
 
         return re.sub(r"\[At:([^\]|]+)(?:\|([^\]]*))?\]", _replace, message_text)
@@ -174,15 +201,21 @@ class MessageProcessor:
         mention_info: dict | None = None,
         is_at_all_message: bool = False,
         persistent_poke_event_text: str = "",
+        poke_trace_text: str = "",
     ) -> str:
         message_text = MessageProcessor.inline_resolve_mentions(
             message_text, mention_info
         )
 
         mention_info = MessageProcessor._normalize_mention_info(mention_info)
-        has_at_all = bool(
-            is_at_all_message or mention_info.get("has_at_all", False)
-        )
+        mention_notice = MessageProcessor.build_mention_direction_notice(mention_info)
+        if mention_notice and mention_notice not in message_text:
+            if message_text.strip():
+                message_text += f"\n{mention_notice}"
+            else:
+                message_text = mention_notice
+
+        has_at_all = bool(is_at_all_message or mention_info.get("has_at_all", False))
         if has_at_all:
             message_text += (
                 "\n【@全体成员说明】这是一条@全体成员消息。"
@@ -190,11 +223,21 @@ class MessageProcessor:
             )
 
         persistent_poke_event_text = (persistent_poke_event_text or "").strip()
-        if persistent_poke_event_text and persistent_poke_event_text not in message_text:
+        if (
+            persistent_poke_event_text
+            and persistent_poke_event_text not in message_text
+        ):
             if message_text.strip():
                 message_text = f"{message_text}\n{persistent_poke_event_text}"
             else:
                 message_text = persistent_poke_event_text
+
+        poke_trace_text = (poke_trace_text or "").strip()
+        if poke_trace_text and poke_trace_text not in message_text:
+            if message_text.strip():
+                message_text = f"{message_text}\n{poke_trace_text}"
+            else:
+                message_text = poke_trace_text
 
         return message_text
 
@@ -209,8 +252,24 @@ class MessageProcessor:
         return "【@指向说明】这条消息通过@符号指定了其他用户，并非只发给你本人。"
 
     @staticmethod
+    def _build_environment_tag(group_name: str, group_id: str) -> str:
+        """构建 [环境: name(ID:id)] 标签，含冗余回退。
+        无 group_id → 返回空（如私聊场景）
+        group_name 为空 → [未知群名] 占位"""
+        if not group_id or not str(group_id).strip():
+            return ""
+        resolved_name = (group_name or "").strip() or "[未知群名]"
+        return f"[环境: {resolved_name}(ID:{str(group_id).strip()})]"
+
+    @staticmethod
     # 兼容旧调用：recent_pending_summary / empty_at_context_prompt 已弃用，
     # 但主流程和若干保存链路仍沿用原签名，暂时保留参数以避免影响功能。
+    #   - recent_pending_summary / empty_at_context_prompt 替補：
+    #     _build_single_at_message_context + _build_single_at_message_reply_hint
+    #     （在 main.py 独立构建，由 reply handler 注入，不再经本方法拼接）。
+    #   - poke_info 在本方法内未使用，保留参数仅为兼容旧签名。
+    #     替补 A：build_persistent_poke_event_text(poke_info) → persistent_poke_event_text
+    #     替补 B：main.py 直接从 poke_info 构建 _poke_notice_text → format_context_for_ai 追加
     def add_metadata_to_message(
         event: AstrMessageEvent,
         message_text: str,
@@ -223,6 +282,11 @@ class MessageProcessor:
         recent_pending_summary: str = "",
         empty_at_context_prompt: str = "",
         is_at_all_message: bool = False,
+        *,
+        persistent_poke_event_text: str = "",
+        poke_trace_text: str = "",
+        include_environment_info: bool = False,
+        group_role: str = "",
     ) -> str:
         """
         为消息添加元数据（时间戳和发送者）
@@ -237,154 +301,172 @@ class MessageProcessor:
             include_sender_info: 是否包含发送者信息
             mention_info: 统一的@解析结果（可包含@AI/@他人/@全体、重复@等复合场景）
             trigger_type: 触发方式，可选值: "at", "keyword", "ai_decision"
-            poke_info: 戳一戳信息字典（v1.0.9新增，如果存在）
+            poke_info: 戳一戳信息字典（v1.0.9新增）。
+                注意：本方法内未使用此参数，戳一戳提示已改为由上层流程
+                （build_persistent_poke_event_text + format_context_for_ai）注入。
+                保留此参数仅为兼容旧调用签名，传值无实际效果。
             is_empty_at: 是否是单独无信息@消息（只有@没有其他内容）
-            recent_pending_summary: 已弃用，保留参数仅用于兼容旧调用
-            empty_at_context_prompt: 已弃用，保留参数仅用于兼容旧调用
+            recent_pending_summary: 已弃用。替补见 _build_single_at_message_context +
+                _build_single_at_message_reply_hint（main.py）。
+                保留参数仅用于兼容旧调用，传 "" 即可。
+            empty_at_context_prompt: 已弃用。替补见 _build_empty_at_context_prompt →
+                _build_single_at_message_reply_hint（main.py）。
+                保留参数仅用于兼容旧调用，传 "" 即可。
 
         Returns:
             添加元数据后的文本
         """
         try:
-            # 获取时间戳（格式：YYYY-MM-DD 星期几 HH:MM:SS，与历史消息一致）
-            timestamp_str = ""
+            # 收集所有系统元数据（冒号前的内容）
+            system_parts = []
+
+            # 1. 时间戳
             if include_timestamp:
                 timestamp_str = MessageProcessor._format_timestamp_unified(event)
+                if timestamp_str:
+                    system_parts.append(f"[{timestamp_str}]")
 
-            # 获取发送者信息
-            sender_prefix = ""
+            # 2. 发送者信息（不带冒号）
             if include_sender_info:
                 sender_id = event.get_sender_id()
                 sender_name = event.get_sender_name()
-                if sender_name:
-                    # 格式：发送者名字(ID:xxx)，与历史消息完全一致
-                    sender_prefix = f"{sender_name}(ID:{sender_id})"
+                display_name = (
+                    sender_name
+                    if (sender_name and sender_name != str(sender_id))
+                    else ""
+                )
+                if display_name:
+                    system_parts.append(
+                        f"{display_name}(ID:{sender_id})" if sender_id else display_name
+                    )
+                elif sender_id:
+                    system_parts.append(f"未知用户(ID:{sender_id})")
                 else:
-                    sender_prefix = f"用户(ID:{sender_id})"
+                    system_parts.append("未知用户")
 
-            # 先对消息中的At标签做内联解析补充
-            message_text = MessageProcessor.inline_resolve_mentions(
-                message_text, mention_info
-            )
+                # 环境标注（与发送者信息合并，不另起一行）
+                if include_environment_info:
+                    gid = event.get_group_id()
+                    if gid:
+                        gname = ""
+                        try:
+                            msg_obj = getattr(event, "message_obj", None)
+                            if msg_obj:
+                                grp = getattr(msg_obj, "group", None)
+                                if grp:
+                                    gn = getattr(grp, "group_name", None)
+                                    if gn and str(gn).strip():
+                                        gname = str(gn).strip()
+                        except Exception:
+                            pass
+                        env_tag = MessageProcessor._build_environment_tag(gname, str(gid))
+                        if env_tag:
+                            system_parts.append(env_tag)
 
-            # 组合格式：[时间] 发送者(ID:xxx): 消息内容
-            # 与上下文格式化保持一致
-            if timestamp_str and sender_prefix:
-                processed_message = f"[{timestamp_str}] {sender_prefix}: {message_text}"
-            elif timestamp_str:
-                processed_message = f"[{timestamp_str}] {message_text}"
-            elif sender_prefix:
-                processed_message = f"{sender_prefix}: {message_text}"
-            else:
-                processed_message = message_text
+                # 群身份标签（紧跟在发送者信息和环境标注之后）
+                if group_role and group_role.strip():
+                    system_parts.append(f"[{group_role.strip()}]")
 
-            # 如果存在@别人的信息，添加系统提示
+            # 3. @指向说明
             mention_notice = MessageProcessor.build_mention_direction_notice(
                 mention_info
             )
             if mention_notice:
-                mention_notice = f"\n{mention_notice}\n{message_text}"
+                system_parts.append(mention_notice)
 
-                # 将原消息内容替换为包含系统提示的版本
-                # 保持元数据格式不变，只在消息内容部分添加提示
-                if timestamp_str and sender_prefix:
-                    processed_message = (
-                        f"[{timestamp_str}] {sender_prefix}: {mention_notice}"
-                    )
-                elif timestamp_str:
-                    processed_message = f"[{timestamp_str}] {mention_notice}"
-                elif sender_prefix:
-                    processed_message = f"{sender_prefix}: {mention_notice}"
-                else:
-                    processed_message = mention_notice
+            # 4. 戳一戳提示不由 message_processor 注入（因此 poke_info 参数在本方法内未使用），
+            # 而是由主流程在消息组装完成后追加到消息下方（分隔符之内），
+            # 保存时由 MessageCleaner.FILTER_RULES 自动过滤。
+            # 替补链路：
+            #   A. build_persistent_poke_event_text(poke_info) → persistent_poke_event_text
+            #   B. main.py 从 poke_info 构建 _poke_notice_text → format_context_for_ai 追加
 
-            if timestamp_str or sender_prefix:
-                if DEBUG_MODE:
-                    logger.info(
-                        f"消息已添加元数据（统一格式）: [{timestamp_str}] {sender_prefix}"
-                    )
-
-            # 🆕 v1.0.9: 添加戳一戳系统提示（如果存在）
-            # 注意：使用[]括号而非【】括号，确保能被MessageCleaner正确过滤
-            if poke_info and isinstance(poke_info, dict):
-                is_poke_bot = poke_info.get("is_poke_bot", False)
-                poke_sender_id = poke_info.get("sender_id", "")
-                poke_sender_name = poke_info.get("sender_name", "未知用户")
-                poke_target_id = poke_info.get("target_id", "")
-                poke_target_name = poke_info.get("target_name", "未知用户")
-
-                if is_poke_bot:
-                    # 戳的是机器人自己
-                    poke_notice = f"\n[戳一戳提示]有人在戳你，戳你的人是{poke_sender_name}(ID:{poke_sender_id})"
-                    if DEBUG_MODE:
-                        logger.info(
-                            f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
-                        )
-                else:
-                    # 戳的是别人
-                    poke_notice = f"\n[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{poke_sender_name}(ID:{poke_sender_id})在戳{poke_target_name}(ID:{poke_target_id})"
-                    if DEBUG_MODE:
-                        logger.info(
-                            f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
-                        )
-
-                processed_message += poke_notice
-
-            if is_at_all_message:
-                processed_message += (
-                    "\n【@全体成员说明】这是一条@全体成员消息。"
-                    "它也包含你，但不一定是专门只对你说的。"
+            # 5. @全体成员说明
+            has_at_all = bool(
+                is_at_all_message
+                or MessageProcessor._normalize_mention_info(mention_info).get(
+                    "has_at_all", False
+                )
+            )
+            if has_at_all:
+                system_parts.append(
+                    "【@全体成员说明】这是一条@全体成员消息。它也包含你，但不一定是专门只对你说的。"
                 )
                 if DEBUG_MODE:
                     logger.info("已添加@全体成员说明（当前消息）")
 
-            # 🆕 v1.0.4: 添加发送者识别系统提示（根据触发方式）
-            # 只在开启了 include_sender_info 的情况下添加
+            # 6. 发送者识别系统提示（根据触发方式）
             if include_sender_info and trigger_type:
                 sender_id = event.get_sender_id()
                 sender_name = event.get_sender_name()
-                sender_info_text = (
-                    f"{sender_name}(ID:{sender_id})"
-                    if sender_name
-                    else f"用户(ID:{sender_id})"
+                display_name = (
+                    sender_name
+                    if (sender_name and sender_name != str(sender_id))
+                    else ""
                 )
+                if display_name:
+                    sender_info_text = (
+                        f"{display_name}(ID:{sender_id})" if sender_id else display_name
+                    )
+                elif sender_id:
+                    sender_info_text = f"未知用户(ID:{sender_id})"
+                else:
+                    sender_info_text = "未知用户"
 
-                # 根据触发方式添加不同的系统提示
                 if trigger_type == "at":
-                    # @消息触发
-                    # 对于“单独的、不包含任何信息的 @ 消息”，这里只保留基础识别提示；
-                    # 更强的上下文提醒会在通过读空气筛选后、进入回复阶段时再动态追加。
                     if is_empty_at:
                         system_notice = (
-                            f"\n\n[系统提示]{sender_info_text} 单独@了你，没有附带任何消息内容。"
+                            f"[系统提示]{sender_info_text} 单独@了你，没有附带任何消息内容。"
                             f"自然回应就好。"
                         )
                     else:
-                        # @消息+文字内容
                         system_notice = (
-                            f"\n\n[系统提示]注意，现在有人在直接@你并且给你发送了这条消息，"
+                            f"[系统提示]注意，现在有人在直接@你并且给你发送了这条消息，"
                             f"@你的那个人是{sender_info_text}"
                         )
                 elif trigger_type == "keyword":
-                    # 关键词触发：强调消息与AI相关，但保持回复导向而不是判断导向
                     system_notice = (
-                        f"\n\n[系统提示]注意，这条消息中出现了和你有关的信息，"
-                        f"发送者是{sender_info_text}。\n"
+                        f"[系统提示]注意，这条消息中出现了和你有关的信息，"
+                        f"发送者是{sender_info_text}。"
                         f"请先结合最近上下文理解对方现在在聊什么、这句话主要是对谁说的，"
                         f"然后像正常聊天一样自然回应。"
                     )
                 elif trigger_type == "ai_decision":
-                    # AI主动回复（中性描述，不预设结果）
-                    system_notice = f"\n\n[系统提示]注意，你看到了这条消息，发送这条消息的人是{sender_info_text}"
+                    system_notice = f"[系统提示]注意，你看到了这条消息，发送这条消息的人是{sender_info_text}"
                 else:
                     system_notice = ""
 
                 if system_notice:
-                    processed_message += system_notice
+                    system_parts.append(system_notice)
                     if DEBUG_MODE:
                         logger.info(f"已添加发送者识别提示（触发方式: {trigger_type}）")
 
-            return processed_message
+            # 7. 持久化戳一戳事件文本
+            if persistent_poke_event_text and persistent_poke_event_text.strip():
+                system_parts.append(persistent_poke_event_text.strip())
+
+            # 8. 戳过对方提示
+            if poke_trace_text and poke_trace_text.strip():
+                system_parts.append(poke_trace_text.strip())
+
+            # 用户消息内容（含内联@解析）
+            user_part = MessageProcessor.inline_resolve_mentions(
+                message_text, mention_info
+            )
+
+            # 组装：冒号前是系统元数据，冒号后是用户消息
+            if system_parts:
+                result = " ".join(system_parts) + ": " + user_part
+            else:
+                result = user_part
+
+            if DEBUG_MODE and system_parts:
+                logger.info(
+                    f"消息已添加元数据（新格式，冒号为系统/用户边界）: "
+                    f"{' '.join(system_parts)} | {user_part[:50]}..."
+                )
+
+            return result
 
         except Exception as e:
             logger.error(f"添加消息元数据时发生错误: {e}")
@@ -394,6 +476,9 @@ class MessageProcessor:
     @staticmethod
     # 兼容旧调用：empty_at_context_prompt 已弃用，
     # 但缓存转正与若干保存链路仍沿用原签名，暂时保留参数以避免影响功能。
+    #   - empty_at_context_prompt 替补：
+    #     _build_single_at_message_context + _build_single_at_message_reply_hint（main.py）。
+    #   - poke_info 在本方法内未使用，保留参数仅为兼容旧签名。替补链路同 add_metadata_to_message。
     def add_metadata_from_cache(
         message_text: str,
         sender_id: str,
@@ -407,6 +492,13 @@ class MessageProcessor:
         is_empty_at: bool = False,
         empty_at_context_prompt: str = "",
         is_at_all_message: bool = False,
+        *,
+        persistent_poke_event_text: str = "",
+        poke_trace_text: str = "",
+        include_environment_info: bool = False,
+        group_id: str = "",
+        group_name: str = "",
+        group_role: str = "",
     ) -> str:
         """
         使用缓存中的发送者信息为消息添加元数据
@@ -424,16 +516,22 @@ class MessageProcessor:
             include_sender_info: 是否包含发送者信息
             mention_info: 统一的@解析结果（可包含@AI/@他人/@全体、重复@等复合场景）
             trigger_type: 触发方式，可选值: "at", "keyword", "ai_decision"
-            poke_info: 戳一戳信息字典（v1.0.9新增，如果存在）
+            poke_info: 戳一戳信息字典（v1.0.9新增）。
+                注意：本方法内未使用此参数，替补路径同 add_metadata_to_message。
+                保留此参数仅为兼容旧调用签名。
             is_empty_at: 是否是单独无信息@消息（只有@没有其他内容）
-            empty_at_context_prompt: 已弃用，保留参数仅用于兼容旧调用
+            empty_at_context_prompt: 已弃用。替补见 _build_empty_at_context_prompt →
+                _build_single_at_message_reply_hint（main.py）。
+                保留参数仅用于兼容旧调用，传 "" 即可。
 
         Returns:
             添加元数据后的文本
         """
         try:
-            # 获取时间戳（格式：YYYY-MM-DD 星期几 HH:MM:SS）
-            timestamp_str = ""
+            # 收集所有系统元数据（冒号前的内容）
+            system_parts = []
+
+            # 1. 时间戳
             if include_timestamp and message_timestamp:
                 try:
                     dt = datetime.fromtimestamp(message_timestamp)
@@ -448,8 +546,7 @@ class MessageProcessor:
                     ]
                     weekday = weekday_names[dt.weekday()]
                     timestamp_str = dt.strftime(f"%Y-%m-%d {weekday} %H:%M:%S")
-                except:
-                    # 如果时间戳转换失败，使用当前时间
+                except Exception:
                     dt = datetime.now()
                     weekday_names = [
                         "周一",
@@ -462,128 +559,127 @@ class MessageProcessor:
                     ]
                     weekday = weekday_names[dt.weekday()]
                     timestamp_str = dt.strftime(f"%Y-%m-%d {weekday} %H:%M:%S")
+                system_parts.append(f"[{timestamp_str}]")
 
-            # 获取发送者信息
-            sender_prefix = ""
+            # 2. 发送者信息（不带冒号）
             if include_sender_info:
-                if sender_name:
-                    # 格式：发送者名字(ID:xxx)，与历史消息完全一致
-                    sender_prefix = f"{sender_name}(ID:{sender_id})"
+                display_name = (
+                    sender_name
+                    if (sender_name and sender_name != str(sender_id))
+                    else ""
+                )
+                if display_name:
+                    system_parts.append(
+                        f"{display_name}(ID:{sender_id})" if sender_id else display_name
+                    )
+                elif sender_id:
+                    system_parts.append(f"未知用户(ID:{sender_id})")
                 else:
-                    sender_prefix = f"用户(ID:{sender_id})"
+                    system_parts.append("未知用户")
 
-            # 先对消息中的At标签做内联解析补充
-            message_text = MessageProcessor.inline_resolve_mentions(
-                message_text, mention_info
-            )
+                # 环境标注（与发送者信息合并，不另起一行）
+                if include_environment_info and group_id:
+                    env_tag = MessageProcessor._build_environment_tag(group_name or "", str(group_id))
+                    if env_tag:
+                        system_parts.append(env_tag)
 
-            # 组合格式：[时间] 发送者(ID:xxx): 消息内容
-            if timestamp_str and sender_prefix:
-                processed_message = f"[{timestamp_str}] {sender_prefix}: {message_text}"
-            elif timestamp_str:
-                processed_message = f"[{timestamp_str}] {message_text}"
-            elif sender_prefix:
-                processed_message = f"{sender_prefix}: {message_text}"
-            else:
-                processed_message = message_text
+                # 群身份标签（紧跟在发送者信息和环境标注之后）
+                if group_role and group_role.strip():
+                    system_parts.append(f"[{group_role.strip()}]")
 
-            # 如果存在@别人的信息，添加系统提示
+            # 3. @指向说明
             mention_notice = MessageProcessor.build_mention_direction_notice(
                 mention_info
             )
             if mention_notice:
-                mention_notice = f"\n{mention_notice}\n{message_text}"
+                system_parts.append(mention_notice)
 
-                # 将原消息内容替换为包含系统提示的版本
-                # 保持元数据格式不变，只在消息内容部分添加提示
-                if timestamp_str and sender_prefix:
-                    processed_message = (
-                        f"[{timestamp_str}] {sender_prefix}: {mention_notice}"
-                    )
-                elif timestamp_str:
-                    processed_message = f"[{timestamp_str}] {mention_notice}"
-                elif sender_prefix:
-                    processed_message = f"{sender_prefix}: {mention_notice}"
-                else:
-                    processed_message = mention_notice
+            # 4. 戳一戳提示不由 message_processor 注入（因此 poke_info 参数在本方法内未使用），
+            # 而是由主流程在消息组装完成后追加到消息下方（分隔符之内），
+            # 保存时由 MessageCleaner.FILTER_RULES 自动过滤。
+            # 替补链路：
+            #   A. build_persistent_poke_event_text(poke_info) → persistent_poke_event_text
+            #   B. main.py 从 poke_info 构建 _poke_notice_text → format_context_for_ai 追加
 
-            if timestamp_str or sender_prefix:
-                logger.info(
-                    f"消息已添加元数据（从缓存，统一格式）: [{timestamp_str}] {sender_prefix}"
+            # 5. @全体成员说明
+            has_at_all = bool(
+                is_at_all_message
+                or MessageProcessor._normalize_mention_info(mention_info).get(
+                    "has_at_all", False
                 )
-
-            # 🆕 v1.0.9: 添加戳一戳系统提示（如果存在）
-            # 注意：使用[]括号而非【】括号，确保能被MessageCleaner正确过滤
-            if poke_info and isinstance(poke_info, dict):
-                is_poke_bot = poke_info.get("is_poke_bot", False)
-                poke_sender_id = poke_info.get("sender_id", "")
-                poke_sender_name = poke_info.get("sender_name", "未知用户")
-                poke_target_id = poke_info.get("target_id", "")
-                poke_target_name = poke_info.get("target_name", "未知用户")
-
-                if is_poke_bot:
-                    # 戳的是机器人自己
-                    poke_notice = f"\n[戳一戳提示]有人在戳你，戳你的人是{poke_sender_name}(ID:{poke_sender_id})"
-                    logger.info(
-                        f"已添加戳一戳提示（戳机器人）: 戳人者={poke_sender_name}"
-                    )
-                else:
-                    # 戳的是别人
-                    poke_notice = f"\n[戳一戳提示]这是一个戳一戳消息，但不是戳你的，是{poke_sender_name}(ID:{poke_sender_id})在戳{poke_target_name}(ID:{poke_target_id})"
-                    logger.info(
-                        f"已添加戳一戳提示（戳别人）: 戳人者={poke_sender_name}, 被戳者={poke_target_name}"
-                    )
-
-                processed_message += poke_notice
-
-            if is_at_all_message:
-                processed_message += (
-                    "\n【@全体成员说明】这是一条@全体成员消息。"
-                    "它也包含你，但不一定是专门只对你说的。"
+            )
+            if has_at_all:
+                system_parts.append(
+                    "【@全体成员说明】这是一条@全体成员消息。它也包含你，但不一定是专门只对你说的。"
                 )
                 logger.info("已添加@全体成员说明（从缓存）")
 
-            # 🆕 v1.0.4: 添加发送者识别系统提示（根据触发方式）
-            # 只在开启了 include_sender_info 的情况下添加
+            # 6. 发送者识别系统提示（根据触发方式）
             if include_sender_info and trigger_type:
-                sender_info_text = (
-                    f"{sender_name}(ID:{sender_id})"
-                    if sender_name
-                    else f"用户(ID:{sender_id})"
+                display_name = (
+                    sender_name
+                    if (sender_name and sender_name != str(sender_id))
+                    else ""
                 )
+                if display_name:
+                    sender_info_text = (
+                        f"{display_name}(ID:{sender_id})" if sender_id else display_name
+                    )
+                elif sender_id:
+                    sender_info_text = f"未知用户(ID:{sender_id})"
+                else:
+                    sender_info_text = "未知用户"
 
-                # 根据触发方式添加不同的系统提示
                 if trigger_type == "at":
-                    # @消息触发
-                    # 对于单独无信息@消息和带消息的@消息，给AI不同的基础识别提示
                     if is_empty_at:
-                        # 纯@消息（没有文字内容）
                         system_notice = (
-                            f"\n\n[系统提示]{sender_info_text} 单独@了你，没有附带任何消息内容，"
+                            f"[系统提示]{sender_info_text} 单独@了你，没有附带任何消息内容，"
                             f"可能只是叫你出来，也可能是有事想说——自然回应就好。"
                         )
                     else:
-                        # @消息+文字内容
                         system_notice = (
-                            f"\n\n[系统提示]注意，现在有人在直接@你并且给你发送了这条消息，"
+                            f"[系统提示]注意，现在有人在直接@你并且给你发送了这条消息，"
                             f"@你的那个人是{sender_info_text}"
                         )
                 elif trigger_type == "keyword":
-                    # 关键词触发
-                    system_notice = f"\n\n[系统提示]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是{sender_info_text}"
+                    system_notice = f"[系统提示]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是{sender_info_text}"
                 elif trigger_type == "ai_decision":
-                    # AI主动回复（中性描述，不预设结果）
-                    system_notice = f"\n\n[系统提示]注意，你看到了这条消息，发送这条消息的人是{sender_info_text}"
+                    system_notice = f"[系统提示]注意，你看到了这条消息，发送这条消息的人是{sender_info_text}"
                 else:
                     system_notice = ""
 
                 if system_notice:
-                    processed_message += system_notice
+                    system_parts.append(system_notice)
                     logger.info(
                         f"已添加发送者识别提示（从缓存，触发方式: {trigger_type}）"
                     )
 
-            return processed_message
+            # 7. 持久化戳一戳事件文本
+            if persistent_poke_event_text and persistent_poke_event_text.strip():
+                system_parts.append(persistent_poke_event_text.strip())
+
+            # 8. 戳过对方提示
+            if poke_trace_text and poke_trace_text.strip():
+                system_parts.append(poke_trace_text.strip())
+
+            # 用户消息内容（含内联@解析）
+            user_part = MessageProcessor.inline_resolve_mentions(
+                message_text, mention_info
+            )
+
+            # 组装：冒号前是系统元数据，冒号后是用户消息
+            if system_parts:
+                result = " ".join(system_parts) + ": " + user_part
+            else:
+                result = user_part
+
+            if system_parts:
+                logger.info(
+                    f"消息已添加元数据（从缓存，新格式，冒号为系统/用户边界）: "
+                    f"{' '.join(system_parts)} | {user_part[:50]}..."
+                )
+
+            return result
 
         except Exception as e:
             logger.error(f"从缓存添加消息元数据时发生错误: {e}")
@@ -692,13 +788,20 @@ class MessageProcessor:
         try:
             sender_id = event.get_sender_id()
             sender_name = event.get_sender_name()
+            display_name = (
+                sender_name if (sender_name and sender_name != str(sender_id)) else ""
+            )
 
-            # 如果有昵称,格式为: 昵称(ID: xxx)
-            if sender_name:
-                return f"[发送者: {sender_name}(ID: {sender_id})]"
+            if display_name:
+                return (
+                    f"[发送者: {display_name}(ID: {sender_id})]"
+                    if sender_id
+                    else f"[发送者: {display_name}]"
+                )
+            elif sender_id:
+                return f"[发送者: 未知用户(ID: {sender_id})]"
             else:
-                # 如果没有昵称,只显示ID
-                return f"[发送者ID: {sender_id}]"
+                return "[发送者: 未知用户]"
 
         except Exception as e:
             logger.warning(f"格式化发送者信息失败: {e}")

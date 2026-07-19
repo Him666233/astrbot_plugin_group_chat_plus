@@ -7,21 +7,82 @@ const SessionMgr = {
     _sessions: [],
     _currentSession: null,
     _detailPoller: null,
+    _listPoller: null,
     _prevDetail: null, // 上一次的详情数据，用于变化高亮
     _autoRefresh: true,
+    _listAutoRefresh: true,
 
     /** 初始化会话管理视图 */
     async init() {
         this._currentSession = null;
         if (this._detailPoller) { this._detailPoller.stop(); this._detailPoller = null; }
+        if (this._listPoller) { this._listPoller.stop(); this._listPoller = null; }
         document.getElementById('session-detail').classList.add('hidden');
         document.getElementById('session-list-container').classList.remove('hidden');
         await this._loadSessions();
+        this._startListAutoRefresh();
     },
 
     /** 销毁（切换视图时调用） */
     destroy() {
         if (this._detailPoller) { this._detailPoller.stop(); this._detailPoller = null; }
+        if (this._listPoller) { this._listPoller.stop(); this._listPoller = null; }
+    },
+
+    /** 启动列表自动刷新 */
+    _startListAutoRefresh() {
+        if (this._listPoller) this._listPoller.stop();
+        if (this._listAutoRefresh) {
+            this._listPoller = Utils.createPoller(() => this._refreshListData(), 3000);
+            this._listPoller.start();
+        }
+    },
+
+    /** 停止列表自动刷新 */
+    _stopListAutoRefresh() {
+        if (this._listPoller) { this._listPoller.stop(); this._listPoller = null; }
+    },
+
+    /** 仅刷新列表数据（自动刷新用，不重建头部控件） */
+    async _refreshListData() {
+        if (document.visibilityState !== 'visible') return true;
+        const res = await Api.sessionList({ autoRefresh: true });
+        if (!res.ok) return;
+        const sessionsObj = res.sessions || {};
+        this._sessions = Object.entries(sessionsObj).map(([id, meta]) => ({
+            id,
+            message_count: meta.message_count || 0,
+            last_active: meta.last_modified || 0,
+            file_size: meta.file_size || 0,
+            error: meta.error || false,
+            has_file: meta.has_file !== false,
+            has_runtime_data: meta.has_runtime_data || false,
+        }));
+        this._sessions.sort((a, b) => {
+            if (a.has_runtime_data !== b.has_runtime_data) return b.has_runtime_data ? 1 : -1;
+            if (a.last_active !== b.last_active) return b.last_active - a.last_active;
+            return a.id.localeCompare(b.id);
+        });
+        // 更新计数
+        const countEl = document.getElementById('session-list-count');
+        if (countEl) countEl.textContent = `共 ${this._sessions.length} 个会话`;
+        // 更新清理按钮
+        const cleanupWrap = document.getElementById('session-cleanup-wrap');
+        if (cleanupWrap) {
+            const ghostCount = this._sessions.filter(s => !s.has_runtime_data && s.has_file).length;
+            cleanupWrap.innerHTML = '';
+            if (ghostCount > 0) {
+                const cleanupBtn = document.createElement('button');
+                cleanupBtn.className = 'btn btn-sm btn-danger';
+                cleanupBtn.textContent = `清理孤立记录 (${ghostCount})`;
+                cleanupBtn.title = '删除没有对应运行时状态的会话文件';
+                cleanupBtn.addEventListener('click', () => this._cleanupGhostSessions());
+                cleanupWrap.appendChild(cleanupBtn);
+            }
+        }
+        // 更新列表项
+        const itemsContainer = document.getElementById('session-list-items');
+        if (itemsContainer) this._renderListItems(itemsContainer);
     },
 
     /** 加载会话列表（合并内存+文件） */
@@ -61,24 +122,101 @@ const SessionMgr = {
     _renderList(container) {
         container.innerHTML = '';
 
-        // 列表头部：刷新按钮
+        // 列表头部：自动刷新 + 按钮组
         const header = document.createElement('div');
-        header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:16px 24px 8px;';
-        header.innerHTML = `<span style="font-size:13px;color:var(--text-muted);">共 ${this._sessions.length} 个会话</span>`;
+        header.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:16px 24px 8px;';
+
+        const headerTop = document.createElement('div');
+        headerTop.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
+
+        // 左侧：自动刷新开关
+        const leftGroup = document.createElement('div');
+        leftGroup.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        const refreshToggle = document.createElement('label');
+        refreshToggle.className = 'auto-refresh-toggle';
+        refreshToggle.innerHTML = `
+            <span class="dot ${this._listAutoRefresh ? 'active' : ''}" id="list-refresh-dot"></span>
+            <input type="checkbox" ${this._listAutoRefresh ? 'checked' : ''} id="list-auto-refresh">
+            <span>自动刷新（3秒）</span>`;
+        refreshToggle.querySelector('#list-auto-refresh').addEventListener('change', (e) => {
+            this._listAutoRefresh = e.target.checked;
+            const dot = document.getElementById('list-refresh-dot');
+            if (dot) dot.className = 'dot' + (this._listAutoRefresh ? ' active' : '');
+            if (this._listAutoRefresh) {
+                this._startListAutoRefresh();
+            } else {
+                this._stopListAutoRefresh();
+            }
+        });
+        leftGroup.appendChild(refreshToggle);
+
+        // 清理孤立记录按钮占位
+        const cleanupWrap = document.createElement('span');
+        cleanupWrap.id = 'session-cleanup-wrap';
+        cleanupWrap.style.cssText = 'display:contents;';
+        leftGroup.appendChild(cleanupWrap);
+
+        // 计数
+        const countSpan = document.createElement('span');
+        countSpan.id = 'session-list-count';
+        countSpan.style.cssText = 'font-size:13px;color:var(--text-muted);';
+        countSpan.textContent = `共 ${this._sessions.length} 个会话`;
+
+        headerTop.appendChild(leftGroup);
+
+        // 右侧：计数 + 刷新列表按钮
+        const btnGroup = document.createElement('div');
+        btnGroup.style.cssText = 'display:flex;align-items:center;gap:8px;';
+
+        btnGroup.appendChild(countSpan);
+
         const refreshBtn = document.createElement('button');
         refreshBtn.className = 'btn btn-sm';
         refreshBtn.textContent = '刷新列表';
         refreshBtn.addEventListener('click', () => this._loadSessions());
-        header.appendChild(refreshBtn);
+        btnGroup.appendChild(refreshBtn);
+        headerTop.appendChild(btnGroup);
+
+        header.appendChild(headerTop);
+
+        const storageHint = document.createElement('div');
+        storageHint.style.cssText = 'font-size:12px;color:var(--text-secondary);line-height:1.7;';
+        storageHint.innerHTML = '同一批真实会话的两种表示：<strong>聊天记录文件</strong>来自 <code>chat_history/...</code>，<strong>运行时状态</strong>来自当前内存。「重置」按钮仅清除运行时状态（注意力、情绪、概率等），<strong>不会删除聊天记录文件</strong>；重置后插件自动重载使清理生效。「清理孤立记录」仅删除没有对应运行时状态的残留文件。';
+        header.appendChild(storageHint);
         container.appendChild(header);
 
+        // 清理按钮初始渲染
+        const ghostCount = this._sessions.filter(s => !s.has_runtime_data && s.has_file).length;
+        if (ghostCount > 0) {
+            const cleanupBtn = document.createElement('button');
+            cleanupBtn.className = 'btn btn-sm btn-danger';
+            cleanupBtn.textContent = `清理孤立记录 (${ghostCount})`;
+            cleanupBtn.title = '删除没有对应运行时状态的会话文件';
+            cleanupBtn.addEventListener('click', () => this._cleanupGhostSessions());
+            cleanupWrap.appendChild(cleanupBtn);
+        }
+
+        // 列表项容器
+        const listWrap = document.createElement('div');
+        listWrap.id = 'session-list-items';
+        listWrap.style.cssText = 'padding:0 24px 24px;';
+        container.appendChild(listWrap);
+
         if (!this._sessions.length) {
-            container.innerHTML += '<div class="chart-empty" style="padding:40px;">暂无会话数据</div>';
+            listWrap.innerHTML = '<div class="chart-empty" style="padding:40px;">暂无会话数据</div>';
             return;
         }
 
-        const listWrap = document.createElement('div');
-        listWrap.style.cssText = 'padding:0 24px 24px;';
+        this._renderListItems(listWrap);
+    },
+
+    /** 仅渲染会话卡片列表（首次加载和自动刷新复用） */
+    _renderListItems(container) {
+        container.innerHTML = '';
+        if (!this._sessions.length) {
+            container.innerHTML = '<div class="chart-empty" style="padding:40px;">暂无会话数据</div>';
+            return;
+        }
 
         this._sessions.forEach(s => {
             const card = document.createElement('div');
@@ -126,15 +264,16 @@ const SessionMgr = {
             card.appendChild(actions);
 
             card.addEventListener('click', () => this._showDetail(s.id));
-            listWrap.appendChild(card);
+            container.appendChild(card);
         });
-        container.appendChild(listWrap);
     },
 
     /** 显示会话详情（分页视图） */
     async _showDetail(sessionId) {
         this._currentSession = sessionId;
         this._prevDetail = null;
+        // 暂停列表自动刷新
+        this._stopListAutoRefresh();
         const detail = document.getElementById('session-detail');
         const listContainer = document.getElementById('session-list-container');
         detail.classList.remove('hidden');
@@ -163,20 +302,22 @@ const SessionMgr = {
         if (this._detailPoller) this._detailPoller.stop();
         if (this._autoRefresh) {
             this._detailPoller = Utils.createPoller(
-                () => this._refreshDetail(sessionId), 5000
+                () => this._refreshDetail(sessionId, { autoRefresh: true }), 3000
             );
-            // 跳过首次（已手动加载）
+            this._detailPoller.start();
         }
     },
 
     /** 刷新详情数据，返回是否成功 */
-    async _refreshDetail(sessionId) {
+    async _refreshDetail(sessionId, options = {}) {
         if (this._currentSession !== sessionId) return false;
+        if (options.autoRefresh && document.visibilityState !== 'visible') return true;
 
         try {
-            const res = await Api.sessionDetail(sessionId);
+            const res = await Api.sessionDetail(sessionId, options);
             if (!res.ok || !res.detail) {
-                console.error('SessionMgr: sessionDetail failed', res);
+                // 自动刷新静默跳过（插件重启等场景），手动刷新由调用方处理反馈
+                if (!options.autoRefresh) console.error('SessionMgr: sessionDetail failed', res);
                 return false;
             }
             const d = res.detail;
@@ -201,7 +342,7 @@ const SessionMgr = {
     /** 构建详情 DOM */
     _buildDetailDOM(container, d, sessionId) {
         container.innerHTML = '';
-        container.style.cssText = 'padding:24px;overflow-y:auto;display:flex;flex-direction:column;';
+        container.style.cssText = 'padding:24px;overflow-y:auto;display:flex;flex-direction:column;min-height:0;height:100%;';
 
         // 头部
         const header = document.createElement('div');
@@ -217,14 +358,14 @@ const SessionMgr = {
         refreshToggle.innerHTML = `
             <span class="dot ${this._autoRefresh ? 'active' : ''}" id="refresh-dot"></span>
             <input type="checkbox" ${this._autoRefresh ? 'checked' : ''} id="auto-refresh-cb">
-            <span>自动刷新</span>`;
+            <span>自动刷新（3秒）</span>`;
         refreshToggle.querySelector('#auto-refresh-cb').addEventListener('change', (e) => {
             this._autoRefresh = e.target.checked;
             document.getElementById('refresh-dot').className = 'dot' + (this._autoRefresh ? ' active' : '');
             if (this._autoRefresh) {
                 if (this._detailPoller) this._detailPoller.stop();
                 this._detailPoller = Utils.createPoller(
-                    () => this._refreshDetail(sessionId), 5000
+                    () => this._refreshDetail(sessionId, { autoRefresh: true }), 3000
                 );
                 this._detailPoller.start();
             } else {
@@ -235,7 +376,23 @@ const SessionMgr = {
         const manualRefresh = document.createElement('button');
         manualRefresh.className = 'btn btn-sm';
         manualRefresh.textContent = '刷新';
-        manualRefresh.addEventListener('click', () => this._refreshDetail(sessionId));
+        manualRefresh.addEventListener('click', async () => {
+            manualRefresh.disabled = true;
+            manualRefresh.textContent = '刷新中...';
+            const ok = await this._refreshDetail(sessionId);
+            // 手动刷新时强制全量重载聊天记录（编辑模式下跳过）
+            const historyTab = document.getElementById('tab-history');
+            if (this._historyLoaded && historyTab && !historyTab.querySelector('.file-editor--history')) {
+                this._loadChatHistory(sessionId);
+            }
+            manualRefresh.disabled = false;
+            manualRefresh.textContent = '刷新';
+            if (ok) {
+                Utils.toast('会话数据已刷新', 'success', 2000);
+            } else {
+                Utils.toast('刷新失败', 'error', 3000);
+            }
+        });
 
         const backBtn = document.createElement('button');
         backBtn.className = 'btn btn-sm';
@@ -247,6 +404,12 @@ const SessionMgr = {
         headerActions.appendChild(backBtn);
         header.appendChild(headerActions);
         container.appendChild(header);
+
+        // 详情头部说明
+        const storageHint = document.createElement('div');
+        storageHint.style.cssText = 'font-size:12px;color:var(--text-secondary);line-height:1.7;margin-bottom:12px;';
+        storageHint.innerHTML = '本页会把<strong>插件自定义聊天记录文件</strong>与<strong>当前运行时状态</strong>合并展示；官方存储仍会同步写入，并在部分场景作为历史读取回退，因此正常情况下这些信息应属于同一个会话。';
+        container.appendChild(storageHint);
 
         // 概览卡片
         const cards = document.createElement('div');
@@ -373,7 +536,7 @@ const SessionMgr = {
                 <td>${(u.emotion||0).toFixed(2)}</td>
                 <td>${u.interaction_count||0}</td>
                 <td>${Utils.formatDuration(u.idle_seconds||0)}</td>
-                <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${Utils.escapeHtml(Utils.truncate(u.preview||'', 40))}</td>`;
+                <td><span style="display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${Utils.escapeHtml(Utils.truncate(u.preview||'', 40))}</span></td>`;
             tbody.appendChild(tr);
         });
         table.appendChild(tbody);
@@ -442,8 +605,8 @@ const SessionMgr = {
 
         const isActive = p.proactive_active || false;
         const cooldown = p.cooldown_remaining || 0;
-        const totalSuccess = p.total_successes || 0;
-        const totalFailure = p.total_failures || 0;
+        const totalSuccess = p.successful_interactions || 0;
+        const totalFailure = p.failed_interactions || 0;
         const total = totalSuccess + totalFailure;
         const rate = total > 0 ? ((totalSuccess / total) * 100).toFixed(1) : '0.0';
         const score = typeof p.interaction_score === 'number' ? p.interaction_score.toFixed(1) : '-';
@@ -672,8 +835,14 @@ const SessionMgr = {
         container.innerHTML = '<div class="chart-empty">加载中...</div>';
 
         const res = await Api.getChatHistory(sessionId);
-        const messages = (res.ok && res.messages) ? res.messages : [];
+        if (!res.ok) {
+            container.innerHTML = `<div class="chart-empty">${Utils.escapeHtml(res.msg || '加载失败')}</div>`;
+            this._historyLoaded = false;
+            return;
+        }
+        const messages = res.messages || [];
         this._historyLoaded = true;
+        this._prevChatMessages = messages;
 
         container.innerHTML = '';
 
@@ -695,6 +864,12 @@ const SessionMgr = {
 
     /** 渲染聊天记录 */
     _renderChatHistory(container, messages) {
+        // 手动刷新提示
+        const refreshHint = document.createElement('div');
+        refreshHint.style.cssText = 'font-size:11px;color:var(--text-muted);margin-bottom:6px;line-height:1.5;';
+        refreshHint.textContent = '提示：聊天记录自动刷新为优化体验做了取舍，不一定能实时反映变化。如发现数据未更新，请点击右上角「刷新」按钮强制刷新。';
+        container.appendChild(refreshHint);
+
         const viewer = document.createElement('div');
         viewer.className = 'chat-history-viewer';
 
@@ -714,18 +889,107 @@ const SessionMgr = {
         container.appendChild(viewer);
 
         const info = document.createElement('div');
+        info.className = 'chat-history-info';
         info.style.cssText = 'font-size:12px;color:var(--text-muted);margin-top:8px;';
         info.textContent = `共 ${messages.length} 条消息`;
         container.appendChild(info);
     },
 
+    /** 增量更新聊天记录，不重建 DOM，保持滚动位置。
+     *  自动刷新和手动刷新均通过此方法，确保聊天记录随数据变化同步更新。 */
+    async _updateChatHistoryInline(sessionId) {
+        const container = document.getElementById('tab-history');
+        if (!container) return;
+        const viewer = container.querySelector('.chat-history-viewer');
+        if (!viewer) {
+            if (this._historyLoaded) this._loadChatHistory(sessionId);
+            return;
+        }
+        if (!this._prevChatMessages) {
+            this._loadChatHistory(sessionId);
+            return;
+        }
+
+        const res = await Api.getChatHistory(sessionId);
+        if (!res.ok || !res.messages) return;
+
+        const newMessages = res.messages || [];
+        const prevMessages = this._prevChatMessages;
+        this._prevChatMessages = newMessages;
+
+        // 保存滚动位置
+        const scrollTop = viewer.scrollTop;
+        const scrollHeight = viewer.scrollHeight;
+        const clientHeight = viewer.clientHeight;
+        const wasAtBottom = (scrollTop + clientHeight >= scrollHeight - 10);
+
+        // 用最后一条消息的标识判断是否有变化（而非仅靠条数）
+        const lastNew = newMessages[newMessages.length - 1];
+        const lastPrev = prevMessages[prevMessages.length - 1];
+        const lastNewKey = lastNew ? (lastNew.message_id || `${lastNew.timestamp || ''}|${lastNew.message_str || ''}`) : '';
+        const lastPrevKey = lastPrev ? (lastPrev.message_id || `${lastPrev.timestamp || ''}|${lastPrev.message_str || ''}`) : '';
+
+        if (lastNewKey === lastPrevKey && newMessages.length === prevMessages.length) return;
+
+        // 仅追加新增消息（新消息比旧消息多且前缀一致）
+        if (newMessages.length > prevMessages.length && this._messagesPrefixMatch(prevMessages, newMessages)) {
+            const newCount = newMessages.length - prevMessages.length;
+            const appended = newMessages.slice(-newCount);
+            const infoEl = container.querySelector('.chat-history-info');
+            appended.forEach(msg => {
+                const el = document.createElement('div');
+                el.className = 'chat-msg';
+                const role = msg.role || msg.sender?.nickname || 'unknown';
+                const content = msg.content || msg.message_str || '';
+                el.innerHTML = `<span class="chat-msg-role">${Utils.escapeHtml(role)}</span>
+                    <span class="chat-msg-content">${Utils.escapeHtml(Utils.truncate(content, 200))}</span>`;
+                viewer.appendChild(el);
+            });
+            if (infoEl) {
+                infoEl.textContent = `共 ${newMessages.length} 条消息`;
+            }
+        } else {
+            // 消息结构变化，全量重建但保持滚动位
+            const savedScroll = viewer.scrollTop;
+            this._loadChatHistory(sessionId).then(() => {
+                const newViewer = document.querySelector('#tab-history .chat-history-viewer');
+                if (newViewer) {
+                    newViewer.scrollTop = Math.min(savedScroll, newViewer.scrollHeight);
+                }
+            });
+            return;
+        }
+
+        // 恢复滚动位置
+        if (wasAtBottom) {
+            viewer.scrollTop = viewer.scrollHeight;
+        } else {
+            viewer.scrollTop = scrollTop;
+        }
+    },
+
+    /** 判断新消息数组的前缀是否与旧消息完全一致（用于确认只是追加而非替换） */
+    _messagesPrefixMatch(prev, next) {
+        if (prev.length === 0) return true;
+        const len = Math.min(prev.length, next.length);
+        for (let i = 0; i < len; i++) {
+            const pk = prev[i].message_id || `${prev[i].timestamp || ''}|${prev[i].message_str || ''}`;
+            const nk = next[i].message_id || `${next[i].timestamp || ''}|${next[i].message_str || ''}`;
+            if (pk !== nk) return false;
+        }
+        return true;
+    },
+
     /** 打开聊天记录 JSON 编辑器 */
     _openHistoryEditor(sessionId, messages) {
+        // 进入编辑模式，暂停自动刷新轮询
+        if (this._detailPoller) { this._detailPoller.stop(); }
+
         const container = document.getElementById('tab-history');
         container.innerHTML = '';
 
         const editor = document.createElement('div');
-        editor.className = 'file-editor';
+        editor.className = 'file-editor file-editor--history';
 
         const editorHeader = document.createElement('div');
         editorHeader.className = 'file-editor-header';
@@ -750,6 +1014,14 @@ const SessionMgr = {
                 if (res.ok) {
                     Utils.toast(res.msg || '保存成功', 'success');
                     this._loadChatHistory(sessionId);
+                    // 保存后恢复自动刷新
+                    if (this._autoRefresh) {
+                        if (this._detailPoller) this._detailPoller.stop();
+                        this._detailPoller = Utils.createPoller(
+                            () => this._refreshDetail(sessionId, { autoRefresh: true }), 3000
+                        );
+                        this._detailPoller.start();
+                    }
                 } else {
                     Utils.toast(res.msg || '保存失败', 'error');
                 }
@@ -763,7 +1035,17 @@ const SessionMgr = {
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'btn btn-sm';
         cancelBtn.textContent = '取消';
-        cancelBtn.addEventListener('click', () => this._loadChatHistory(sessionId));
+        cancelBtn.addEventListener('click', () => {
+            this._loadChatHistory(sessionId);
+            // 取消编辑后恢复自动刷新
+            if (this._autoRefresh) {
+                if (this._detailPoller) this._detailPoller.stop();
+                this._detailPoller = Utils.createPoller(
+                    () => this._refreshDetail(sessionId, { autoRefresh: true }), 3000
+                );
+                this._detailPoller.start();
+            }
+        });
 
         btnGroup.appendChild(saveBtn);
         btnGroup.appendChild(cancelBtn);
@@ -772,66 +1054,18 @@ const SessionMgr = {
 
         const textarea = document.createElement('textarea');
         textarea.className = 'file-editor-textarea';
-        textarea.style.cssText = 'font-family:monospace;font-size:12px;min-height:400px;width:100%;margin-top:8px;';
+        textarea.style.cssText = 'font-family:monospace;font-size:12px;width:100%;margin-top:8px;';
         textarea.value = JSON.stringify(messages, null, 2);
 
-        // 移动端触屏设备：键盘弹出时整体上移避免遮挡
-        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-        let keyboardVisible = false;
-        let originalTransform = '';
-
-        const showKeyboardMode = () => {
-            if (keyboardVisible) return;
-            keyboardVisible = true;
-            console.log('[键盘适配] 键盘已弹出，整体上移');
-            
-            // 获取整个会话详情容器
-            const sessionDetail = document.getElementById('session-detail');
-            if (sessionDetail) {
-                originalTransform = sessionDetail.style.transform || '';
-                // 整体向上移动60%视口高度，确保编辑区域可见
-                sessionDetail.style.transform = 'translateY(-60vh)';
-                sessionDetail.style.transition = 'transform 0.3s ease';
-            }
-        };
-
-        const hideKeyboardMode = () => {
-            if (!keyboardVisible) return;
-            keyboardVisible = false;
-            console.log('[键盘适配] 键盘已收起，恢复原位');
-            
-            const sessionDetail = document.getElementById('session-detail');
-            if (sessionDetail) {
-                sessionDetail.style.transform = originalTransform;
-            }
-        };
-
-        if (isTouchDevice) {
-            console.log('[键盘适配] 触屏设备检测成功，启用键盘适配');
-            
-            // textarea获得焦点时上移
-            textarea.addEventListener('focus', () => {
-                console.log('[键盘适配] textarea获得焦点');
-                // 延迟执行，等待键盘完全弹出
-                setTimeout(showKeyboardMode, 300);
+        const ensureVisibleOnMobile = () => {
+            if (window.innerWidth >= 768) return;
+            requestAnimationFrame(() => {
+                textarea.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
             });
-            
-            // textarea失去焦点时恢复
-            textarea.addEventListener('blur', () => {
-                console.log('[键盘适配] textarea失去焦点');
-                // 延迟执行，等待键盘完全收起
-                setTimeout(hideKeyboardMode, 100);
-            });
-        }
-
-        // 保存或取消时清理
-        const cleanup = () => {
-            hideKeyboardMode();
-            console.log('[键盘适配] 清理完成');
         };
 
-        saveBtn.addEventListener('click', cleanup, { once: true });
-        cancelBtn.addEventListener('click', cleanup, { once: true });
+        textarea.addEventListener('focus', ensureVisibleOnMobile);
+        textarea.addEventListener('click', ensureVisibleOnMobile);
 
         editor.appendChild(textarea);
         container.appendChild(editor);
@@ -854,6 +1088,7 @@ const SessionMgr = {
             ['ov-pro-proc', d.proactive_processing ? '是' : '否', prev.proactive_processing ? '是' : '否'],
             ['ov-wait', (d.wait_windows || []).length, (prev.wait_windows || []).length],
             ['ov-cooldown', (d.cooldowns || []).length, (prev.cooldowns || []).length],
+            ['ov-pending-cooldown', (d.pending_cooldowns || []).length, (prev.pending_cooldowns || []).length],
             ['ov-fatigue', (d.fatigue_blocks || []).length, (prev.fatigue_blocks || []).length],
             ['ov-density', density.reply_count !== undefined ? `${density.reply_count}/${density.max_replies || '-'}` : '-',
              prevDensity.reply_count !== undefined ? `${prevDensity.reply_count}/${prevDensity.max_replies || '-'}` : '-'],
@@ -888,6 +1123,12 @@ const SessionMgr = {
         if (runtimeTab && !runtimeTab.classList.contains('hidden')) {
             this._renderRuntimeTab(runtimeTab, d);
         }
+        // 聊天记录：如果已加载、当前 Tab 可见、且不在编辑模式，增量更新
+        const historyTab = document.getElementById('tab-history');
+        if (this._historyLoaded && historyTab && !historyTab.classList.contains('hidden')
+            && !historyTab.querySelector('.file-editor--history')) {
+            this._updateChatHistoryInline(this._currentSession);
+        }
     },
 
     /** 返回会话列表 */
@@ -898,16 +1139,48 @@ const SessionMgr = {
         document.getElementById('session-detail').classList.add('hidden');
         document.getElementById('session-list-container').classList.remove('hidden');
         this._loadSessions();
+        // 返回列表后恢复列表自动刷新
+        this._startListAutoRefresh();
     },
 
-    /** 重置会话数据 */
+    /** 清理孤立会话文件 */
+    async _cleanupGhostSessions() {
+        const ghostCount = this._sessions.filter(s => !s.has_runtime_data && s.has_file).length;
+        if (ghostCount === 0) {
+            Utils.toast('没有需要清理的孤立会话记录', 'info');
+            return;
+        }
+        const ok = await Utils.confirm(
+            `确认清理 ${ghostCount} 个孤立会话的文件记录？\n\n这些会话没有对应的运行时状态，可能是旧版留下的残留文件。\n清理后无法恢复，请确认是否继续。`
+        );
+        if (!ok) return;
+        const res = await Api.sessionCleanGhosts();
+        if (res.ok) {
+            Utils.toast(res.msg || '清理完成', 'success');
+            this._loadSessions();
+        } else {
+            Utils.toast(res.msg || '清理失败', 'error');
+        }
+    },
+
+    /** 重置会话数据，随后触发插件重载使清理完全生效。 */
     async _resetSession(sessionId) {
-        const ok = await Utils.confirm(`确认重置会话「${sessionId}」的插件数据？\n将清除注意力、情绪、概率等运行时状态。`);
+        const ok = await Utils.confirm(`确认重置会话「${sessionId}」的插件数据？\n将清除注意力、情绪、概率等运行时状态，重置后插件会自动重载。`);
         if (!ok) return;
         const res = await Api.sessionReset(sessionId);
         if (res.ok) {
-            Utils.toast('会话已重置', 'success');
-            setTimeout(() => this._loadSessions(), 1000);
+            Utils.toast(res.msg || '会话已重置，插件重载中...', 'success');
+            // 轮询重载状态，成功后仅重新加载数据（不触发整页刷新，避免命中速率限制）
+            if (typeof App !== 'undefined' && App._pollRestartStatus) {
+                await App._pollRestartStatus('reload');
+            }
+            // 隐藏详情视图（如果打开），回到列表，重新加载
+            const detailEl = document.getElementById('session-detail');
+            if (detailEl) detailEl.classList.add('hidden');
+            const listContainer = document.getElementById('session-list-container');
+            if (listContainer) listContainer.classList.remove('hidden');
+            this._loadSessions();
+            this._startListAutoRefresh();
         } else {
             Utils.toast(res.msg || '重置失败', 'error');
         }

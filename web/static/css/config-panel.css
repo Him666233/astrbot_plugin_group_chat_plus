@@ -18,6 +18,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    -webkit-overscroll-behavior: contain; /* Safari < 16 fallback */
     overscroll-behavior: contain;
     padding: 16px;
 }
@@ -70,6 +71,12 @@
 .config-field-tag:focus-visible {
     outline: 2px solid var(--glass-border-hover);
     outline-offset: 2px;
+}
+
+/* tooltip 可见时提升层级，确保不被下方 .btn（z-index:10）等元素遮挡 */
+.config-field-tag:hover,
+.config-field-tag:focus-within {
+    z-index: 15;
 }
 
 .config-field-tag-label {
@@ -187,6 +194,7 @@
     font-size: 10px;
     color: var(--accent-red);
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     margin-top: 2px;
 }
@@ -302,6 +310,8 @@
 /* ========== Select Dropdown ========== */
 .config-select {
     width: 100%;
+    -moz-appearance: none;
+    -webkit-appearance: none;
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23555555' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;

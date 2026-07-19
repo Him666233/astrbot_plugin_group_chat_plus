@@ -61,7 +61,8 @@ class SmartConcurrentManager:
                 cls._pending[chat_id][processing_id] = {
                     **existing,
                     "processing_id": processing_id,
-                    "source_event_id": source_event_id or existing.get("source_event_id", ""),
+                    "source_event_id": source_event_id
+                    or existing.get("source_event_id", ""),
                     "arrival_seq": arrival_seq or existing.get("arrival_seq", 0),
                     "arrival_monotonic": arrival_monotonic
                     or existing.get("arrival_monotonic", 0.0)
@@ -83,6 +84,7 @@ class SmartConcurrentManager:
         sender_id: str,
         cached_data: dict,
         is_forced: bool = False,
+        can_be_merged_when_forced: bool = False,
     ) -> None:
         """在消息完成前置处理后，挂载可用于批处理的载荷。"""
         try:
@@ -100,6 +102,7 @@ class SmartConcurrentManager:
                     "sender_id": sender_id,
                     "cached_data": cached_data,
                     "is_forced": is_forced,
+                    "can_be_merged_when_forced": can_be_merged_when_forced,
                     "payload_ready": True,
                     "payload_attached_at": time.time(),
                 }
@@ -141,6 +144,21 @@ class SmartConcurrentManager:
             return False
 
     @classmethod
+    async def has_pending(cls, chat_id: str) -> bool:
+        """检查当前会话是否存在尚未被 claim/清理的 Smart 待处理消息。"""
+        try:
+            lock = cls._get_lock()
+            async with lock:
+                cls._cleanup_expired_locked(chat_id)
+                return bool(cls._pending.get(chat_id))
+        except Exception as e:
+            logger.warning(f"[SmartConcurrent] has_pending 失败: {e}")
+            return False
+
+    # 单批次最多吸收的消息数（防止极端并发下上下文溢出）
+    _MAX_BATCH_SIZE: int = 20
+
+    @classmethod
     async def claim_batch(cls, chat_id: str, processing_id: str) -> dict:
         """
         尝试让当前消息成为 anchor，并吸收后续已准备好的消息。
@@ -159,7 +177,9 @@ class SmartConcurrentManager:
                 if consumed_info:
                     return {
                         "is_consumed": True,
-                        "anchor_processing_id": consumed_info.get("anchor_processing_id"),
+                        "anchor_processing_id": consumed_info.get(
+                            "anchor_processing_id"
+                        ),
                         "merged_entries": [],
                     }
 
@@ -199,13 +219,22 @@ class SmartConcurrentManager:
                     if not entry_pid or entry_pid == processing_id:
                         continue
 
-                    # 后续强制消息永远作为新的边界，不被前一个批次吞掉
-                    if entry.get("is_forced", False):
+                    # 达到批次上限：停止吸收，剩余消息留在 pending 由下一批次处理
+                    if len(merged_entries) >= cls._MAX_BATCH_SIZE:
                         break
 
-                    # 只有已准备好载荷的消息才可被当前批次吸收
+                    # 关键词等强制触发仍作为边界；@AI 消息可显式允许被吸收，
+                    # 由消费侧设置 call_llm=True 阻止平台默认 LLM 二次处理。
+                    if entry.get("is_forced", False) and not entry.get(
+                        "can_be_merged_when_forced", False
+                    ):
+                        break
+
+                    # 只吸收连续且已准备好载荷的后续消息。
+                    # 如果跳过一个更早但尚未准备好的消息继续吸收后面的消息，
+                    # 会让批次时间顺序交叉，图片/转发慢处理时尤其明显。
                     if not entry.get("payload_ready", False):
-                        continue
+                        break
 
                     merged_entries.append(entry)
                     cls._consumed[entry_pid] = {

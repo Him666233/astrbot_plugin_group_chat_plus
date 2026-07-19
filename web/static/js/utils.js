@@ -2,6 +2,27 @@
  * utils.js - 工具函数
  */
 
+// Polyfill: CanvasRenderingContext2D.roundRect()
+// Supported natively since Chrome 99, Firefox 112, Safari 15.4.
+// Older browsers get a path-fallback that produces identical visual results.
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+        if (typeof r === 'number') r = { tl: r, tr: r, br: r, bl: r };
+        var tl = r.tl || 0, tr = r.tr || 0, br = r.br || 0, bl = r.bl || 0;
+        this.beginPath();
+        this.moveTo(x + tl, y);
+        this.lineTo(x + w - tr, y);
+        this.arcTo(x + w, y, x + w, y + tr, tr);
+        this.lineTo(x + w, y + h - br);
+        this.arcTo(x + w, y + h, x + w - br, y + h, br);
+        this.lineTo(x + bl, y + h);
+        this.arcTo(x, y + h, x, y + h - bl, bl);
+        this.lineTo(x, y + tl);
+        this.arcTo(x, y, x + tl, y, tl);
+        this.closePath();
+    };
+}
+
 const Utils = {
     /** 防抖 */
     debounce(fn, ms = 300) {
@@ -155,6 +176,56 @@ const Utils = {
         });
     },
 
+    /** 文本输入弹窗，返回用户输入的字符串或 null。maxLength 可选，设置后显示字数限制提示 */
+    prompt(title, defaultValue = '', maxLength = 0) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'confirm-overlay';
+            const maxAttr = maxLength > 0 ? ` maxlength="${maxLength}"` : '';
+            const hintHtml = maxLength > 0
+                ? `<div id="prompt-char-hint" style="font-size:10px;color:var(--text-muted);margin-top:2px;text-align:right;">0 / ${maxLength}</div>`
+                : '';
+            overlay.innerHTML = `
+                <div class="confirm-box" style="width:360px;">
+                    <h3 style="margin-bottom:12px;">${Utils.escapeHtml(title)}</h3>
+                    <textarea id="prompt-input" rows="3" style="width:100%;resize:vertical;"${maxAttr}>${Utils.escapeHtml(defaultValue)}</textarea>
+                    ${hintHtml}
+                    <div class="confirm-actions" style="margin-top:12px;">
+                        <button class="btn" data-action="cancel">取消</button>
+                        <button class="btn btn-primary" data-action="ok">确认</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+            const input = document.getElementById('prompt-input');
+            const hint = document.getElementById('prompt-char-hint');
+            const updateHint = () => {
+                if (hint) hint.textContent = `${input.value.length} / ${maxLength}`;
+            };
+            if (hint) {
+                updateHint();
+                input.addEventListener('input', updateHint);
+            }
+            input.focus();
+            overlay.addEventListener('click', e => {
+                const action = e.target.dataset.action;
+                if (action === 'cancel') { overlay.remove(); resolve(null); }
+                if (action === 'ok') {
+                    const val = input.value.trim();
+                    overlay.remove();
+                    resolve(val || '');
+                }
+            });
+            input.addEventListener('keydown', e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    const val = input.value.trim();
+                    overlay.remove();
+                    resolve(val || '');
+                }
+            });
+        });
+    },
+
     /** 安全 HTML 转义 */
     escapeHtml(str) {
         const div = document.createElement('div');
@@ -171,11 +242,20 @@ const Utils = {
     /** 创建轮询器 */
     createPoller(fn, intervalMs = 5000) {
         let timer = null;
+        let inFlight = false;
+        const run = () => {
+            if (inFlight) return;
+            inFlight = true;
+            Promise.resolve()
+                .then(fn)
+                .catch((error) => console.error('Poller task failed:', error))
+                .finally(() => { inFlight = false; });
+        };
         return {
             start() {
                 if (timer) return;
-                fn();
-                timer = setInterval(fn, intervalMs);
+                run();
+                timer = setInterval(run, intervalMs);
             },
             stop() {
                 if (timer) { clearInterval(timer); timer = null; }

@@ -12,11 +12,8 @@
 
 import time
 from datetime import datetime
-from typing import Optional, Tuple
 
-from astrbot.api import logger
-from astrbot.core.message.components import Plain
-from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from ..compat_api.astrbot_api.astrbot_api_main import AstrMessageEvent, Plain, logger
 
 
 class WelcomeMessageParser:

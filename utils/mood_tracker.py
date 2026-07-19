@@ -9,13 +9,12 @@
 - v1.0.6更新：支持否定词检测，避免"不难过"被误判为"难过"
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 参考: MaiBot mood_manager.py (简化实现)
 """
 
 import time
 import json
-import os
 from typing import Optional, Dict, List, Any
 from astrbot.api.all import logger
 
@@ -163,7 +162,7 @@ class MoodTracker:
                     self.mood_keywords = self._get_default_mood_keywords()
             else:  # 空字符串，使用硬编码默认配置
                 if DEBUG_MODE:
-                    logger.info(f"[情绪追踪] mood_keywords 为空，使用硬编码默认配置")
+                    logger.info("[情绪追踪] mood_keywords 为空，使用硬编码默认配置")
                 self.mood_keywords = self._get_default_mood_keywords()
         elif isinstance(mood_keywords_raw, dict):  # 字典格式（向后兼容旧版本配置）
             self.mood_keywords = mood_keywords_raw

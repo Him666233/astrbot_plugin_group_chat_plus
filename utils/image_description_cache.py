@@ -12,7 +12,7 @@
 {"u":"图片URL","d":"文字描述","t":时间戳}
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import json
@@ -56,6 +56,23 @@ class ImageDescriptionCache:
 
         if self._enabled:
             self._init_storage()
+
+    @staticmethod
+    def _is_relative_to(base: Path, target: Path) -> bool:
+        try:
+            target.relative_to(base)
+            return True
+        except ValueError:
+            return False
+
+    @classmethod
+    def _is_path_within_root(cls, root: Path, target: Path) -> bool:
+        try:
+            real_root = Path(root).resolve()
+            real_target = Path(target).resolve()
+        except Exception:
+            return False
+        return cls._is_relative_to(real_root, real_target)
 
     def _init_storage(self):
         """初始化存储目录和计数"""
@@ -238,11 +255,43 @@ class ImageDescriptionCache:
             True=成功，False=失败
         """
         try:
+            data_root = self._cache_dir.parent.resolve()
+            success = True
             if self._cache_file.exists():
-                self._cache_file.unlink()
+                if (
+                    self._is_path_within_root(data_root, self._cache_file)
+                    and self._cache_file.is_file()
+                    and not self._cache_file.is_symlink()
+                ):
+                    self._cache_file.unlink()
+                else:
+                    logger.warning(
+                        "[图片缓存] 拒绝清理不安全的缓存路径: %s",
+                        self._cache_file,
+                    )
+                    success = False
+            # 兼容清理旧版残留路径 image_description_cache.json
+            legacy_path = self._cache_dir.parent / "image_description_cache.json"
+            if legacy_path.exists():
+                if (
+                    self._is_path_within_root(data_root, legacy_path)
+                    and legacy_path.is_file()
+                    and not legacy_path.is_symlink()
+                ):
+                    legacy_path.unlink()
+                    logger.info(
+                        "[图片缓存] 已清理旧版缓存文件 image_description_cache.json"
+                    )
+                else:
+                    logger.warning(
+                        "[图片缓存] 拒绝清理不安全的旧版缓存路径: %s",
+                        legacy_path,
+                    )
+                    success = False
             self._entry_count = 0
-            logger.info("[图片缓存] 缓存已清空")
-            return True
+            if success:
+                logger.info("[图片缓存] 缓存已清空")
+            return success
         except Exception as e:
             logger.error(f"[图片缓存] 清空缓存失败: {e}")
             return False

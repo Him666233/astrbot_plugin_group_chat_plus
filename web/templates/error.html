@@ -141,14 +141,14 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
 </style>
 </head>
 <body>
-<div class="box">
-    <div class="icon" id="err-icon">⚠️</div>
-    <div class="code-badge" id="err-badge">ERROR</div>
-    <h1 id="err-title">访问出错</h1>
-    <p class="desc" id="err-desc">发生了一个错误，请联系管理员。</p>
-    <div class="reason-box" id="err-reason-box">
+<div class="box __ERROR_BOX_CLASS__">
+    <div class="icon" id="err-icon">__ERROR_ICON__</div>
+    <div class="code-badge" id="err-badge">__ERROR_BADGE__</div>
+    <h1 id="err-title">__ERROR_TITLE__</h1>
+    <p class="desc" id="err-desc">__ERROR_DESC__</p>
+    <div class="reason-box __ERROR_REASON_VISIBLE__" id="err-reason-box">
         <div class="reason-label">原因</div>
-        <div id="err-reason"></div>
+        <div id="err-reason">__ERROR_REASON_TEXT__</div>
     </div>
     <div class="footer">
         如果您认为这是误操作，请联系系统管理员。
@@ -158,18 +158,14 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
 <script>
 (function() {
     // 读取服务端注入的数据（由 _load_error_page 方法内联注入）
-    // 若为占位符则降级到 URL 参数
-    var code = '__ERROR_CODE__';
-    var reason = '__ERROR_REASON__';
+    // 错误页展示不从 URL 读取 reason，避免反射展示。
+    var code = __ERROR_CODE_JSON__;
+    var reason = __ERROR_REASON_JSON__;
 
-    // 检测是否仍为占位符（服务端未替换时的降级处理）
-    if (!code || code === '__ERROR_CODE__') {
-        var params = new URLSearchParams(window.location.search);
-        code = params.get('code') || 'error';
-        // 安全解码 reason（仅作文本展示，不执行）
-        var rawReason = params.get('reason') || '';
-        // 纯文本处理，防止 XSS
-        reason = rawReason;
+    // 检测是否仍为占位符。错误页展示只信任服务端注入内容，不读取 URL 参数。
+    if (!code) {
+        code = 'error';
+        reason = '';
     }
 
     var icon, badge, title, desc;
@@ -185,6 +181,12 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
         badge = '403 FORBIDDEN';
         title = '禁止访问';
         desc = '您没有权限访问此资源。';
+        document.querySelector('.box').classList.add('box--forbidden');
+    } else if (code === '400') {
+        icon = '⚠️';
+        badge = '400 BAD REQUEST';
+        title = '请求无效';
+        desc = '请求格式不合法或包含不可接受的路径。';
         document.querySelector('.box').classList.add('box--forbidden');
     } else if (code === '404') {
         icon = '🔍';
@@ -205,7 +207,7 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
     document.getElementById('err-desc').textContent = desc;
 
     // 安全展示 reason（纯文本，无 innerHTML）
-    if (reason) {
+    if (reason && code !== 'blocked') {
         var reasonBox = document.getElementById('err-reason-box');
         var reasonEl = document.getElementById('err-reason');
         reasonEl.textContent = reason;
@@ -214,6 +216,20 @@ h1 { font-size: 22px; color: var(--accent-red); margin-bottom: 12px; font-weight
 
     // 动态设置页面标题
     document.title = title;
+
+    // blocked 状态定时检查是否已解封
+    if (code === 'blocked') {
+        var _unblockCheck = setInterval(function() {
+            fetch('/api/auth/status', { method: 'GET', credentials: 'same-origin' })
+                .then(function(r) {
+                    if (r.ok && r.status !== 403) {
+                        clearInterval(_unblockCheck);
+                        window.location.href = '/';
+                    }
+                })
+                .catch(function() {});
+        }, 5000);
+    }
 })();
 </script>
 </body>

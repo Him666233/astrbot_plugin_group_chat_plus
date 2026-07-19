@@ -25,6 +25,16 @@ astrbot_plugin_group_chat_plus/
 │   ├── DESKTOP_COMPATIBILITY.md # AstrBot 桌面端兼容说明
 │   └── PROJECT_STRUCTURE.md    # 本文件
 │
+├── compat_api/                 # 🔌 兼容 API 适配层
+│   ├── __init__.py
+│   └── astrbot_api/            # AstrBot API 兼容入口
+│       ├── __init__.py
+│       ├── astrbot_api_main.py # AstrBot API 聚合导出
+│       └── blocks/             # 原子化兼容分块
+│           ├── __init__.py
+│           ├── public_api.py   # 公开 API 与旧路径回退
+│           └── internal_loaders.py # 内部增强 API 延迟加载
+│
 ├── web/                        # 🖥️ Web 管理面板
 │   ├── __init__.py
 │   ├── server.py               # HTTP 服务器（路由/中间件/API）
@@ -60,7 +70,7 @@ astrbot_plugin_group_chat_plus/
 │   ├── reply_handler.py        # AI 回复生成
 │   ├── message_processor.py    # 消息元数据注入
 │   ├── context_manager.py      # 上下文管理器
-│   ├── image_handler.py        # 图片处理
+│   ├── image_handler.py        # 多媒体处理（图片/视频/语音/文件）
 │   ├── image_description_cache.py # 图片描述缓存
 │   ├── keyword_checker.py      # 关键词检测
 │   ├── message_cleaner.py      # 历史消息清洗
@@ -110,14 +120,16 @@ astrbot_plugin_group_chat_plus/
 - **事件处理器**：
   - `on_group_message()` — 群聊消息入口，执行 Phase 1-3
   - `_process_message()` — 消息主处理管线，执行 Phase 4-9
-  - `on_llm_request()` — LLM 请求钩子（优先级 -1），负责上下文注入、system_prompt 兼容重写与历史处理
-  - `after_message_sent()` — 消息发送后的统计和状态更新
+  - `on_llm_request()` — LLM 请求钩子（优先级 -1），负责上下文注入、system_prompt 兼容重写、第三方长期提示词吸收、Skills 提示词注入（带平台一致的人格过滤）、TOOL_CALL_PROMPT 注入、工具提醒生成、情绪提示注入，所有注入块均带有首尾配对边界标记
+  - `on_llm_response()` — LLM 响应钩子（优先级 -1），设置 Agent 完成标志（`_agent_done_flags`），在 Agent 无最终文本时触发兜底保存
+  - `on_decorating_result()` — 结果装饰钩子，负责多轮工具调用中累积 AI 中间回复文本（`_pending_bot_replies`）、内容过滤、重复检测
+  - `after_message_sent()` — 消息发送后处理，合并累积的中间文本与工具调用记录（`_build_interleaved_tool_reply()`），保存到双轨存储；异常终止时通过异常检测（AI 错误标记 / 非 LLM 终端响应）强制保存
 - **主动对话** — 定时任务，独立于消息流程运行
 - **Web 面板启动** — 初始化 Web 服务器
 
 ### metadata.yaml — 插件元数据
 
-定义插件名称、版本号（v1.2.1）、作者、描述、AstrBot 最低版本要求等。AstrBot 平台通过此文件识别和管理插件。
+定义插件名称、版本号（V1.2.3.hotfix.1）、作者、描述、AstrBot 最低版本要求等。AstrBot 平台通过此文件识别和管理插件。
 
 ### _conf_schema.json — 配置定义
 
@@ -129,11 +141,31 @@ astrbot_plugin_group_chat_plus/
 
 ### requirements.txt — 依赖
 
-```
-pypinyin    # 拼音处理，用于打字错误生成器
-```
 
 > `aiohttp` 为 AstrBot 平台自带依赖，通常无需手动安装。
+
+---
+
+## compat_api/ — 兼容 API 适配层
+
+> 这一层不属于群聊模块，也不属于私聊模块，而是插件内部共用的 AstrBot API 兼容入口。群聊、私聊和其他模块如果需要引用 AstrBot 平台对象，应优先从这里导入，避免业务代码里散落多套新旧路径判断。
+
+### 目录职责
+
+| 文件 | 说明 |
+|------|------|
+| `compat_api/__init__.py` | 插件级兼容 API 包入口 |
+| `compat_api/astrbot_api/__init__.py` | AstrBot API 兼容包入口，统一转出主聚合文件 |
+| `compat_api/astrbot_api/astrbot_api_main.py` | 聚合导出文件，只负责拼接各个原子分块，不直接承载具体兼容逻辑 |
+| `compat_api/astrbot_api/blocks/public_api.py` | AstrBot 公开 API 与旧路径回退导入。优先使用公开入口，必要时回退到旧版或内部路径，集中导出 `AstrMessageEvent`、`MessageChain`、`ProviderRequest`、`LLMResponse`、`Context`、`StarTools`、消息组件和 `logger` 等常用对象 |
+| `compat_api/astrbot_api/blocks/internal_loaders.py` | AstrBot 内部增强 API 的可选延迟加载器。只放高风险内部能力，调用方必须接受返回 `None` 并执行降级逻辑，避免平台内部路径变动时影响插件基础加载 |
+
+### 使用原则
+
+- **业务模块不直接处理多套 AstrBot 导入路径**：需要平台事件、消息组件、Provider 请求、日志等对象时，优先从 `compat_api.astrbot_api.astrbot_api_main` 导入。
+- **公开 API 优先，旧路径兜底**：`public_api.py` 会先尝试 AstrBot 公开导出，再按兼容需要回退到旧路径。
+- **内部 API 延迟加载**：需要 handler 注册表、事件 hook、Skills 提示词辅助、工具调用提示词模板等内部能力时，通过 `internal_loaders.py` 的加载函数获取；不可用时按功能降级。
+- **主聚合文件保持轻量**：`astrbot_api_main.py` 只负责统一导出，具体兼容逻辑继续拆到 `blocks/` 下的原子文件中。
 
 ---
 
@@ -146,17 +178,21 @@ pypinyin    # 拼音处理，用于打字错误生成器
 Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 
 - **路由注册** — 登录页、面板页、API 端点、静态资源
-- **中间件链** — 路径遍历防护 → IP 访问控制 → 防爬虫检测 → JWT 认证 → 安全头注入
+- **中间件链** — 路径遍历防护 → `robots.txt` 直接返回 `Disallow: /`（不受 IP 封禁/黑白名单影响，避免爬虫看不到规则）→ IP 访问控制（`/error` 路径放行避循环；非 API 请求通过一次性错误页跳转令牌进入统一错误页）→ JWT + 服务端会话解析 → 防爬虫/已登录速率限制（自动刷新仍计入已登录窗口，只有专用心跳不计入窗口且仍需通过 IP/令牌校验）→ 面板静态资源和非公开 API 授权 → 普通页面 400/403/404 统一错误页 → 安全头注入
 - **安全响应头** — X-Content-Type-Options / X-Frame-Options / X-XSS-Protection / Referrer-Policy / Permissions-Policy 等
 - **Content-Security-Policy** — 基于 nonce 的严格 CSP（script-src 使用 nonce 替代 unsafe-inline，防止 XSS 注入）
-- **敏感文件保护** — Web 文件管理 API 对 `auth.json`、`jwt_secret.json`、`access_log*`、`bans.json` 实施访问控制（返回 403）
+- **敏感文件保护** — Web 文件管理 API 不列出 `auth.json`、`jwt_secret.json`、`sessions.json`、`access_log*`、`bans.json` 及其同名备份文件；即使直接调用读取、修改或删除接口也会被后端拒绝
+- **后端输入校验** — JSON 请求体必须是对象；登录、改密、配置、封禁、文件、分页和聊天记录编辑等输入均在 handler 层校验类型、长度和范围
+- **会话与重置边界** — 会话管理优先围绕插件自定义 `chat_history/...` 历史文件与当前运行态工作；全局重置、单会话重置、图片缓存清理在服务端各自收口，互不串改
 - **API 处理器**：
-  - `/api/login` — 用户认证
-  - `/api/change-password` — 密码修改
+  - `/api/auth/login` — 用户认证
+  - `/api/auth/change-password` — 密码修改
+  - `/api/auth/verify` / `/api/auth/heartbeat` — 会话校验与心跳
   - `/api/config` — 配置读取与保存
-  - `/api/stats` — 统计数据
-  - `/api/logs` — 访问日志
-  - `/api/bans` — 封禁管理
+  - `/api/config/download` — 配置文件安全下载（只读，无路径参数，JSON 响应，访问日志附注记录成功/失败原因）
+  - `/api/data/*` — 统计数据、会话详情、注意力/情绪/概率等运行数据
+  - `/api/security/access-log` — 访问日志
+  - `/api/security/bans` / `/api/security/*` — 封禁管理与 IP 配置
 - **静态资源服务** — 区分公共静态（`/static/`）和受保护静态（`/panel/static/`）
 
 ### auth.py — 认证模块
@@ -170,9 +206,9 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 ### security.py — 安全管理器
 
 - **暴力破解防护** — 分级锁定（5/10/15/20 次失败 → 30/60/300/600 秒锁定）
-- **防爬虫检测** — User-Agent 匹配、请求频率限制、扫描路径模式识别
-- **IP 封禁** — 手动封禁 + 自动封禁，封禁持久化（`bans.json`），重启恢复
-- **访问日志** — 记录所有请求，支持按类型/IP/时间筛选
+- **防爬虫检测** — User-Agent 匹配、请求频率限制（已登录/未登录双档独立阈值）、扫描路径模式识别。数据图表、会话管理、心跳状态展示等自动刷新请求会计入已登录速率窗口，避免伪造自动刷新头绕过限速；只有 `/api/auth/heartbeat` 专用心跳不计入已登录速率窗口，但仍需通过 IP 可访问性和令牌有效性校验
+- **IP 封禁** — 手动封禁 + 自动封禁，封禁持久化（`bans.json`），重启恢复；受保护 IP 永远不可封禁，当前白名单 IP 不写入封禁表，历史残留会被自动清理
+- **访问日志** — 记录所有请求，支持按类型/IP/时间筛选；从磁盘恢复和返回给前端前会清洗文本字段
 
 ### templates/ — HTML 模板
 
@@ -180,7 +216,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 |------|------|
 | `login.html` | 登录页面，公开访问，独立于面板代码 |
 | `panel.html` | 管理面板主页面，需 JWT 认证。加载各 JS 模块 |
-| `error.html` | 统一错误页面，通过 URL 参数 `code` 区分类型（`blocked`/`403`/`404`） |
+| `error.html` | 统一错误页面，服务端注入 code 占位符（`blocked`/`403`/`404`），blocked 状态不展示封禁原因/时长/触发机制，仅显示通用提示并自动轮询解封；响应带禁止索引标记，避免拦截页被搜索引擎收录 |
 
 ### static/css/ — 样式文件
 
@@ -198,14 +234,14 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 |------|------|
 | `api.js` | HTTP 客户端封装，自动携带 Bearer Token，统一错误处理 |
 | `auth.js` | 前端认证逻辑，Token 存取 |
-| `app.js` | 面板应用入口，初始化各模块，不含登录逻辑（登录在独立页面） |
-| `charts.js` | 基于 Canvas 的实时统计图表（消息量、回复率、群活跃度） |
+| `app.js` | 面板应用入口，初始化各模块，管理视图切换。包含文件管理（手动刷新+提示）、核心设置（心跳状态自动/手动刷新）、访问日志（含无自动刷新提示与 tooltip 展示）、IP 封禁管理（含备注长度限制与换行显示）等功能 |
+| `charts.js` | 基于 Canvas 的实时统计图表（概览、注意力、概率、情绪、主动对话），支持 3 秒自动刷新和手动刷新（按钮始终可见，带 toast 反馈）。无会话时只刷新全局概览 |
 | `config-editor.js` | 配置可视化编辑器，根据 JSON Schema 动态生成表单 |
 | `flow-data.js` | 消息处理流程的可视化数据定义 |
 | `prompt-data.js` | 系统提示词模板的预置数据（读空气AI / 回复AI / 主动对话AI / 主动对话判断AI） |
-| `session-mgr.js` | 会话管理界面 |
-| `tech-tree.js` | 技术树/功能关联图谱的渲染逻辑 |
-| `utils.js` | 通用工具函数（格式化、DOM 操作等） |
+| `session-mgr.js` | 会话管理界面（会话列表和详情页均支持 3 秒自动刷新和手动刷新，带 toast 反馈）。列表页进入详情时暂停轮询，返回时恢复。聊天记录使用增量更新保持滚动位置，编辑模式下暂停自动刷新 |
+| `tech-tree.js` | 技术树/功能关联图谱的渲染逻辑，包含系统提示词悬浮窗（拖拽/缩放/视口约束/移动端触摸）、右下角缩放控件（放大/缩小/适应屏幕按钮、Ctrl+滚轮缩放、双指捏合缩放）、智能搜索、面包屑导航、SVG+DOM 混合渲染、粒子动画 |
+| `utils.js` | 通用工具函数（格式化、DOM 操作、Toast/Confirm/Prompt 弹窗，Prompt 支持 maxLength 字数限制与实时计数） |
 
 ---
 
@@ -219,18 +255,18 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 |------|-----|------|
 | `probability_manager.py` | `ProbabilityManager` | 管理动态概率计算，整合回复后提升、时段调整等因素 |
 | `decision_ai.py` | `DecisionAI` | 核心"读空气"逻辑。构建提示词 → 解析判断型AI人格（默认跟随当前会话，也可按配置关闭或指定人格）→ 调用 AI → 解析 yes/no 决策结果 |
-| `reply_handler.py` | `ReplyHandler` | AI 回复生成。构建完整上下文 → 采集工具快照与提醒元信息 → 以短消息/占位 prompt 调用 `event.request_llm()`，再由 `on_llm_request` 恢复完整上下文 |
-| `system_prompt_rewriter.py` | `SystemPromptRewriter` | system_prompt 兼容增强器。优先复用旧版精确命中路径，在平台 persona/LTM 包装轻微变化时做轻量识别；若仍失败，则进入保守回退模式，优先保证回复链不断 |
+| `reply_handler.py` | `ReplyHandler` | AI 回复生成。构建完整上下文 → 获取全平台工具集并通过 `event.request_llm(tool_set=...)` 传递 → 以短消息/占位 prompt 触发钩子链，由 `on_llm_request` 恢复完整上下文、基于最终 `req.func_tool` 生成工具提醒文本，同时为后续第三方长期提示吸收保留短消息基线 |
+| `system_prompt_rewriter.py` | `SystemPromptRewriter` | system_prompt 兼容增强器。优先复用旧版精确命中路径，在平台 persona/LTM 包装轻微变化时做轻量识别；若仍失败，则进入保守回退模式，优先保证回复链不断，并对疑似重复片段做轻量压缩 |
 
 ### 消息处理模块
 
 | 文件 | 类 | 说明 |
 |------|-----|------|
-| `message_processor.py` | `MessageProcessor` | 为消息注入元数据（时间戳、发送者信息），并对原始 At 标签做内联解析增强（如 `[At:ID|解析结果]`）；旧版 `【@指向说明】` 仍保留为单次高层提醒 |
-| `context_manager.py` | `ContextManager` | 管理自定义消息存储 + 同步平台官方历史记录。处理历史截止时间戳 |
-| `message_cleaner.py` | `MessageCleaner` | 清洗历史消息，过滤系统提示词和标记；提取原始消息链中的 At / AtAll 结构，并提供空@消息双模式判定（`contains_ai` / `only_ai`） |
-| `image_handler.py` | `ImageHandler` | 调用图片转文字 API，提取图片 URL，处理多图 |
-| `image_description_cache.py` | `ImageDescriptionCache` | 本地缓存图片描述结果，避免重复 API 调用 |
+| `message_processor.py` | `MessageProcessor` | 为消息注入元数据（时间戳、发送者信息、`[戳一戳事件]` 持久化文本、`@全体成员` 说明、系统提示词等），统一拼接在冒号 `:` 之前作为系统元数据区；冒号之后为用户消息内容（含 @ 内联解析 `[At:ID\|解析结果]`）。`[戳一戳提示]` **不由此模块注入**，而是由主流程在上下文拼接阶段追加到分隔符之外 |
+| `context_manager.py` | `ContextManager` | 管理自定义消息存储 + 同步平台官方历史记录。维护历史截止时间戳（`set_history_cutoff`/`get_history_cutoff`），仅对 `platform_message_history` 表读取生效；自定义存储由 reset 直接删文件、回退路径不受截止过滤。`format_context_for_ai` 负责拼接完整上下文，支持将 `[戳一戳提示]` 追加在分隔符 `=====` 之外 |
+| `message_cleaner.py` | `MessageCleaner` | 清洗历史消息中的运行时内容（分隔线、`[戳一戳提示]`、背景信息块等）；提取原始消息链中的 At / AtAll / Image / Video / Record / File / Reply / Poke 结构并生成文本标记，真实 Poke 组件输出为 `[ComponentType.Poke]`。引用消息格式为 `[引用 >>> 发送者(ID): 消息内容]`，使用 `>>>` 明确分隔引用标记与内容。若被引用消息发送者为 AI 自身，标注 `(你)`；内容无法提取时标注 `(无法获取引用内容)`。提供空@消息双模式判定（`contains_ai` / `only_ai`） |
+| `image_handler.py` | `ImageHandler` | 多媒体文件处理核心：图片（转文字/多模态直传）、视频/语音/文件/Poke 组件路径或占位标记提取与内联标记注入、媒体标记占位符生成、缓存剥离前的标记富化。引用组件解析同 `message_cleaner.py` 的 `>>>` 格式 |
+| `image_description_cache.py` | `ImageDescriptionCache` | 本地缓存图片描述结果，避免重复 API 调用；当前主缓存文件为 `image_cache/descriptions.jsonl` |
 | `forward_message_parser.py` | `ForwardMessageParser` | 群聊与私聊共用的公共转发解析内核，面向 QQ / OneBot 合并转发，支持在深度限制内展开嵌套转发，并将结果折叠为单条可读文本继续下传 |
 | `welcome_message_parser.py` | `WelcomeMessageParser` | 检测新成员入群消息 |
 | `keyword_checker.py` | `KeywordChecker` | 匹配触发关键词和黑名单关键词 |
@@ -262,7 +298,7 @@ Web 面板的核心文件，基于 `aiohttp` 构建，包含：
 | `reply_density_manager.py` | `ReplyDensityManager` | 滑动窗口统计回复频率，实现软/硬限制 |
 | `message_cache_manager.py` | `MessageCacheManager` | 管理待处理消息池（缓存+转正机制） |
 | `memory_injector.py` | `MemoryInjector` | 集成长期记忆插件（LivingMemory / Legacy 模式） |
-| `tools_reminder.py` | `ToolsReminder` | 基于当前会话最终工具集构建工具提醒文本；支持会话插件集过滤、可选的人格过滤，并会在 `skills_like` 模式下自动降级为仅展示工具名/描述，`full` 或旧版配置下保持名称/描述/参数的完整展示；仅作用于提醒层 |
+| `tools_reminder.py` | `ToolsReminder` | 基于最终 `req.func_tool`（已被其他插件过滤）构建工具提醒文本；支持会话插件集过滤、可选的人格过滤，并会在 `skills_like` 模式下自动降级为仅展示工具名/描述，`full` 或旧版配置下保持名称/描述/参数的完整展示；仅作用于提醒层，不拦截 AI 实际调用工具 |
 | `_session_guard.py` | `SessionGuard` | 会话安全机制，防止并发冲突 |
 
 ---
@@ -317,10 +353,12 @@ private_chat/
 
 | 文件 | 说明 |
 |------|------|
-| `history_cutoff.json` | 历史截止时间戳，记录 `gcp_reset` 执行时间 |
+| `history_cutoff.json` | 历史截止时间戳（Unix timestamp），记录 `gcp_reset` / `gcp_reset_here` 设置的截止点。**仅对 `platform_message_history` 表读取生效**；自定义存储 JSON 文件在 reset 时直接删除，`conversations` 表不受此文件控制（需平台 `/reset`） |
 | `bans.json` | IP 封禁记录持久化（Web 面板） |
 | `web_data/auth.json` | Web 面板密码数据（密码哈希、salt、hash_version、password_changed 标志） |
 | `web_data/jwt_secret.json` | Web 面板 JWT 签名密钥及会话管理数据（与 auth.json 物理隔离） |
+| `web_data/sessions.json` | Web 面板服务端会话表（多浏览器/多标签登录态） |
+| `image_cache/descriptions.jsonl` | 图片描述缓存主文件。Web 面板和指令清理图片缓存时优先处理此文件；如检测到旧版 `image_description_cache.json` 残留路径，也会兼容清理 |
 
 ---
 
@@ -329,18 +367,19 @@ private_chat/
 ```
                          main.py
                      (插件主入口)
-                    ┌──────┼──────┐
-                    ↓      ↓      ↓
-               web/    utils/   private_chat/
-            (管理面板) (群聊工具)  (私聊模块 ⚠️)
-                    ↓
-        ┌───────────┼───────────┐
-        ↓           ↓           ↓
-    server.py    auth.py    security.py
-    (路由/API)   (认证)     (安全防护)
-        ↓
-    templates/ + static/
-    (前端页面 + 资源)
+                ┌───────┼───────┬────────┐
+                ↓       ↓       ↓        ↓
+          compat_api/  web/   utils/  private_chat/
+          (API适配) (管理面板) (群聊工具) (私聊模块 ⚠️)
+                      │
+                      ↓
+              ┌───────┼───────┐
+              ↓       ↓       ↓
+          server.py auth.py security.py
+          (路由/API) (认证) (安全防护)
+              ↓
+      templates/ + static/
+      (前端页面 + 资源)
 ```
 
 ```

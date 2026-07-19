@@ -104,6 +104,11 @@
                 <div id="flow-breadcrumb" class="flow-breadcrumb hidden"></div>
                 <div id="tech-tree-wrapper">
                     <div id="tech-tree-canvas"></div>
+                    <div id="zoom-ctrl" class="zoom-ctrl hidden">
+                        <button class="zoom-ctrl-in" title="放大">+</button>
+                        <button class="zoom-ctrl-fit" title="适应屏幕">⊡</button>
+                        <button class="zoom-ctrl-out" title="缩小">−</button>
+                    </div>
                     <div id="config-panel" class="config-panel">
                         <div class="config-panel-header">
                             <h3 id="config-panel-title">配置项</h3>
@@ -118,9 +123,17 @@
             <div id="view-charts" class="view hidden">
                 <div class="view-header">
                     <h2>数据可视化</h2>
-                    <select id="chart-session-select" class="select-sm">
-                        <option value="">选择会话...</option>
-                    </select>
+                    <div class="charts-header-right">
+                        <button id="btn-refresh-charts" class="btn btn-sm" title="手动刷新数据">🔄 刷新</button>
+                        <label class="auto-refresh-toggle">
+                            <span class="dot active" id="charts-refresh-dot"></span>
+                            <input type="checkbox" checked id="charts-auto-refresh">
+                            <span>自动刷新（3秒）</span>
+                        </label>
+                        <select id="chart-session-select" class="select-sm">
+                            <option value="">选择会话...</option>
+                        </select>
+                    </div>
                 </div>
                 <div id="charts-grid"></div>
             </div>
@@ -217,6 +230,17 @@
                 }
             }
         });
+    })();
+    </script>
+
+    <!-- 清除系统跳转标记 ?from=login，使后续刷新变为手动访问以触发 IP 校验 -->
+    <script>
+    (function() {
+        if (window.location.search.indexOf('from=login') !== -1) {
+            var url = new URL(window.location.href);
+            url.searchParams.delete('from');
+            history.replaceState(null, '', url.toString());
+        }
     })();
     </script>
 </body>

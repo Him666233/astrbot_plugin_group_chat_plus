@@ -1,6 +1,7 @@
 """
 消息清理器模块
-负责清理消息中的系统提示词，只保留原始用户消息
+负责清理消息中的系统提示词，以及从原始消息链中提取多媒体标记（图片/视频/语音/文件）
+并转换为文本占位符
 
 v1.0.4 更新：
 - 添加对发送者识别系统提示的清理规则
@@ -29,7 +30,7 @@ v1.2.1 更新：
 
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import logging
@@ -38,6 +39,22 @@ from typing import Any
 from astrbot.api.all import *
 from astrbot.api.message_components import Plain, At, AtAll, Image, Reply
 from astrbot.core.message.components import Forward
+
+# 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
+try:
+    from astrbot.core.message.components import Video, Record, File
+except ImportError:
+    try:
+        from astrbot.api.message_components import Video, Record, File
+    except ImportError:
+        Video = None
+        Record = None
+        File = None
+
+try:
+    from astrbot.core.message.components import Poke
+except ImportError:
+    Poke = None
 
 logger = logging.getLogger(__name__)
 AstrMessageEvent = Any
@@ -76,6 +93,21 @@ class MessageCleaner:
         r"这是你主动发起的对话",
     ]
 
+    # 🆕 v1.2.x: 主动对话提示词保存时需移除的指令性段落
+    # 主动对话提示词前半部分（开场白、上下文说明、核心要求1-5）对后续AI理解
+    # "我刚主动发了条消息"有帮助，应保留。但从"关于背景信息和记忆"开始的
+    # 后半部分纯粹是生成阶段的指令约束，保存到历史只会污染上下文，应移除。
+    # 每个模式匹配从该标题到字符串末尾（[\s\S]*$），命中第一个后后续不再生效。
+    PROACTIVE_PROMPT_CLEANUP_PATTERNS = [
+        # 主入口：背景信息和记忆说明 → 从此处到末尾全部是生成指令
+        r"⚠️ \*\*【关于背景信息和记忆】重要说明\*\* ⚠️：[\s\S]*$",
+        # 兜底：如果用户自定义提示词去掉了背景信息段，则匹配后续标题
+        r"\n⛔ \*\*【严禁元叙述】特别重要！\*\* ⛔：[\s\S]*$",
+        r"\n话题建议：[\s\S]*$",
+        r"\n特殊标记说明：[\s\S]*$",
+        r"\n记住：就像是你自己突然想到了什么，很自然地说出来[\s\S]*$",
+    ]
+
     # @消息提示词的特征模式（用于识别和移除）
     AT_MESSAGE_PROMPT_PATTERNS = [
         r"注意，你正在社交媒体上.*?不要输出其他任何东西",
@@ -87,7 +119,7 @@ class MessageCleaner:
         r"\[User ID:.*?Nickname:.*?\]",
         r"\[当前情绪状态:.*?\]",  # 🆕 情绪状态提示（旧格式）
         r"\[系统信息-情绪参考:.*?\]",  # 🆕 情绪状态提示（新格式）
-        # 🆕 v1.3.0: 人格中立化改造 - 新格式 [系统信息-xxx] 标记
+        # 🆕 v1.2.2-hotfix.1: 人格中立化改造 - 新格式 [系统信息-xxx] 标记
         r"\[系统信息-当前发送者\][^\n]*\n注意：[^\n]*\n",  # 发送者识别（决策AI），含两行注意
         r"\[系统信息-当前对话对象\][^\n]*\n注意：[^\n]*\n",  # 对话对象识别（回复AI），含两行注意
         r"\[系统提示-对话收尾\][\s\S]*?(?=\n\n|$)",  # 疲劳收尾提示
@@ -96,17 +128,19 @@ class MessageCleaner:
         r"用户只是通过@来唤醒你，但并未在这条消息中输入内容.*",
         r"回复要符合人设，不要太过机械化.*",
         r"你仅需要输出要回复用户的内容.*",
-        # 🆕 v1.0.4: 发送者识别系统提示词（用于保存到官方历史时过滤）
-        # 注意：使用 \s* 匹配任意数量的空白符，\[ \] 转义方括号
-        r"\s*\[系统提示\]注意,现在有人在直接@你并且给你发送了这条消息，@你的那个人是.*",
-        r"\s*\[系统提示\]注意，现在有人在直接@你并且给你发送了这条消息，@你的那个人是.*",
-        r"\s*\[系统提示\]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是.*",
-        r"\s*\[系统提示\]注意，你看到了这条消息，发送这条消息的人是.*",
-        # 🆕 v1.0.9: 戳一戳提示词过滤规则（用于保存到官方历史时过滤）
-        r"\s*\[戳一戳提示\]有人在戳你，戳你的人是.*",
-        r"\s*\[戳一戳提示\]这是一个戳一戳消息，但不是戳你的，是.*在戳.*",
-        # 🆕 v1.1.1: 戳过对方提示（AI刚刚主动戳过对方，供AI参考，不应保存）
-        r"\s*\[戳过对方提示\]你刚刚戳过这条消息的发送者.*",
+        # 🆕 新格式精确清理：[^\n]*? 非贪婪不跨行，前瞻在 [:：]\s+、[、或【 处停止
+        # - 冒号+空白 → 分隔符，停止（ID:3367 不命中因为后面是数字）
+        # - [ 或 【 → 后续标签开始，停止不误伤
+        r"\s*\[系统提示\][^\n]*?(?=[:：]\s+|\[|\【)\s*",
+        # 🆕 旧格式兼容：精确匹配旧版系统提示词文本（用于清理历史中的旧格式消息）
+        r"\n+\s*\[系统提示\]注意,现在有人在直接@你并且给你发送了这条消息，@你的那个人是[^\n]*",
+        r"\n+\s*\[系统提示\]注意，现在有人在直接@你并且给你发送了这条消息，@你的那个人是[^\n]*",
+        r"\n+\s*\[系统提示\]注意，你刚刚发现这条消息里面包含和你有关的信息，这条消息的发送者是[^\n]*",
+        r"\n+\s*\[系统提示\]注意，你看到了这条消息，发送这条消息的人是[^\n]*",
+        r"\n+\s*\[戳一戳提示\]有人在戳你，戳你的人是[^\n]*",
+        r"\n+\s*\[戳一戳提示\]这是一个戳一戳消息，但不是戳你的，是[^\n]*在戳[^\n]*",
+        r"\n+\s*\[戳过对方提示\]你刚刚戳过这条消息的发送者[^\n]*",
+        r"\s*\[戳过对方提示\][^\n]*?(?=[:：]\s+|\[|\【)\s*",
         # 🆕 单独无信息@消息时嵌入的多行提示词（有缓存摘要版和无缓存版）
         # 注意：必须在通用单行[系统提示]规则之前，否则头部被先删掉导致多行规则失效
         r"\[系统提示\][^\n]+单独@了你，没有附带任何文字内容。\n以下是@你之前[\s\S]*?用你自己的方式回应就好。",
@@ -117,10 +151,10 @@ class MessageCleaner:
         r"以下是@你之前群里出现的最近几条消息（可能来自不同的人）：[\s\S]*?用你自己的方式回应就好。",
         # 关键词触发多行提示词（包含上下文观察指引）
         r"\[系统提示\]注意，你刚刚发现这条消息里面包含和你有关的信息[\s\S]*?机械回应。",
-        # 🔧 修复：添加更强的模式匹配，确保所有[]和【】括起来的系统提示都被过滤
-        r"\n+\s*\[系统提示\][^\n]*",  # 匹配所有[系统提示]开头的内容
-        r"\n+\s*\[戳一戳提示\][^\n]*",  # 匹配所有[戳一戳提示]开头的内容
-        r"\n+\s*\[戳过对方提示\][^\n]*",  # 匹配所有[戳过对方提示]开头的内容
+        # 🔧 通用安全网：匹配换行后出现的任意系统提示词（兜底防止用户伪造或旧格式残留）
+        r"\n+\s*\[系统提示\][^\n]*",  # 匹配换行后的[系统提示]
+        r"\n+\s*\[戳一戳提示\][^\n]*",  # 匹配换行后的[戳一戳提示]
+        r"\n+\s*\[戳过对方提示\][^\n]*",  # 匹配换行后的[戳过对方提示]
         # 🆕 v1.1.3: 人格提示词过滤规则
         r"【当前人格设定】[\s\S]*?(?=\n\[当前时间:|\n\[User ID:|$)",  # 人格设定整块
     ]
@@ -170,7 +204,7 @@ class MessageCleaner:
         r"\n*=+\n*🔄 【对话收尾提示】[\s\S]*?=+\n*",  # 回复AI的收尾提示
         r"与当前用户的连续对话轮次:[\s\S]*?(?=\n\n|$)",  # 疲劳轮次信息
         r"你已经与这个用户连续对话了 \d+ 轮[\s\S]*?(?=\n\n|$)",  # 收尾提示内容
-        # 🆕 v1.3.0: 人格中立化改造 - 新格式 [系统信息-xxx] 标记
+        # 🆕 v1.2.2-hotfix.1: 人格中立化改造 - 新格式 [系统信息-xxx] 标记
         r"\[系统信息-时间与活跃度\][\s\S]*?(?=\n\n|$)",
         r"\[系统信息-关键词触发\][\s\S]*?(?=\n\n|$)",
         r"\[系统信息-兴趣话题\][\s\S]*?(?=\n\n|$)",
@@ -180,16 +214,30 @@ class MessageCleaner:
         r"你是一个群聊参与者，请严格按照你的人格设定[\s\S]*?请开始判断",  # 新版决策AI开头
         # 🆕 窗口缓冲消息区域（追加消息提示词，保存时需过滤）
         r"--- 以下是你收到这条消息后，同一用户或其他用户紧接着又发的消息 ---[\s\S]*?--- 以上为紧接着的追加消息 ---",
-        r"这些消息不一定是对你说的，请自行参考判断是否需要在回复中一并考虑。",
-        r"重要：这些追加消息的发送者可能与当前对话对象不同，请根据每条消息的发送者名字和ID仔细区分。",
+        r"这些追加消息帮助你理解完整对话背景。追加消息的发送者可能与当前对话对象不同，注意根据名字和ID区分。",
         r"\[系统信息-Smart并发追加消息\][\s\S]*?(?=\n\n|$)",
+        r"\[系统提示-Smart并发决策\][\s\S]*?(?=\n\n|$)",
         r"\[系统提示-Smart并发\][\s\S]*?(?=\n\n|$)",  # Smart批次回复提示增强
+        # ── 第三方插件补充信息清理 ──
+        r"\[第三方插件补充信息\][\s\S]*?\[第三方插件补充信息结束\]",  # 整块（同时覆盖新旧格式的外层包装）
+        r"\[第三方插件补充 - [^\]]+\]",  # 逐插件 prompt 开头（孤儿标记兜底）
+        r"\[第三方插件补充 - [^\]]+ 结束\]",  # 逐插件 prompt 结束（孤儿标记兜底）
+        r"\[第三方插件片段 \d+\][\s\S]*?\[第三方插件片段 \d+ 结束\]",  # 旧差分编号片段兜底
+        # ── 第三方插件上下文消息清理（contexts 中的 system 消息） ──
+        # 新格式：逐插件完整消息（开头标记 + 描述文本）
+        r"\[第三方插件注入上下文 - [^\]]+\]\n以下对话记录来自插件 '[^']+' 的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+        # 新格式：逐插件结束标记
+        r"\[第三方插件注入上下文 - [^\]]+ 结束\]",
+        # 回退路径：完整消息（开头标记 + 描述文本）
+        r"\[第三方插件注入上下文\]\n以下对话记录来自其他插件的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+        # 回退路径：结束标记
+        r"\[第三方插件注入上下文 结束\]",
         # 🆕 v1.2.1: 新版历史标记和分隔线
         r"【禁止重复-你的历史回复】",  # 新版 bot 历史回复前缀标记
         r"=== 以上全部是历史消息，你已经处理过了，不要重复回答 ===",  # 新版历史分隔提示
         r"=== 【重要】以下是当前新消息（请优先关注这条消息的核心内容）===",  # 新版当前消息分隔线
         r"\[系统信息-回复密度\][\s\S]*?(?=\n\n|$)",  # 回复密度提示
-        r"\[Smart合并\][^\n]*",  # 🆕 v1.2.3: Smart并发合并虚拟AI回复标记
+        r"\[Smart合并\][^\n]*",  # 🆕 v1.2.2-hotfix.1: Smart并发合并虚拟AI回复标记
         r"\[系统信息-最近未接上对话\][\s\S]*?(?=\n\n|$)",  # 最近未接上对话（决策AI）
         r"\[系统提示-单独无信息@消息上下文提醒\][\s\S]*?(?=\n\n|$)",  # 单独无信息@消息提醒
         r"\[空@补充提示\][\s\S]*?(?=\n\n|$)",  # 兼容旧版空@中性强化提示
@@ -198,6 +246,23 @@ class MessageCleaner:
         r"当前这个人单独@了你，但没有附带其他内容。[\s\S]*?不要死盯上一段对话。",  # 兼容旧版空@异人/中性强化
         r"空@AI强化始终默认生效，不提供单独配置项",  # 兼容旧版展示文案兜底
         r"\[系统提示-工具提醒开始\][\s\S]*?\[系统提示-工具提醒结束\]",  # 工具提醒整块
+        # ── 一次性系统提示词清理（on_llm_request 注入到 system_prompt，不应保存到历史） ──
+        r"\[系统-Skills开始\][\s\S]*?\[系统-Skills结束\]",  # Skills 提示词整块
+        r"\[系统-Skills开始\]",  # Skills 开始标记（孤儿兜底）
+        r"\[系统-Skills结束\]",  # Skills 结束标记（孤儿兜底）
+        r"\[系统-工具调用指引开始\][\s\S]*?\[系统-工具调用指引结束\]",  # 工具调用指引整块
+        r"\[系统-工具调用指引开始\]",  # 工具调用指引开始标记（孤儿兜底）
+        r"\[系统-工具调用指引结束\]",  # 工具调用指引结束标记（孤儿兜底）
+        r"\[系统-情绪提示开始\][\s\S]*?\[系统-情绪提示结束\]",  # 情绪提示整块
+        r"\[系统-情绪提示开始\]",  # 情绪提示开始标记（孤儿兜底）
+        r"\[系统-情绪提示结束\]",  # 情绪提示结束标记（孤儿兜底）
+        # 身份提示清理（精确匹配行级格式，避免多删/少删）
+        # 注意：身份块中「当前环境中你的身份: xxx」为可选行，用 (?:...)? 兼容有无两种情况
+        r"\[系统信息-自身身份\]\n当前环境中你使用的账号名称: [^\n]*\n当前环境中你使用的账号ID: [^\n]*\n(?:当前环境中你的身份: [^\n]*\n)?——[^\n]*\n?",
+        r"\[系统信息-当前环境\]\n当前聊天环境的名称: [^\n]*\n当前聊天环境的ID: [^\n]*\n——[^\n]*\n?",
+        # 泛用块级兜底（格式变更时也能命中）
+        r"\[系统信息-自身身份\][\s\S]*?(?=\n\n|$)",
+        r"\[系统信息-当前环境\][\s\S]*?(?=\n\n|$)",
     ]
 
     @staticmethod
@@ -219,6 +284,22 @@ class MessageCleaner:
 
         cleaned = message_text
 
+        # 🔧 保护工具调用记录块：先用占位符替换，清理完成后再恢复，
+        # 避免 DECISION_AI_PROMPT_PATTERNS 中的正则（如 💭 相关记忆：）
+        # 误匹配工具返回结果并吃掉 [工具调用记录结束] 标记及后续内容。
+        tool_block_placeholders = []
+        _block_pattern = re.compile(r"\[工具调用记录开始\][\s\S]*?\[工具调用记录结束\]")
+        _block_count = 0
+
+        def _hide_block(m: re.Match) -> str:
+            nonlocal _block_count
+            placeholder = f"__TOOL_BLOCK_PLACEHOLDER_{_block_count}__"
+            tool_block_placeholders.append(m.group(0))
+            _block_count += 1
+            return placeholder
+
+        cleaned = _block_pattern.sub(_hide_block, cleaned)
+
         # 移除@消息提示词
         for pattern in MessageCleaner.AT_MESSAGE_PROMPT_PATTERNS:
             cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
@@ -235,6 +316,11 @@ class MessageCleaner:
 
         # 去除首尾空白
         cleaned = cleaned.strip()
+
+        # 恢复工具调用记录块
+        for i, block in enumerate(tool_block_placeholders):
+            placeholder = f"__TOOL_BLOCK_PLACEHOLDER_{i}__"
+            cleaned = cleaned.replace(placeholder, block)
 
         return cleaned
 
@@ -279,22 +365,43 @@ class MessageCleaner:
         if not message_text:
             return message_text
 
-        # 如果不是主动对话消息，使用普通清理
+        # 如果不是主动对话消息，使用普通清理（已含工具块保护）
         if not MessageCleaner.is_proactive_chat_message(message_text):
             return MessageCleaner.clean_message(message_text)
 
         # 是主动对话消息，需要保留主动对话提示词
         cleaned = message_text
 
-        # 移除@消息提示词
+        # 🔧 保护工具调用记录块
+        tool_block_placeholders = []
+        _block_pattern = re.compile(r"\[工具调用记录开始\][\s\S]*?\[工具调用记录结束\]")
+        _block_count = 0
+
+        def _hide_block(m: re.Match) -> str:
+            nonlocal _block_count
+            placeholder = f"__TOOL_BLOCK_PLACEHOLDER_{_block_count}__"
+            tool_block_placeholders.append(m.group(0))
+            _block_count += 1
+            return placeholder
+
+        cleaned = _block_pattern.sub(_hide_block, cleaned)
+
+        # 移除@消息提示词（这些不会与主动对话提示词冲突）
         for pattern in MessageCleaner.AT_MESSAGE_PROMPT_PATTERNS:
             cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
 
-        # 移除决策AI提示词
-        for pattern in MessageCleaner.DECISION_AI_PROMPT_PATTERNS:
-            cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
+        # ⚠️ 不应用 DECISION_AI_PROMPT_PATTERNS！
+        # 这些模式使用 [\s\S]*?(?=请开始回复|$) 收尾，主动对话提示词中
+        # 没有"请开始回复"，会导致 $ 匹配到字符串末尾造成错误截断。
+        # 下方用 PROACTIVE_PROMPT_CLEANUP_PATTERNS 替代，精确裁剪
+        # 主动对话提示词内部不应保存到历史的指令性段落。
 
-        # ⚠️ 不移除主动对话提示词 - 这是关键区别！
+        # ⚠️ 不移除主动对话提示词标记 - 这是关键区别！
+
+        # 移除主动对话提示词中不应保存的指令性段落
+        # （⚠️关于背景信息和记忆 → ⛔严禁元叙述 → 话题建议 → 特殊标记说明 → 记住：...）
+        for pattern in MessageCleaner.PROACTIVE_PROMPT_CLEANUP_PATTERNS:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
 
         # 清理多余的分隔符（=====）
         cleaned = re.sub(r"\n*=+\n*", "\n", cleaned)
@@ -304,6 +411,11 @@ class MessageCleaner:
 
         # 去除首尾空白
         cleaned = cleaned.strip()
+
+        # 恢复工具调用记录块
+        for i, block in enumerate(tool_block_placeholders):
+            placeholder = f"__TOOL_BLOCK_PLACEHOLDER_{i}__"
+            cleaned = cleaned.replace(placeholder, block)
 
         return cleaned
 
@@ -351,7 +463,7 @@ class MessageCleaner:
             r"\[\s*Poke\s*:\s*poke\s*\]", "", text, flags=re.IGNORECASE
         )
 
-        return filtered_text.strip()
+        return filtered_text
 
     @staticmethod
     def is_only_poke_marker(text: str) -> bool:
@@ -374,7 +486,9 @@ class MessageCleaner:
         return bool(re.match(pattern, cleaned, flags=re.IGNORECASE))
 
     @staticmethod
-    def extract_raw_message_from_event(event: AstrMessageEvent) -> str:
+    def extract_raw_message_from_event(
+        event: AstrMessageEvent, self_id: str = None
+    ) -> str:
         """
         从事件中提取纯净的原始消息（不含任何系统添加的内容）
 
@@ -382,6 +496,7 @@ class MessageCleaner:
 
         Args:
             event: 消息事件
+            self_id: 机器人自身的用户ID，用于标记引用消息发送者是否为AI自己
 
         Returns:
             原始消息文本
@@ -407,17 +522,61 @@ class MessageCleaner:
                         raw_parts.append("[图片]")
                     elif isinstance(component, Reply):
                         # 引用消息组件，提取引用信息
-                        reply_text = MessageCleaner._format_reply_component(component)
+                        reply_text = MessageCleaner._format_reply_component(
+                            component, self_id=self_id
+                        )
                         if reply_text:
                             raw_parts.append(reply_text)
                     elif isinstance(component, Forward):
                         # 转发消息组件：如果未被提前解析（如转发解析功能关闭），使用占位标记
                         raw_parts.append("[转发消息]")
+                    elif Poke is not None and isinstance(component, Poke):
+                        raw_parts.append("[ComponentType.Poke]")
+                    elif Video is not None and isinstance(component, Video):
+                        # 视频组件，尝试保留路径/URL等原始信息
+                        vid_ref = (
+                            getattr(component, "file", None)
+                            or getattr(component, "path", None)
+                            or getattr(component, "url", None)
+                        )
+                        if vid_ref and str(vid_ref).strip():
+                            raw_parts.append(f"[视频: {str(vid_ref).strip()}]")
+                        else:
+                            raw_parts.append("[视频]")
+                    elif Record is not None and isinstance(component, Record):
+                        # 语音/音频组件，尝试保留路径/URL等原始信息
+                        rec_ref = (
+                            getattr(component, "url", None)
+                            or getattr(component, "file", None)
+                            or getattr(component, "path", None)
+                        )
+                        if rec_ref and str(rec_ref).strip():
+                            raw_parts.append(f"[语音: {str(rec_ref).strip()}]")
+                        else:
+                            raw_parts.append("[语音]")
+                    elif File is not None and isinstance(component, File):
+                        # 文件组件，保留文件名+路径信息
+                        file_name = getattr(component, "name", "") or ""
+                        file_ref = (
+                            getattr(component, "file_", None)
+                            or getattr(component, "url", None)
+                            or getattr(component, "file", None)
+                        )
+                        if file_name and file_ref and str(file_ref).strip():
+                            raw_parts.append(
+                                f"[文件: {file_name}, {str(file_ref).strip()}]"
+                            )
+                        elif file_name:
+                            raw_parts.append(f"[文件: {file_name}]")
+                        elif file_ref and str(file_ref).strip():
+                            raw_parts.append(f"[文件: {str(file_ref).strip()}]")
+                        else:
+                            raw_parts.append("[文件]")
 
                 if raw_parts:
-                    raw_message = "".join(raw_parts).strip()
+                    raw_message = "".join(raw_parts)
                     # 只有当提取到非空消息时才返回
-                    if raw_message:
+                    if raw_message != "":
                         if DEBUG_MODE:
                             logger.info(
                                 f"[消息清理] 从消息链提取原始消息: {raw_message[:100]}..."
@@ -480,21 +639,152 @@ class MessageCleaner:
             # 发生错误时返回空字符串
             return ""
 
+    # 🔧 Reply 组件 chain 提取的最大递归深度
+    _REPLY_CHAIN_EXTRACT_MAX_DEPTH: int = 5
+
     @staticmethod
-    def _format_reply_component(reply_component) -> str:
+    def _extract_text_from_reply_component_chain(
+        reply_component, depth: int = 0
+    ) -> str:
+        """
+        从 Reply 组件的 chain 中提取文本表示
+
+        当 reply_component.message_str 为空时（被引用消息是纯图片/视频/
+        文件/转发等非文本内容），回退到遍历 chain 中的组件，为非文本组件
+        生成 [图片]/[视频]/[文件: xxx]/[转发消息] 等占位标记。
+
+        参照 AstrBot 平台 chain_parser._extract_text_from_component_chain 的实现。
+
+        Args:
+            reply_component: Reply 组件
+            depth: 当前递归深度（防止无限递归）
+
+        Returns:
+            从 chain 提取的文本，失败返回空字符串
+        """
+        if depth > MessageCleaner._REPLY_CHAIN_EXTRACT_MAX_DEPTH:
+            return ""
+
+        chain = getattr(reply_component, "chain", None)
+        if not chain or not isinstance(chain, list):
+            return ""
+
+        return MessageCleaner._extract_text_from_component_chain(
+            chain, depth=depth + 1
+        )
+
+    @staticmethod
+    def _extract_text_from_component_chain(chain: list, depth: int = 0) -> str:
+        """
+        从消息组件链中提取文本
+
+        遍历组件列表，Plain 取文本，非文本组件生成对应占位标记。
+        与 extract_raw_message_from_event 中的处理逻辑保持一致。
+
+        Args:
+            chain: 消息组件列表
+            depth: 当前递归深度
+
+        Returns:
+            提取的文本
+        """
+        if depth > MessageCleaner._REPLY_CHAIN_EXTRACT_MAX_DEPTH:
+            return ""
+
+        parts = []
+        for comp in chain:
+            if isinstance(comp, Plain):
+                if comp.text is not None:
+                    parts.append(str(comp.text))
+            elif isinstance(comp, At):
+                if hasattr(comp, "qq") and comp.qq:
+                    parts.append(f"[At:{comp.qq}]")
+                else:
+                    parts.append("[At]")
+            elif isinstance(comp, AtAll):
+                parts.append("[At:all]")
+            elif isinstance(comp, Image):
+                # 提取图片原始信息：优先 url → file → path
+                img_ref = (
+                    getattr(comp, "url", None)
+                    or getattr(comp, "file", None)
+                    or getattr(comp, "path", None)
+                )
+                if img_ref and str(img_ref).strip():
+                    parts.append(f"[图片: {str(img_ref).strip()}]")
+                else:
+                    parts.append("[图片]")
+            elif isinstance(comp, Reply):
+                # 递归提取嵌套引用消息的文本
+                nested_text = (
+                    MessageCleaner._extract_text_from_reply_component_chain(
+                        comp, depth=depth + 1
+                    )
+                )
+                if nested_text:
+                    parts.append(f"[引用消息: {nested_text}]")
+                else:
+                    parts.append("[引用消息]")
+            elif isinstance(comp, Forward):
+                parts.append("[转发消息]")
+            elif Poke is not None and isinstance(comp, Poke):
+                parts.append("[ComponentType.Poke]")
+            elif Video is not None and isinstance(comp, Video):
+                # 提取视频原始信息：优先 file → url → path
+                vid_ref = (
+                    getattr(comp, "file", None)
+                    or getattr(comp, "url", None)
+                    or getattr(comp, "path", None)
+                )
+                if vid_ref and str(vid_ref).strip():
+                    parts.append(f"[视频: {str(vid_ref).strip()}]")
+                else:
+                    parts.append("[视频]")
+            elif Record is not None and isinstance(comp, Record):
+                # 提取语音原始信息：优先 url → file → path
+                rec_ref = (
+                    getattr(comp, "url", None)
+                    or getattr(comp, "file", None)
+                    or getattr(comp, "path", None)
+                )
+                if rec_ref and str(rec_ref).strip():
+                    parts.append(f"[语音: {str(rec_ref).strip()}]")
+                else:
+                    parts.append("[语音]")
+            elif File is not None and isinstance(comp, File):
+                file_name = getattr(comp, "name", "") or ""
+                file_path = (
+                    getattr(comp, "file_", None)
+                    or getattr(comp, "url", None)
+                )
+                if file_name and file_path and str(file_path).strip():
+                    parts.append(
+                        f"[文件: {file_name}, {str(file_path).strip()}]"
+                    )
+                elif file_name:
+                    parts.append(f"[文件: {file_name}]")
+                elif file_path and str(file_path).strip():
+                    parts.append(f"[文件: {str(file_path).strip()}]")
+                else:
+                    parts.append("[文件]")
+
+        return "".join(parts)
+
+    @staticmethod
+    def _format_reply_component(reply_component, self_id: str = None) -> str:
         """
         格式化引用消息组件为文本表示
 
         Args:
             reply_component: Reply组件
+            self_id: 机器人自身的用户ID，用于标记引用消息发送者是否为AI自己
 
         Returns:
             格式化后的引用消息文本
         """
         try:
             # 尝试提取引用的消息内容
-            # Reply组件包含：sender_id, sender_nickname, message_str等字段
-            parts = []
+            # Reply组件包含：sender_id, sender_nickname, message_str, chain 等字段
 
             # 🆕 获取发送者ID和昵称（根据AstrBot的Reply组件定义）
             sender_id = None
@@ -512,34 +802,81 @@ class MessageCleaner:
                 if hasattr(reply_component.sender, "nickname"):
                     sender_nickname = reply_component.sender.nickname
 
-            # 尝试获取消息内容
+            # 🔧 优先从 Reply 组件的 chain 中提取消息文本
+            # chain 包含被引用消息的完整组件链（Plain/Image/Video/File/
+            # Forward/Reply 等），遍历 chain 可以保留非文本组件在原始位置
+            # 的占位标记（如 [图片]/[视频]/[文件: xxx]/[转发消息]），而
+            # message_str 仅包含纯文本片段，混合内容消息会丢失非文本组件
+            # 的位置信息。
+            # 策略：chain 优先（参照平台 chain_parser 实现），message_str 兜底。
             message_content = None
-            if hasattr(reply_component, "message_str"):
-                message_content = reply_component.message_str
-            elif hasattr(reply_component, "message"):
-                message_content = reply_component.message
-
-            # 🆕 构建引用消息格式（与其他消息格式保持一致：发送者名字(ID:xxx)）
-            if sender_nickname and sender_id and message_content:
-                # 完整格式：[引用 发送者名字(ID:xxx): 消息内容]
-                return f"[引用 {sender_nickname}(ID:{sender_id}): {message_content}]"
-            elif sender_id and message_content:
-                # 有ID但没有昵称
-                return f"[引用 用户(ID:{sender_id}): {message_content}]"
-            elif sender_nickname and message_content:
-                # 有昵称但没有ID（兼容情况）
-                return f"[引用 {sender_nickname}: {message_content}]"
-            elif message_content:
-                # 只有消息内容
-                return f"[引用消息: {message_content}]"
+            chain_text = MessageCleaner._extract_text_from_reply_component_chain(
+                reply_component
+            )
+            if chain_text:
+                message_content = chain_text
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[消息清理] 从 Reply chain 提取到引用内容: "
+                        f"{chain_text[:100]}..."
+                    )
             else:
-                # 什么都没有
-                return "[引用消息]"
+                # chain 不可用或为空，回退到 message_str / message
+                if hasattr(reply_component, "message_str"):
+                    message_content = reply_component.message_str
+                elif hasattr(reply_component, "message"):
+                    message_content = reply_component.message
+
+                if (not message_content or
+                        not str(message_content).strip()):
+                    if DEBUG_MODE:
+                        logger.info(
+                            "[消息清理] Reply chain 和 message_str 均无法提取内容"
+                        )
+
+            # 检测被引用消息的发送者是否为AI自己
+            if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
+                sender_nickname = None
+            is_self = self_id and sender_id and str(sender_id) == str(self_id)
+            self_suffix = "(你)" if is_self else ""
+
+            # 🆕 构建引用消息格式：使用 >>> 明确分隔，让 AI 知道后面是引用内容
+            # [引用 >>> 发送者名字(你)(ID:xxx): 消息内容]（被引用者是AI自己时加(你)标记）
+            # 末尾追加 \n 使引用内容与正文之间有明显间隔
+            reply_text = ""
+            if sender_nickname and sender_id and message_content:
+                reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
+            elif sender_id and message_content:
+                reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
+            elif sender_nickname and message_content:
+                reply_text = (
+                    f"[引用 >>> {sender_nickname}{self_suffix}: {message_content}]"
+                )
+            elif message_content:
+                reply_text = f"[引用 >>> {message_content}]"
+            else:
+                # 内容无法提取，但有发送者信息时保留引用框架
+                if sender_nickname and sender_id:
+                    reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_id:
+                    reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_nickname:
+                    reply_text = (
+                        f"[引用 >>> {sender_nickname}{self_suffix}: (无法获取引用内容)]"
+                    )
+                else:
+                    if DEBUG_MODE:
+                        logger.info("[消息清理] 引用消息组件无有效内容，已跳过")
+                    return ""
+
+            if reply_text:
+                return reply_text.rstrip() + "\n"
+            return ""
 
         except Exception as e:
             if DEBUG_MODE:
                 logger.info(f"[消息清理] 格式化引用消息失败: {e}")
-            return "[引用消息]"
+            return ""
 
     @staticmethod
     def is_empty_at_message(
@@ -582,7 +919,12 @@ class MessageCleaner:
             is_empty = has_at_ai or (is_at_message and not has_structured_mentions)
         else:
             # only_ai: 必须依赖结构化结果，且只能包含@AI（可重复），不能含他人/全体
-            is_empty = has_structured_mentions and has_at_ai and not has_at_others and not has_at_all
+            is_empty = (
+                has_structured_mentions
+                and has_at_ai
+                and not has_at_others
+                and not has_at_all
+            )
 
         if is_empty and DEBUG_MODE:
             logger.info(f"[消息清理] 检测到空@消息（mode={mode}）")
@@ -594,9 +936,10 @@ class MessageCleaner:
         """
         处理缓存消息中的图片
 
-        概率筛选失败时，缓存的消息需要特殊处理图片：
-        - 如果消息只包含图片（纯图片），不缓存（返回 False）
-        - 如果消息是文本+图片，移除图片标记，只保留文本
+        未通过概率筛选时，缓存的消息需要特殊处理图片：
+        - 原始图片数据不进入缓存
+        - 平台已自动理解出的图片描述会作为普通文本保留
+        - 未解析的原始图片占位会被直接移除，不写入失败占位
         - 如果消息只有文本，直接保留
 
         Args:
@@ -604,15 +947,15 @@ class MessageCleaner:
 
         Returns:
             (should_cache, processed_text):
-            - should_cache: 是否应该缓存这条消息（False=纯图片，应丢弃）
-            - processed_text: 处理后的文本（移除了图片标记）
+            - should_cache: 是否应该缓存这条消息（False=过滤后严格为空字符串）
+            - processed_text: 处理后的文本（未解析图片占位已移除）
 
         Examples:
             >>> process_cached_message_images("[图片]")
-            (False, "")  # 纯图片，不缓存
+            (False, "")  # 纯未解析图片不缓存
 
             >>> process_cached_message_images("看这张图[图片]")
-            (True, "看这张图")  # 文本+图片，只保留文本
+            (True, "看这张图")
 
             >>> process_cached_message_images("你好啊")
             (True, "你好啊")  # 纯文本，直接保留
@@ -620,32 +963,31 @@ class MessageCleaner:
         if not message_text:
             return False, ""
 
-        # 移除所有图片标记
-        text_without_images = re.sub(r"\[图片\]", "", message_text)
-        text_without_images = text_without_images.strip()
+        # 缓存/窗口缓存是被动历史收集：只长期保留平台已经解析出的图片描述；
+        # 未解析的原始图片占位不可依赖，直接移除，避免把无信息图片写进历史。
+        processed_text = re.sub(
+            r"\[图片\]|\[Image\]|\[图片（识别失败）\]|\[Image Captioning Failed\]",
+            "",
+            message_text,
+        )
+        has_image = (
+            "[图片]" in message_text
+            or "[Image]" in message_text
+            or "[图片（识别失败）]" in message_text
+            or "[Image Captioning Failed]" in message_text
+        )
 
-        # 判断是否是纯图片消息
-        if not text_without_images:
-            # 检查原消息是否包含图片标记
-            has_image = "[图片]" in message_text
-            if has_image:
-                if DEBUG_MODE:
-                    logger.info("[缓存-图片处理] 检测到纯图片消息，丢弃不缓存")
-                return False, ""
-            else:
-                # 原消息就是空的
-                if DEBUG_MODE:
-                    logger.info("[缓存-图片处理] 消息为空，不缓存")
-                return False, ""
+        if processed_text == "":
+            if DEBUG_MODE:
+                logger.info("[缓存-图片处理] 消息为空，不缓存")
+            return False, ""
 
         # 检查是否有图片被移除
-        has_image = "[图片]" in message_text
         if has_image:
             if DEBUG_MODE:
-                logger.info(
-                    f"[缓存-图片处理] 移除图片标记，保留文本: {text_without_images[:100]}..."
-                )
-            return True, text_without_images
+                preview = processed_text.strip() or "(仅剩空白)"
+                logger.info(f"[缓存-图片处理] 未解析图片标记已移除: {preview[:100]}...")
+            return True, processed_text
         else:
             # 纯文本消息，直接保留
             return True, message_text

@@ -3,7 +3,7 @@
 负责提取和提醒AI当前可用的工具
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 from typing import List, Dict, Optional, Any
@@ -129,9 +129,7 @@ class ToolsReminder:
                                     }
                                 )
                     except Exception as e:
-                        logger.warning(
-                            f"获取工具 {tool_name} 的参数信息失败: {e}"
-                        )
+                        logger.warning(f"获取工具 {tool_name} 的参数信息失败: {e}")
 
                 tool_list.append(tool_info)
 
@@ -243,9 +241,7 @@ class ToolsReminder:
             return []
 
     @staticmethod
-    def format_tools_info(
-        tools: List[Dict], include_parameters: bool = True
-    ) -> str:
+    def format_tools_info(tools: List[Dict], include_parameters: bool = True) -> str:
         """
         格式化工具列表为可读文本
 

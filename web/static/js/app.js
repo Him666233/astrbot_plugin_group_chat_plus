@@ -8,6 +8,7 @@ const App = {
     _initialized: false,
     _authMonitor: null,
     _configFileName: '',
+    _configPanelOpen: false,
 
     /** 应用入口（面板页面加载时调用） */
     async start() {
@@ -53,6 +54,10 @@ const App = {
 
         this._updateConfigBadgeVisibility();
 
+        // 缩放按钮仅在流程图页面显示
+        const zoomCtrl = document.getElementById('zoom-ctrl');
+        if (zoomCtrl) zoomCtrl.classList.toggle('hidden', name !== 'tech-tree');
+
         // 按需初始化视图
         this._activateView(name);
     },
@@ -63,6 +68,7 @@ const App = {
         if (name !== 'charts') Charts.destroy();
         if (name !== 'sessions') SessionMgr.destroy();
         if (name !== 'tech-tree' && typeof TechTree !== 'undefined') TechTree.closeAllFloaters();
+        if (name !== 'tech-tree') this.setConfigPanelOpen(false);
 
         switch (name) {
             case 'tech-tree':
@@ -90,6 +96,7 @@ const App = {
                 this._renderFileBrowser();
                 break;
         }
+
     },
 
     /** 初始化主界面 */
@@ -156,8 +163,28 @@ const App = {
             themeBtn.textContent = savedTheme === 'light' ? '🌙 切换深色' : '☀️ 切换浅色';
         }
 
-        // 初始化默认视图
-        await this._activateView(this._currentView);
+        // 若上次是核心设置页保存并重启触发的刷新，恢复到之前的视图
+        let _restored = false;
+        try {
+            const restoreView = sessionStorage.getItem('gcp_restore_view');
+            if (restoreView) {
+                sessionStorage.removeItem('gcp_restore_view');
+                this.showView(restoreView);
+                _restored = true;
+            }
+        } catch (_e) {}
+
+        if (!_restored) {
+            // 无恢复标记：初始化默认视图
+            await this._activateView(this._currentView);
+        }
+
+        // 全局点击：工具提示外部点击时关闭（移动端）
+        document.addEventListener('click', (e) => {
+            if (this._logTooltip && !e.target.closest('[data-tooltip]')) {
+                this._hideLogTooltip();
+            }
+        });
     },
 
     // ===================== 指令执行视图 =====================
@@ -267,6 +294,9 @@ const App = {
                     if (res) {
                         if (res.ok) {
                             Utils.toast(res.msg || '执行成功', 'success');
+                            if (mode === 'restart' || mode === 'reload') {
+                                App._pollRestartStatus(mode);
+                            }
                         } else {
                             Utils.toast(res.msg || '执行失败', 'error');
                         }
@@ -287,6 +317,9 @@ const App = {
 
     /** 渲染访问日志视图 */
     async _renderAccessLog() {
+        // 每次进入视图都重置到第一页，确保最新日志可见
+        this._accessLogPage = 1;
+
         const container = document.getElementById('access-log-container');
         if (!container) return;
         container.innerHTML = '';
@@ -310,7 +343,10 @@ const App = {
         logSection.innerHTML = `
             <div class="log-section-header">
                 <h3>访问日志</h3>
-                <button class="btn btn-sm" id="btn-refresh-log">刷新</button>
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span class="log-refresh-hint">本页无自动刷新，有新日志产生时请手动点击刷新按钮获取最新信息</span>
+                    <button class="btn btn-sm" id="btn-refresh-log">刷新</button>
+                </div>
             </div>
             <div id="log-table-container"></div>
             <div id="log-pagination"></div>`;
@@ -324,7 +360,6 @@ const App = {
         await Promise.all([this._loadBanList(), this._loadAccessLog()]);
     },
 
-    /** 加载封禁列表 */
     async _loadBanList() {
         const container = document.getElementById('ban-list-container');
         if (!container) return;
@@ -339,35 +374,66 @@ const App = {
             return;
         }
         container.innerHTML = '';
-        const table = document.createElement('table');
-        table.className = 'log-table';
-        table.innerHTML = `<thead><tr>
-            <th>IP</th><th>来源</th><th>原因</th><th>封禁时间</th><th>剩余时间</th><th>操作</th>
-        </tr></thead>`;
-        const tbody = document.createElement('tbody');
-        bans.forEach(ban => {
-            const tr = document.createElement('tr');
-            const remaining = ban.remaining_seconds === null
-                ? '永久' : Utils.formatDuration(ban.remaining_seconds);
-            // 判断封禁来源（防爬虫自动 / 手动）
-            const isSpider = ban.reason && ban.reason.startsWith('[防爬虫]');
-            const sourceBadge = isSpider
-                ? '<span style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:1px 5px;">🕷️ 自动</span>'
-                : '<span style="font-size:11px;background:var(--glass-bg-hover);color:var(--text-secondary);border:1px solid var(--glass-border);border-radius:3px;padding:1px 5px;">👤 手动</span>';
-            const displayReason = Utils.escapeHtml(ban.reason || '');
-            tr.innerHTML = `
-                <td style="font-family:monospace;">${Utils.escapeHtml(ban.ip)}</td>
-                <td>${sourceBadge}</td>
-                <td title="${displayReason}" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${displayReason}</td>
-                <td>${Utils.formatTime(ban.banned_at)}</td>
-                <td>${remaining}</td>
-                <td><button class="btn btn-sm" data-unban="${Utils.escapeHtml(ban.ip)}">解封</button></td>`;
-            tbody.appendChild(tr);
-        });
-        table.appendChild(tbody);
-        container.appendChild(table);
 
-        // 解封按钮事件
+        if (window.innerWidth <= 1023) {
+            const list = document.createElement('div');
+            list.className = 'log-card-list';
+            bans.forEach(ban => {
+                const remaining = ban.remaining_seconds === null
+                    ? '永久' : Utils.formatDuration(ban.remaining_seconds);
+                const isSpider = ban.reason && ban.reason.startsWith('[防爬虫]');
+                const sourceBadge = isSpider
+                    ? '<span class="status-badge status-warn">🕷️ 自动</span>'
+                    : '<span class="status-badge">👤 手动</span>';
+                const card = document.createElement('div');
+                card.className = 'log-card';
+                card.innerHTML = `
+                    <div class="log-card-header">
+                        <span class="log-card-ip">${Utils.escapeHtml(ban.ip)}</span>
+                        ${sourceBadge}
+                    </div>
+                    <div class="log-card-row"><strong>原因</strong><span style="word-break:break-word;">${Utils.escapeHtml(ban.reason || '')}</span></div>
+                    <div class="log-card-row"><strong>封禁时间</strong><span>${Utils.formatTime(ban.banned_at)}</span></div>
+                    <div class="log-card-row"><strong>剩余时间</strong><span>${remaining}</span></div>
+                    <div class="log-card-actions">
+                        <button class="btn btn-sm" data-edit-ban="${Utils.escapeHtml(ban.ip)}">编辑备注</button>
+                        <button class="btn btn-sm" data-unban="${Utils.escapeHtml(ban.ip)}">解封</button>
+                    </div>`;
+                list.appendChild(card);
+            });
+            container.appendChild(list);
+        } else {
+            const table = document.createElement('table');
+            table.className = 'log-table';
+            table.innerHTML = `<thead><tr>
+                <th>IP</th><th>来源</th><th>原因</th><th>封禁时间</th><th>剩余时间</th><th>操作</th>
+            </tr></thead>`;
+            const tbody = document.createElement('tbody');
+            bans.forEach(ban => {
+                const tr = document.createElement('tr');
+                const remaining = ban.remaining_seconds === null
+                    ? '永久' : Utils.formatDuration(ban.remaining_seconds);
+                const isSpider = ban.reason && ban.reason.startsWith('[防爬虫]');
+                const sourceBadge = isSpider
+                    ? '<span style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:1px 5px;white-space:nowrap;">🕷️ 自动</span>'
+                    : '<span style="font-size:11px;background:var(--glass-bg-hover);color:var(--text-secondary);border:1px solid var(--glass-border);border-radius:3px;padding:1px 5px;white-space:nowrap;">👤 手动</span>';
+                const displayReason = Utils.escapeHtml(ban.reason || '');
+                tr.innerHTML = `
+                    <td style="font-family:monospace;white-space:nowrap;">${Utils.escapeHtml(ban.ip)}</td>
+                    <td style="white-space:nowrap;">${sourceBadge}</td>
+                    <td><span title="${displayReason}" style="display:block;word-break:break-word;line-height:1.5;">${displayReason}</span></td>
+                    <td style="white-space:nowrap;">${Utils.formatTime(ban.banned_at)}</td>
+                    <td style="white-space:nowrap;">${remaining}</td>
+                    <td style="white-space:nowrap;">
+                        <button class="btn btn-sm" data-edit-ban="${Utils.escapeHtml(ban.ip)}">编辑备注</button>
+                        <button class="btn btn-sm" data-unban="${Utils.escapeHtml(ban.ip)}">解封</button>
+                    </td>`;
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
         container.querySelectorAll('[data-unban]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 const ip = btn.dataset.unban;
@@ -379,6 +445,23 @@ const App = {
                     await this._loadBanList();
                 } else {
                     Utils.toast(res.msg || '解封失败', 'error');
+                }
+            });
+        });
+
+        container.querySelectorAll('[data-edit-ban]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const ip = btn.dataset.editBan;
+                const ban = bans.find(b => b.ip === ip);
+                const currentReason = ban ? (ban.reason || '') : '';
+                const newReason = await Utils.prompt(`编辑 ${ip} 的封禁备注`, currentReason, 128);
+                if (newReason === null) return;
+                const res = await Api.updateBanNote(ip, newReason);
+                if (res.ok) {
+                    Utils.toast('备注已更新', 'success');
+                    await this._loadBanList();
+                } else {
+                    Utils.toast(res.msg || '更新失败', 'error');
                 }
             });
         });
@@ -406,49 +489,96 @@ const App = {
         }
 
         container.innerHTML = '';
-        const table = document.createElement('table');
-        table.className = 'log-table';
-        table.innerHTML = `<thead><tr>
-            <th>时间</th><th>IP</th><th>方法</th><th>路径</th><th>状态</th><th>附注</th><th>操作</th>
-        </tr></thead>`;
-        const tbody = document.createElement('tbody');
-        logs.forEach(log => {
-            const tr = document.createElement('tr');
-            const statusClass = log.status >= 400 ? 'status-error' :
-                                log.status >= 300 ? 'status-warn' : 'status-ok';
 
-            // 附注渲染：防爬虫自动封禁事件使用橙色高亮标签
-            let noteHtml = '';
-            if (log.note) {
-                if (log.note.includes('[防爬虫自动封禁]')) {
-                    noteHtml = `<span class="log-note-spider" title="${Utils.escapeHtml(log.note)}"
-                        style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);
-                        border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:2px 6px;
-                        white-space:nowrap;display:inline-block;">
-                        🕷️ ${Utils.escapeHtml(log.note.slice(0, 40))}${log.note.length > 40 ? '…' : ''}
-                    </span>`;
-                } else {
-                    noteHtml = `<span class="log-note" title="${Utils.escapeHtml(log.note)}">${Utils.escapeHtml(log.note.slice(0, 30))}${log.note.length > 30 ? '…' : ''}</span>`;
+        if (window.innerWidth <= 1023) {
+            const list = document.createElement('div');
+            list.className = 'log-card-list';
+            logs.forEach((log, idx) => {
+                const statusClass = log.status >= 400 ? 'status-error' :
+                    (log.status >= 300 ? 'status-warn' : 'status-ok');
+                // 移动端完整显示附注（不截断），允许自动换行
+                let noteHtml = '<span class="log-card-note-empty">—</span>';
+                if (log.note) {
+                    const safeNote = Utils.escapeHtml(log.note);
+                    noteHtml = log.note.includes('[防爬虫自动封禁]')
+                        ? `<span class="status-badge status-warn log-card-note-full" data-tooltip="${safeNote}">🕷️ ${safeNote}</span>`
+                        : log.note.includes('登录失败')
+                            ? `<span class="status-badge status-warn log-card-note-full" data-tooltip="${safeNote}">🔑 ${safeNote}</span>`
+                            : `<span class="log-card-note-full" data-tooltip="${safeNote}">${safeNote}</span>`;
                 }
-            }
+                const card = document.createElement('div');
+                card.className = 'log-card';
+                card.innerHTML = `
+                    <div class="log-card-header">
+                        <span class="log-card-ip">${Utils.escapeHtml(log.ip)}</span>
+                        <span class="status-badge ${statusClass}">${log.status}</span>
+                    </div>
+                    <div class="log-card-row"><strong>时间</strong><span>${Utils.formatTime(log.timestamp)}</span></div>
+                    <div class="log-card-row"><strong>方法</strong><span>${Utils.escapeHtml(log.method)}</span></div>
+                    <div class="log-card-row"><strong>路径</strong><span class="log-card-path">${Utils.escapeHtml(log.path)}</span></div>
+                    <div class="log-card-row"><strong>附注</strong>${noteHtml}</div>
+                    <div class="log-card-actions">
+                        <button class="btn btn-sm btn-danger" data-ban-ip="${Utils.escapeHtml(log.ip)}" data-log-idx="${idx}">封禁</button>
+                    </div>`;
+                list.appendChild(card);
+            });
+            container.appendChild(list);
+        } else {
+            const table = document.createElement('table');
+            table.className = 'log-table';
+            table.innerHTML = `<thead><tr>
+                <th>时间</th><th>IP</th><th>方法</th><th>路径</th><th>状态</th><th>附注</th><th>操作</th>
+            </tr></thead>`;
+            const tbody = document.createElement('tbody');
+            logs.forEach((log, idx) => {
+                const tr = document.createElement('tr');
+                const statusClass = log.status >= 400 ? 'status-error' :
+                                    log.status >= 300 ? 'status-warn' : 'status-ok';
 
-            tr.innerHTML = `
-                <td>${Utils.formatTime(log.timestamp)}</td>
-                <td style="font-family:monospace;">${Utils.escapeHtml(log.ip)}</td>
-                <td>${Utils.escapeHtml(log.method)}</td>
-                <td class="log-path">${Utils.escapeHtml(log.path)}</td>
-                <td><span class="status-badge ${statusClass}">${log.status}</span></td>
-                <td>${noteHtml}</td>
-                <td><button class="btn btn-sm btn-danger" data-ban-ip="${Utils.escapeHtml(log.ip)}">封禁</button></td>`;
-            tbody.appendChild(tr);
-        });
-        table.appendChild(tbody);
-        container.appendChild(table);
+                let noteHtml = '';
+                if (log.note) {
+                    // 桌面端放宽截断限制（从 30 改为 80 字符），附注列会自然占满剩余空间
+                    const safeNote = Utils.escapeHtml(log.note);
+                    const displayText = log.note.length > 80
+                        ? Utils.escapeHtml(log.note.slice(0, 80)) + '…'
+                        : safeNote;
+                    if (log.note.includes('[防爬虫自动封禁]')) {
+                        noteHtml = `<span class="log-note-spider" data-tooltip="${safeNote}"
+                            style="font-size:11px;background:rgba(224,32,32,0.15);color:var(--accent-red);
+                            border:1px solid rgba(224,32,32,0.35);border-radius:3px;padding:2px 6px;
+                            white-space:nowrap;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;">
+                            🕷️ ${displayText}
+                        </span>`;
+                    } else if (log.note.includes('登录失败')) {
+                        noteHtml = `<span class="log-note-brute" data-tooltip="${safeNote}">🔑 ${displayText}</span>`;
+                    } else {
+                        noteHtml = `<span class="log-note" data-tooltip="${safeNote}">${displayText}</span>`;
+                    }
+                }
 
-        // 封禁按钮事件
+                tr.innerHTML = `
+                    <td>${Utils.formatTime(log.timestamp)}</td>
+                    <td style="font-family:monospace;">${Utils.escapeHtml(log.ip)}</td>
+                    <td>${Utils.escapeHtml(log.method)}</td>
+                    <td class="log-path">${Utils.escapeHtml(log.path)}</td>
+                    <td><span class="status-badge ${statusClass}">${log.status}</span></td>
+                    <td class="log-note-cell">${noteHtml}</td>
+                    <td><button class="btn btn-sm btn-danger" data-ban-ip="${Utils.escapeHtml(log.ip)}" data-log-idx="${idx}">封禁</button></td>`;
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
         container.querySelectorAll('[data-ban-ip]').forEach(btn => {
-            btn.addEventListener('click', () => this._showBanDialog(btn.dataset.banIp));
+            btn.addEventListener('click', () => {
+                const logIdx = btn.dataset.logIdx;
+                const logEntry = (logIdx !== undefined && logs[parseInt(logIdx)]) ? logs[parseInt(logIdx)] : null;
+                this._showBanDialog(btn.dataset.banIp, logEntry);
+            });
         });
+
+        this._bindLogTooltips(container);
 
         this._renderPagination(total, this._accessLogPage);
     },
@@ -469,7 +599,7 @@ const App = {
         container.appendChild(info);
 
         const actions = document.createElement('div');
-        actions.style.cssText = 'display:flex;gap:4px;';
+        actions.style.cssText = 'display:flex;gap:8px;';
 
         if (currentPage > 1) {
             const prev = document.createElement('button');
@@ -494,16 +624,88 @@ const App = {
         container.appendChild(actions);
     },
 
-    /** 显示封禁 IP 弹窗 */
-    _showBanDialog(ip = '') {
+    /** 为访问日志附注元素绑定自定义工具提示事件 */
+    _bindLogTooltips(container) {
+        const notes = container.querySelectorAll('[data-tooltip]');
+        notes.forEach(el => {
+            el.addEventListener('mouseenter', (e) => {
+                this._showLogTooltip(e, el.dataset.tooltip);
+            });
+            el.addEventListener('mouseleave', () => {
+                this._hideLogTooltip();
+            });
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._toggleLogTooltip(e, el.dataset.tooltip);
+            });
+        });
+    },
+
+    /** 在光标附近显示工具提示 */
+    _showLogTooltip(event, text) {
+        this._hideLogTooltip();
+        const tip = document.createElement('div');
+        tip.className = 'log-tooltip';
+        tip.textContent = text;
+        document.body.appendChild(tip);
+        // 强制重排后添加 show 类以触发过渡动画
+        void tip.offsetWidth;
+        tip.classList.add('show');
+        this._logTooltip = tip;
+        this._positionLogTooltip(event);
+    },
+
+    /** 定位工具提示，确保不超出视口 */
+    _positionLogTooltip(event) {
+        if (!this._logTooltip) return;
+        const tip = this._logTooltip;
+        const rect = tip.getBoundingClientRect();
+        let left = event.clientX + 14;
+        let top = event.clientY + 14;
+        if (left + rect.width > window.innerWidth - 10) {
+            left = window.innerWidth - rect.width - 10;
+        }
+        if (top + rect.height > window.innerHeight - 10) {
+            top = window.innerHeight - rect.height - 10;
+        }
+        if (left < 10) left = 10;
+        if (top < 10) top = 10;
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+    },
+
+    /** 隐藏并移除工具提示 */
+    _hideLogTooltip() {
+        if (this._logTooltip) {
+            this._logTooltip.classList.remove('show');
+            const tip = this._logTooltip;
+            this._logTooltip = null;
+            setTimeout(() => { if (tip.parentNode) tip.remove(); }, 160);
+        }
+    },
+
+    /** 切换工具提示（移动端点击行为） */
+    _toggleLogTooltip(event, text) {
+        if (this._logTooltip && this._logTooltip.classList.contains('show')) {
+            this._hideLogTooltip();
+        } else {
+            this._showLogTooltip(event, text);
+        }
+    },
+
+    /** 显示封禁 IP 弹窗，entry 为可选的访问日志条目（用于预填原因） */
+    _showBanDialog(ip = '', entry = null) {
+        const initialReason = entry && entry.note ? entry.note : '';
         const overlay = document.createElement('div');
         overlay.className = 'confirm-overlay';
         overlay.innerHTML = `
             <div class="confirm-box" style="width:360px;">
                 <h3 style="margin-bottom:12px;">封禁 IP</h3>
                 <div style="display:flex;flex-direction:column;gap:8px;">
-                    <input type="text" id="ban-ip-input" placeholder="IP 地址" value="${Utils.escapeHtml(ip)}">
-                    <input type="text" id="ban-reason-input" placeholder="封禁原因（可选）" value="手动封禁">
+                    <input type="text" id="ban-ip-input" placeholder="IPv4 / IPv6 地址" value="${Utils.escapeHtml(ip)}">
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:-4px;">支持 IPv4（如 192.168.1.100）和 IPv6（如 2001:db8::1）</div>
+                    <input type="text" id="ban-reason-input" placeholder="封禁原因（可选）" maxlength="128" value="${Utils.escapeHtml(initialReason)}">
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:-2px;">最多 128 个字符</div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label style="white-space:nowrap;font-size:13px;">封禁时长</label>
                         <select id="ban-duration-select" style="flex:1;">
@@ -620,11 +822,22 @@ const App = {
         const heartbeatSection = document.createElement('div');
         heartbeatSection.className = 'settings-section';
         heartbeatSection.innerHTML = `
-            <h3>💓 会话心跳状态</h3>
+            <div class="settings-section-header">
+                <h3>💓 会话心跳状态</h3>
+                <div class="settings-section-header-right">
+                    <button id="btn-refresh-heartbeat" class="btn btn-sm" title="手动刷新心跳状态">🔄 刷新</button>
+                    <label class="auto-refresh-toggle">
+                        <span class="dot active" id="heartbeat-refresh-dot"></span>
+                        <input type="checkbox" checked id="heartbeat-auto-refresh">
+                        <span>自动刷新</span>
+                    </label>
+                </div>
+            </div>
             <div id="heartbeat-status-loading" class="chart-empty" style="padding:12px;">加载中...</div>
             <div id="heartbeat-status-content" class="hidden" style="display:flex;flex-direction:column;gap:8px;"></div>`;
         container.appendChild(heartbeatSection);
         this._loadHeartbeatStatus();
+
 
         // ---- 修改密码区 ----
         const pwSection = document.createElement('div');
@@ -632,13 +845,13 @@ const App = {
         pwSection.innerHTML = `
             <h3>修改密码</h3>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.7;">
-                密码要求：<strong>6 ~ 128 位</strong>，支持任意可打印字符（字母、数字、符号均可）。<br>
+                密码要求：<strong>8 ~ 128 位</strong>，支持任意可打印字符（字母、数字、符号均可）。<br>
                 建议使用包含大小写字母、数字和符号的强密码，避免使用生日、连续数字等易猜内容。<br>
                 修改成功后原登录会话将会过期。
             </p>
             <div style="display:flex;flex-direction:column;gap:8px;max-width:300px;">
                 <input type="password" id="settings-old-pw" placeholder="当前密码" autocomplete="current-password" maxlength="128">
-                <input type="password" id="settings-new-pw" placeholder="新密码（6 ~ 128 位）" autocomplete="new-password" maxlength="128">
+                <input type="password" id="settings-new-pw" placeholder="新密码（8 ~ 128 位）" autocomplete="new-password" maxlength="128">
                 <input type="password" id="settings-confirm-pw" placeholder="确认新密码" autocomplete="new-password" maxlength="128">
                 <button class="btn btn-primary btn-sm" id="btn-settings-change-pw">修改密码</button>
                 <div id="settings-pw-error" class="error-msg hidden"></div>
@@ -659,8 +872,8 @@ const App = {
                     errEl.classList.remove('hidden');
                     return;
                 }
-                if (newPw.length < 6) {
-                    errEl.textContent = '新密码至少 6 位';
+                if (newPw.length < 8) {
+                    errEl.textContent = '新密码至少 8 位';
                     errEl.classList.remove('hidden');
                     return;
                 }
@@ -738,18 +951,23 @@ const App = {
                     <div id="ip-list-section">
                         <label style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">
                             <span id="ip-list-label">IP 名单</span>
-                            <span style="font-weight:normal;color:var(--text-secondary);">（每行一个 IP 地址）</span>
+                            <span style="font-weight:normal;color:var(--text-secondary);">（每行一个，支持 IPv4 / IPv6）</span>
                         </label>
-                        <textarea id="ip-list-textarea" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="每行一个 IP 地址"></textarea>
+                        <textarea id="ip-list-textarea" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="每行一个 IP 地址&#10;例如：192.168.1.100&#10;　　　2001:db8::1"></textarea>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.6;">
+                            📌 仅支持<strong>单个 IP 精确匹配</strong>，不支持 CIDR 网段（如 192.168.0.0/16）、IP 段或域名。<br>
+                            📌 <code>0.0.0.0</code> 和 <code>::</code> 为未指定地址，<strong>不会匹配任何实际客户端 IP</strong>：白名单模式下将导致全员无法访问，黑名单模式下无实际拦截效果。<br>
+                            📌 IPv6 地址支持任意格式（压缩/半压缩/完整展开），系统会自动统一规范化为标准形式进行匹配。
+                        </div>
                     </div>
                     <div>
                         <label style="font-size:13px;font-weight:600;margin-bottom:4px;display:block;">
-                            受保护 IP
+                            受保护 IP（永不封禁）
                             <span style="font-weight:normal;color:var(--text-muted);"> （只读，仅可通过 AstrBot 传统配置修改）</span>
                         </label>
                         <div id="protected-ips-display" style="font-family:monospace;font-size:13px;padding:8px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:var(--radius-sm);min-height:48px;color:var(--text-secondary);white-space:pre-wrap;"></div>
                         <div style="font-size:11px;color:var(--accent-red);margin-top:4px;">
-                            ⚠️ 受保护 IP 是底线安全配置（最高优先级，不受任何机制影响），防止 Web 面板被攻破后攻击者篡改。
+                            ⚠️ 受保护 IP 是底线安全配置（最高优先级，不受封禁/黑白名单/防爬虫/暴力破解等任何机制影响）。支持 IPv4 和 IPv6 地址。
                             如需修改，请在 AstrBot 插件配置页修改 <code>web_panel_protected_ips</code>。
                         </div>
                     </div>
@@ -814,19 +1032,22 @@ const App = {
 
                 // 配置写入成功，触发插件重载（保持登录态）
                 saveIpBtn.textContent = '重启中...';
-                statusEl.textContent = '正在重启插件...';
+                saveIpBtn.disabled = true;
+                statusEl.textContent = '正在重启插件，完成后将自动刷新...';
+                statusEl.style.color = 'var(--accent)';
                 const reloadRes = await Api.reloadPlugin();
-                saveIpBtn.disabled = false;
-                saveIpBtn.textContent = '保存并重启插件';
-                if (reloadRes && reloadRes.ok) {
-                    Utils.toast('IP 配置已保存，插件正在重启，请稍后刷新页面...', 'success');
-                    statusEl.textContent = '重启中...';
-                    statusEl.style.color = 'var(--accent)';
-                } else {
-                    Utils.toast('配置已保存，但触发重启失败，请手动重启插件', 'warning');
-                    statusEl.textContent = '请手动重启';
-                    statusEl.style.color = 'var(--accent-orange)';
+                // 无论服务器返回什么（包括网络错误），都尝试等待服务器恢复后自动刷新。
+                // 若服务器未真正重启，轮询会立刻成功并刷新页面，结果等价。
+                if (reloadRes && !reloadRes.ok && !reloadRes.network_error) {
+                    // 服务器返回了明确的业务错误（非网络问题），说明配置有问题
+                    saveIpBtn.disabled = false;
+                    saveIpBtn.textContent = '保存并重启插件';
+                    statusEl.textContent = '重启失败';
+                    statusEl.style.color = 'var(--danger)';
+                    Utils.toast(reloadRes.msg || '重启失败，请检查配置', 'error');
+                    return;
                 }
+                this._waitForServerAndRefresh();
             });
         }
 
@@ -863,16 +1084,16 @@ const App = {
         infoSection.innerHTML = `
             <h3>安全配置说明</h3>
             <p style="font-size:13px;color:var(--text-secondary);line-height:1.8;">
-                <strong>IP 访问控制（黑白名单）</strong>修改后需点击「保存并重启插件」，重启完成后生效，与传统配置项行为一致。<br>
+                <strong>IP 访问控制（黑白名单）</strong>修改后需点击「保存并重启插件」，重启完成后生效，与传统配置项行为一致。所有 IP 名单均支持 IPv4 和 IPv6 地址，仅做精确地址匹配（不支持 CIDR 网段/子网）。<br>
                 <br>
                 - <strong>关闭模式</strong>：不做 IP 过滤，任何 IP 均可访问<br>
                 - <strong>白名单模式</strong>：仅名单中的 IP 可访问面板（白名单 IP 直接放行，不受封禁影响）<br>
                 - <strong>黑名单模式</strong>：名单中的 IP 被阻止访问（未在黑名单内的 IP 仍受封禁检查约束）<br>
-                - <strong>受保护 IP</strong>：优先级最高，永远放行，不受任何机制影响。<strong>只能通过 AstrBot 传统配置修改</strong>，防止面板被攻破后遭篡改<br>
+                - <strong>受保护 IP</strong>：优先级最高，永远放行，不受任何机制影响。支持 IPv4 / IPv6。<strong>只能通过 AstrBot 传统配置修改</strong>，防止面板被攻破后遭篡改<br>
                 <br>
-                <strong>总开关 / 端口 / 监听地址 / 密码重置</strong>：这些配置出于安全考虑只能通过 AstrBot 插件配置页修改，上方「安全敏感配置」区展示了其当前值供参考。<br>
+                <strong>总开关 / 端口 / 监听地址 / 密码重置 / 信任代理 / IP 绑定 / 心跳频率</strong>：这些配置出于安全考虑只能通过 AstrBot 插件配置页修改，上方「安全敏感配置」区展示了其当前值供参考。监听地址设为 <code>0.0.0.0</code> 或 <code>::</code> 时自动启用双栈（同时监听 IPv4 + IPv6）。<br>
                 <br>
-                <strong>日志清理 / 防爬虫 / 已登录请求限速</strong>：在「Web 面板运行配置」区可直接修改，修改后需保存并重启插件。
+                <strong>日志清理 / 防爬虫 / 已登录请求限速</strong>：在「Web 面板运行配置」区可直接修改，修改后需保存并重启插件。已登录请求限速会覆盖数据图表、会话管理等自动刷新请求；前端会避免并发堆积，并在后台标签页暂停展示类自动刷新。只有专用会话心跳接口不计入已登录速率窗口，但仍必须通过 IP 和令牌校验。
             </p>`;
         container.appendChild(infoSection);
     },
@@ -902,10 +1123,16 @@ const App = {
             'web_panel_host',
             'web_panel_reset_password',
             'web_panel_trust_proxy',
+            'web_panel_ip_bind_check',
             'web_panel_heartbeat_visible_interval_seconds',
             'web_panel_heartbeat_hidden_interval_seconds',
             'web_panel_heartbeat_retry_base_seconds',
             'web_panel_heartbeat_retry_max_seconds',
+            'web_panel_brute_force_window',
+            'web_panel_brute_force_rate_window',
+            'web_panel_brute_force_rate_count',
+            'web_panel_brute_force_tiers',
+            'web_panel_brute_force_ban_duration',
         ];
 
         readonlyKeys.forEach(key => {
@@ -919,16 +1146,20 @@ const App = {
                 ? (val ? '已开启' : '已关闭')
                 : (val === '' ? '（空）' : String(val));
             const desc = (s.description || key).replace(/^[^\s]+\s/, '');
-            const readonlyNote = key.startsWith('web_panel_heartbeat_')
-                ? '⚠️ 心跳探测频率属于安全敏感配置，请在 AstrBot 平台插件配置页修改'
+            const safeDisplayVal = Utils.escapeHtml(displayVal);
+            const safeDesc = Utils.escapeHtml(desc);
+            const readonlyNote = (key.startsWith('web_panel_heartbeat_') || key === 'web_panel_ip_bind_check' || key === 'web_panel_trust_proxy')
+                ? '⚠️ 此项属于 Web 安全敏感配置，请在 AstrBot 平台插件配置页修改'
                 : '⚠️ 此项为安全敏感配置，请在 AstrBot 平台插件配置页修改';
             row.innerHTML = `
-                <div class="config-field-label">🔒 ${desc}</div>
-                <div class="config-field-readonly-value">当前值：${displayVal}</div>
+                <div class="config-field-label">🔒 ${safeDesc}</div>
+                <div class="config-field-readonly-value">当前值：${safeDisplayVal}</div>
                 <div class="config-field-readonly-note">${readonlyNote}</div>`;
             content.appendChild(row);
         });
     },
+
+
 
     /** 加载桌面端兼容配置 */
     async _loadDesktopConfig() {
@@ -956,19 +1187,22 @@ const App = {
         if (desktopInfo.is_desktop) {
             statusRow.style.background = 'rgba(59,130,246,0.08)';
             statusRow.style.border = '1px solid rgba(59,130,246,0.25)';
+            const safeMode = Utils.escapeHtml(desktopInfo.mode_setting || 'auto');
+            const safeEnv = Utils.escapeHtml(desktopInfo.detected_env || '—');
             statusRow.innerHTML = `
                 <strong>🖥️ 当前环境：桌面端</strong><br>
                 <span style="font-size:12px;color:var(--text-secondary);">
-                    检测模式：${desktopInfo.mode_setting || 'auto'}<br>
-                    检测依据：${desktopInfo.detected_env || '—'}
+                    检测模式：${safeMode}<br>
+                    检测依据：${safeEnv}
                 </span>`;
         } else {
             statusRow.style.background = 'rgba(34,197,94,0.08)';
             statusRow.style.border = '1px solid rgba(34,197,94,0.25)';
+            const safeMode = Utils.escapeHtml(desktopInfo.mode_setting || 'auto');
             statusRow.innerHTML = `
                 <strong>📦 当前环境：标准版</strong><br>
                 <span style="font-size:12px;color:var(--text-secondary);">
-                    检测模式：${desktopInfo.mode_setting || 'auto'}<br>
+                    检测模式：${safeMode}<br>
                     检测结果：未检测到桌面端特征
                 </span>`;
         }
@@ -1014,9 +1248,10 @@ const App = {
             detectedRow.className = 'config-field config-field-readonly';
             detectedRow.style.maxWidth = '500px';
             const detectedVal = cfg['desktop_detected_env'] || '（未检测）';
+            const safeDetectedVal = Utils.escapeHtml(detectedVal);
             detectedRow.innerHTML = `
                 <div class="config-field-label">🔒 自动检测结果</div>
-                <div class="config-field-readonly-value">当前值：${detectedVal}</div>
+                <div class="config-field-readonly-value">当前值：${safeDetectedVal}</div>
                 <div class="config-field-readonly-note">此项由插件自动检测并写入，无需手动修改</div>`;
             content.appendChild(detectedRow);
 
@@ -1043,17 +1278,17 @@ const App = {
                     saveBtn.disabled = false;
                     return;
                 }
-                statusEl.textContent = '已保存，正在重启...';
+                statusEl.textContent = '正在重启，完成后将自动刷新...';
+                statusEl.style.color = 'var(--accent)';
                 const reloadRes = await Api.reloadPlugin();
-                if (reloadRes && reloadRes.ok) {
-                    Utils.toast('桌面端模式已更新，插件正在重启...', 'success');
-                    statusEl.textContent = '重启中...';
-                    statusEl.style.color = 'var(--accent)';
-                } else {
-                    Utils.toast('配置已保存，但触发重启失败，请手动重启', 'warning');
-                    statusEl.textContent = '请手动重启';
+                if (reloadRes && !reloadRes.ok && !reloadRes.network_error) {
                     saveBtn.disabled = false;
+                    statusEl.textContent = '重启失败';
+                    statusEl.style.color = 'var(--danger)';
+                    Utils.toast(reloadRes.msg || '重启失败，请检查配置', 'error');
+                    return;
                 }
+                this._waitForServerAndRefresh();
             });
         }
     },
@@ -1194,22 +1429,23 @@ const App = {
             const saveBtn = document.getElementById('btn-save-webcfg');
             const statusEl = document.getElementById('webcfg-status');
             saveBtn.disabled = true;
-            saveBtn.textContent = '保存中...';
-            statusEl.textContent = '';
+            saveBtn.textContent = '重启中...';
+            statusEl.textContent = '正在重启，完成后将自动刷新...';
+            statusEl.style.color = 'var(--accent)';
 
             const res = await Api.reloadPlugin(pending);
-            saveBtn.disabled = false;
-            saveBtn.textContent = '保存并重启插件';
-
-            if (res.ok) {
-                Utils.toast('已保存，插件重启成功', 'success');
-                statusEl.textContent = '已保存';
-                Object.assign(cfg, pending);
-                Object.keys(pending).forEach(k => delete pending[k]);
-            } else {
-                Utils.toast(res.msg || '保存失败', 'error');
-                statusEl.textContent = '保存失败';
+            if (res && !res.ok && !res.network_error) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = '保存并重启插件';
+                statusEl.textContent = '重启失败';
+                statusEl.style.color = 'var(--danger)';
+                Utils.toast(res.msg || '重启失败', 'error');
+                return;
             }
+            // 无论成功或网络错误，等待服务器恢复后自动刷新
+            Object.assign(cfg, pending);
+            Object.keys(pending).forEach(k => delete pending[k]);
+            this._waitForServerAndRefresh();
         });
     },
 
@@ -1251,6 +1487,7 @@ const App = {
 
     _fileEditorDirty: false,
     _currentFilePath: null,
+    _currentFileMeta: null,
 
     /** 渲染文件浏览器 */
     async _renderFileBrowser() {
@@ -1263,6 +1500,9 @@ const App = {
         const listPanel = document.createElement('div');
         listPanel.className = 'file-list-panel';
         listPanel.innerHTML = `
+            <div class="file-refresh-notice">
+                ⚠️ 文件数据可能已被外部更新，请及时点击右侧"刷新"按钮获取最新文件列表和内容。本页面不提供自动刷新功能。
+            </div>
             <div class="file-list-header">
                 <h3 style="margin:0;font-size:14px;">数据文件</h3>
                 <button class="btn btn-sm" id="btn-refresh-files">刷新</button>
@@ -1288,7 +1528,7 @@ const App = {
         container.appendChild(editorPanel);
 
         // 事件绑定
-        document.getElementById('btn-refresh-files').addEventListener('click', () => this._loadFileList());
+        document.getElementById('btn-refresh-files').addEventListener('click', () => this._refreshFileBrowser());
         document.getElementById('btn-save-file').addEventListener('click', () => this._saveCurrentFile());
         document.getElementById('btn-delete-file').addEventListener('click', () => this._deleteCurrentFile());
 
@@ -1313,7 +1553,12 @@ const App = {
             return;
         }
 
-        // 按目录分组
+        const statusMeta = {
+            protected: { label: '受保护', className: 'file-status--protected' },
+            editable: { label: '可编辑', className: 'file-status--editable' },
+            delete_only: { label: '仅删除', className: 'file-status--readonly' },
+        };
+
         const groups = {};
         files.forEach(f => {
             const dir = f.directory || '根目录';
@@ -1342,12 +1587,18 @@ const App = {
                 item.className = 'file-item';
                 if (f.protected) item.classList.add('file-protected');
                 if (this._currentFilePath === f.path) item.classList.add('active');
-                const icon = f.protected ? '🔒' : f.is_json ? '{}' : '📄';
+                const icon = f.protected ? '🔒' : f.is_json ? '{}' : (f.is_text ? '📝' : '📄');
+                const meta = statusMeta[f.status] || statusMeta.delete_only;
                 item.innerHTML = `
                     <span class="file-icon">${icon}</span>
-                    <span class="file-name" title="${Utils.escapeHtml(f.path)}">${Utils.escapeHtml(f.name)}</span>
-                    <span class="file-size">${Utils.formatSize(f.size)}</span>`;
-                item.addEventListener('click', () => this._openFile(f.path, f.protected));
+                    <div class="file-item-main">
+                        <span class="file-name" title="${Utils.escapeHtml(f.path)}">${Utils.escapeHtml(f.name)}</span>
+                        <div class="file-item-subline">
+                            <span class="file-size">${Utils.formatSize(f.size)}</span>
+                            <span class="file-status ${meta.className}">${meta.label}</span>
+                        </div>
+                    </div>`;
+                item.addEventListener('click', () => this._openFile(f));
                 filesList.appendChild(item);
             });
             dirEl.appendChild(filesList);
@@ -1355,23 +1606,46 @@ const App = {
         });
     },
 
+    /** 刷新文件浏览器：刷新文件列表 + 重新读取当前打开的文件 */
+    async _refreshFileBrowser() {
+        // 如果有未保存的修改，先确认
+        if (this._fileEditorDirty) {
+            const ok = await Utils.confirm('当前文件有未保存的修改，刷新将丢失修改，是否继续？');
+            if (!ok) return;
+        }
+
+        await this._loadFileList();
+
+        // 如果有当前打开的文件，重新读取内容
+        if (this._currentFilePath && this._currentFileMeta) {
+            this._fileEditorDirty = false;
+            await this._openFile(this._currentFileMeta);
+        }
+
+        Utils.toast('文件列表已刷新', 'success', 2000);
+    },
+
     /** 打开文件 */
-    async _openFile(path, isProtected) {
+    async _openFile(fileMeta) {
+        const path = fileMeta?.path;
+        if (!path) return;
         if (this._fileEditorDirty) {
             const ok = await Utils.confirm('当前文件有未保存的修改，确定放弃？');
             if (!ok) return;
         }
 
         this._currentFilePath = path;
+        this._currentFileMeta = fileMeta;
         this._fileEditorDirty = false;
         const content = document.getElementById('file-editor-content');
         const title = document.getElementById('file-editor-title');
         const actions = document.getElementById('file-editor-actions');
         const sizeEl = document.getElementById('file-editor-size');
+        const saveBtn = document.getElementById('btn-save-file');
+        const deleteBtn = document.getElementById('btn-delete-file');
 
         title.textContent = path;
 
-        // 高亮当前文件
         document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
         document.querySelectorAll('.file-item').forEach(el => {
             if (el.querySelector('.file-name')?.title === path) {
@@ -1379,13 +1653,12 @@ const App = {
             }
         });
 
-        // 敏感文件：不请求内容，直接显示提示
-        if (isProtected) {
+        if (fileMeta.protected) {
             actions.classList.add('hidden');
             content.innerHTML = `<div class="chart-empty" style="margin:auto;text-align:center;line-height:1.8;">
                 <div style="font-size:32px;margin-bottom:8px;">🔒</div>
-                <div style="font-weight:600;">此文件包含敏感凭据信息</div>
-                <div style="color:var(--text-secondary);font-size:13px;">出于安全考虑，不支持在线查看、编辑或删除。<br>如需查看，请前往服务器本地对应目录手动打开。</div>
+                <div style="font-weight:600;">此文件受保护</div>
+                <div style="color:var(--text-secondary);font-size:13px;">出于安全考虑，不支持在线查看、编辑或删除。<br>如需处理，请前往服务器本地对应目录手动操作。</div>
             </div>`;
             return;
         }
@@ -1399,29 +1672,34 @@ const App = {
             return;
         }
 
+        this._currentFileMeta = { ...fileMeta, ...res };
         actions.classList.remove('hidden');
         actions.style.display = 'flex';
         sizeEl.textContent = Utils.formatSize(res.content.length);
-
-        // 判断是否可编辑（JSON 文件）
-        const isEditable = res.is_json;
-        const saveBtn = document.getElementById('btn-save-file');
-        saveBtn.classList.toggle('hidden', !isEditable);
+        saveBtn.classList.toggle('hidden', !res.can_edit);
+        deleteBtn.classList.toggle('hidden', !res.can_delete);
 
         content.innerHTML = '';
         const textarea = document.createElement('textarea');
         textarea.className = 'file-textarea';
         textarea.spellcheck = false;
-        textarea.readOnly = !isEditable;
+        textarea.readOnly = !res.can_edit;
 
-        // JSON 文件格式化显示
         if (res.is_json && res.parsed !== null) {
             textarea.value = JSON.stringify(res.parsed, null, 2);
         } else {
             textarea.value = res.content;
         }
 
+        if (!res.can_edit) {
+            const readonlyHint = document.createElement('div');
+            readonlyHint.className = 'file-editor-hint';
+            readonlyHint.textContent = '该文件可查看，但当前不支持在线编辑。';
+            content.appendChild(readonlyHint);
+        }
+
         textarea.addEventListener('input', () => {
+            if (!res.can_edit) return;
             this._fileEditorDirty = true;
             title.textContent = path + ' (已修改)';
         });
@@ -1430,7 +1708,7 @@ const App = {
 
     /** 保存当前文件 */
     async _saveCurrentFile() {
-        if (!this._currentFilePath) return;
+        if (!this._currentFilePath || !this._currentFileMeta?.can_edit) return;
         const textarea = document.querySelector('.file-textarea');
         if (!textarea) return;
 
@@ -1445,15 +1723,25 @@ const App = {
         if (res.ok) {
             Utils.toast(res.msg || '保存成功', 'success');
             this._fileEditorDirty = false;
+            this._currentFileMeta = { ...this._currentFileMeta, ...res };
             document.getElementById('file-editor-title').textContent = this._currentFilePath;
         } else {
+            if (res.msg && (res.msg.includes('不存在') || res.msg.includes('已删除'))) {
+                this._currentFileMeta = null;
+                this._fileEditorDirty = false;
+                document.getElementById('file-editor-title').textContent = '选择文件查看内容';
+                document.getElementById('file-editor-content').innerHTML =
+                    '<div class="chart-empty" style="margin:auto;">文件已不存在，请刷新列表后重新打开</div>';
+                document.getElementById('file-editor-actions').classList.add('hidden');
+                await this._loadFileList();
+            }
             Utils.toast(res.msg || '保存失败', 'error');
         }
     },
 
     /** 删除当前文件 */
     async _deleteCurrentFile() {
-        if (!this._currentFilePath) return;
+        if (!this._currentFilePath || !this._currentFileMeta?.can_delete) return;
         const ok = await Utils.confirm(`确认删除文件 "${this._currentFilePath}"？此操作不可恢复。`);
         if (!ok) return;
 
@@ -1461,6 +1749,7 @@ const App = {
         if (res.ok) {
             Utils.toast(res.msg || '已删除', 'success');
             this._currentFilePath = null;
+            this._currentFileMeta = null;
             this._fileEditorDirty = false;
             document.getElementById('file-editor-title').textContent = '选择文件查看内容';
             document.getElementById('file-editor-content').innerHTML =
@@ -1468,6 +1757,16 @@ const App = {
             document.getElementById('file-editor-actions').classList.add('hidden');
             await this._loadFileList();
         } else {
+            if (res.msg && (res.msg.includes('不存在') || res.msg.includes('已删除'))) {
+                this._currentFilePath = null;
+                this._currentFileMeta = null;
+                this._fileEditorDirty = false;
+                document.getElementById('file-editor-title').textContent = '选择文件查看内容';
+                document.getElementById('file-editor-content').innerHTML =
+                    '<div class="chart-empty" style="margin:auto;">文件已不存在，请刷新列表后重试</div>';
+                document.getElementById('file-editor-actions').classList.add('hidden');
+                await this._loadFileList();
+            }
             Utils.toast(res.msg || '删除失败', 'error');
         }
     },
@@ -1489,30 +1788,263 @@ const App = {
         }
     },
 
+    /** 等待服务器重启完成后刷新当前页面（回到当前所在视图）。
+     *  每 intervalMs 毫秒探测一次服务器是否恢复，恢复后自动 reload。
+     *  探测使用 /api/auth/status；自动刷新标记仅用于前端区分请求来源，不作为后端限速豁免。
+     *  最长等待 maxWaitMs 毫秒，超时后提示手动刷新。 */
+    async _waitForServerAndRefresh(maxWaitMs = 35000, intervalMs = 3000) {
+        const startedAt = Date.now();
+        // 记住当前所在视图，刷新后恢复（而不是回到默认的流程图页）
+        try { sessionStorage.setItem('gcp_restore_view', this._currentView); } catch (_e) {}
+        // 先等一小段时间让旧服务器完全停止
+        await new Promise(r => setTimeout(r, 1500));
+
+        const poll = async () => {
+            if (Date.now() - startedAt >= maxWaitMs) {
+                try { sessionStorage.removeItem('gcp_restore_view'); } catch (_e) {}
+                Utils.toast('插件重启耗时较长，请手动刷新页面（F5）确认最新配置已生效', 'warning', 8000);
+                return;
+            }
+            try {
+                const resp = await fetch('/api/auth/status', {
+                    method: 'GET',
+                    cache: 'no-store',
+                    credentials: 'same-origin',
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'X-GCP-Auto-Refresh': '1'
+                    },
+                });
+                if (resp.ok) {
+                    // 服务器已恢复，保留 restore_view 标记供初始化时使用，然后刷新
+                    Utils.toast('插件已重启，正在刷新页面...', 'success', 2000);
+                    setTimeout(() => { window.location.reload(); }, 800);
+                    return;
+                }
+            } catch (_e) {
+                // 网络错误 = 服务器尚未恢复，继续轮询
+            }
+            setTimeout(poll, intervalMs);
+        };
+        poll();
+    },
+
+    /** 轮询重启/重载状态，在右上角弹出结果提示。 */
+    async _pollRestartStatus(operation, maxWaitMs = 30000, intervalMs = 2500) {
+        const startedAt = Date.now();
+        const label = operation === 'restart' ? 'AstrBot 重启' : '插件重载';
+
+        return new Promise((resolve) => {
+            const poll = async () => {
+                if (Date.now() - startedAt >= maxWaitMs) {
+                    Utils.toast(`${label}操作超时，请检查服务器日志`, 'warning', 5000);
+                    resolve('timeout');
+                    return;
+                }
+                try {
+                    const res = await Api.restartStatus({ autoRefresh: true });
+                    if (res && res.ok && res.status) {
+                        if (res.status === 'success') {
+                            Utils.toast(`${label}成功`, 'success', 4000);
+                            resolve('success');
+                            return;
+                        }
+                        if (res.status === 'failed') {
+                            const errMsg = res.error || '未知错误';
+                            Utils.toast(`${label}失败: ${errMsg}`, 'error', 6000);
+                            resolve('failed');
+                            return;
+                        }
+                    }
+                } catch (_e) {
+                    // 连接断开在重启过程中是正常现象，继续轮询
+                }
+                setTimeout(poll, intervalMs);
+            };
+            setTimeout(poll, 1500);
+        });
+    },
+
     _ensureConfigBadge() {
         if (document.getElementById('config-file-badge')) return;
         const badge = document.createElement('div');
         badge.id = 'config-file-badge';
         badge.className = 'config-file-badge hidden';
         badge.innerHTML = `
-            <span class="config-file-badge__label">配置文件</span>
-            <span class="config-file-badge__value"></span>`;
+            <div class="config-file-badge__row">
+                <span class="config-file-badge__label">配置文件</span>
+                <span class="config-file-badge__value"></span>
+            </div>
+            <button class="config-file-badge__download" title="点击下载配置文件" aria-label="下载配置文件">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+            </button>`;
         document.body.appendChild(badge);
+
+        // 绑定下载事件
+        const downloadBtn = badge.querySelector('.config-file-badge__download');
+        if (downloadBtn) {
+            downloadBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._downloadCurrentConfig();
+            });
+        }
     },
 
     _updateConfigBadgeVisibility() {
         const badge = document.getElementById('config-file-badge');
         if (!badge) return;
         const visibleViews = new Set(['tech-tree', 'settings']);
-        const shouldShow = visibleViews.has(this._currentView) && !!this._configFileName;
+        const shouldShow = visibleViews.has(this._currentView) && !!this._configFileName && !this._configPanelOpen;
         badge.classList.toggle('hidden', !shouldShow);
         const valueEl = badge.querySelector('.config-file-badge__value');
         if (valueEl) valueEl.textContent = this._configFileName || '—';
+        // 隐藏状态下禁用下载按钮
+        const downloadBtn = badge.querySelector('.config-file-badge__download');
+        if (downloadBtn) {
+            downloadBtn.disabled = !shouldShow;
+        }
+    },
+
+    /** 下载当前配置文件（安全加固：不暴露服务器路径）
+     *
+     *  一次 fetch 完成预检 + 获取内容，由前端构建 Blob 触发下载。
+     *  服务端返回纯 JSON（不含 Content-Disposition），
+     *  避免 Content-Disposition: attachment 在 fetch 阶段干扰浏览器。
+     */
+    async _downloadCurrentConfig() {
+        const downloadBtn = document.querySelector('.config-file-badge__download');
+        const resetBtn = () => {
+            if (downloadBtn) {
+                downloadBtn.disabled = false;
+                downloadBtn.classList.remove('config-file-badge__download--loading');
+            }
+        };
+
+        if (downloadBtn) {
+            downloadBtn.disabled = true;
+            downloadBtn.classList.add('config-file-badge__download--loading');
+        }
+
+        let resp;
+        try {
+            resp = await fetch('/api/config/download?_=' + Date.now(), {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+            });
+        } catch (e) {
+            resetBtn();
+            Utils.alert(
+                '下载失败\n\n' +
+                '网络错误：无法连接到服务器（' + (e.message || '未知错误') + '）\n\n' +
+                '可能原因：\n' +
+                '- 网络连接异常，请检查服务器是否在线、端口是否可达\n' +
+                '- 服务器暂时不可用或正在重启中\n' +
+                '- 若使用了反向代理，请确认未拦截 /api/config/download 路径\n' +
+                '- 浏览器插件或防火墙拦截了请求\n' +
+                '- 若使用 Docker 部署，请确认容器端口映射正确'
+            );
+            return;
+        }
+
+        if (!resp.ok) {
+            let errMsg = 'HTTP ' + resp.status;
+            try { const body = await resp.json(); errMsg = body.msg || errMsg; } catch (_) {}
+            if (resp.status === 401) {
+                Api.clearToken();
+                Api.emitAuthEvent('unauthorized', { msg: errMsg });
+            }
+            resetBtn();
+            // 根据状态码给出针对性排查建议
+            let hint = '';
+            if (resp.status === 401) {
+                hint = '会话已过期或密码已修改，请刷新页面重新登录';
+            } else if (resp.status === 403) {
+                hint = '服务端拒绝了下载请求（文件名校验不通过或权限不足），请检查 AstrBot 日志';
+            } else if (resp.status === 404) {
+                hint = '配置文件尚未生成，请确认插件已完全启动并完成首次配置加载';
+            } else if (resp.status >= 500) {
+                hint = '服务端内部错误，请查看 AstrBot 日志排查具体异常';
+            } else {
+                hint = '请查看 Web 面板访问日志获取详细错误信息';
+            }
+            Utils.alert(
+                '下载失败\n\n' +
+                errMsg + '\n\n' +
+                '错误说明：' + hint + '\n\n' +
+                '排查步骤：\n' +
+                '1. 检查 AstrBot 控制台日志中是否有相关错误输出\n' +
+                '2. 在 Web 面板「访问日志」页面查看下载请求的状态和附注\n' +
+                '3. 确认当前登录会话有效（可尝试刷新页面重新登录）\n' +
+                '4. 若使用反向代理，确认 /api/config/download 路径已被正确转发\n' +
+                '5. 若问题持续，请在 GitHub Issues 反馈并附上相关日志'
+            );
+            return;
+        }
+
+        // 解析服务端返回的 JSON 中的文件内容，由前端构建 Blob 下载
+        let data;
+        try {
+            data = await resp.json();
+        } catch (e) {
+            resetBtn();
+            Utils.alert(
+                '下载失败\n\n' +
+                '服务端返回了无效的数据格式，JSON 解析失败\n\n' +
+                '可能原因：\n' +
+                '- 服务端响应被中间设备（代理/防火墙）篡改\n' +
+                '- 配置文件包含非标准字符导致编码异常\n' +
+                '- 服务端内部异常导致返回了非 JSON 内容\n\n' +
+                '请检查 AstrBot 日志和 Web 面板访问日志获取详细错误信息'
+            );
+            return;
+        }
+
+        if (!data || !data.ok || !data.content) {
+            resetBtn();
+            Utils.alert(
+                '下载失败\n\n' +
+                (data && data.msg ? data.msg : '服务端返回了不完整的响应数据') + '\n\n' +
+                '可能原因：\n' +
+                '- 配置文件内容为空（刚初始化尚未写入配置）\n' +
+                '- 服务端读取配置文件时发生 I/O 异常\n' +
+                '- 配置文件被外部进程锁定无法读取\n\n' +
+                '请检查 AstrBot 日志和 Web 面板访问日志获取详细错误信息'
+            );
+            return;
+        }
+
+        // 构建 Blob 并触发浏览器下载
+        const blob = new Blob([data.content], { type: 'application/json; charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = data.filename || this._configFileName || 'config.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        resetBtn();
+    },
+
+    setConfigPanelOpen(isOpen) {
+        this._configPanelOpen = !!isOpen;
+        document.body.classList.toggle('config-panel-open', this._configPanelOpen);
+        this._updateConfigBadgeVisibility();
     },
 
     _normalizeHeartbeatSeconds(value, fallback, minValue) {
         const num = Number(value);
-        if (!Number.isFinite(num) || num < minValue) return fallback;
+        if (!Number.isFinite(num) || num < minValue) return fallback * 1000;
         return Math.round(num) * 1000;
     },
 
@@ -1555,35 +2087,69 @@ const App = {
             const val = key in cfg ? cfg[key] : (s.default !== undefined ? s.default : '—');
             const displayVal = val === '' ? '（空）' : String(val);
             const desc = (s.description || key).replace(/^[^\s]+\s/, '');
+            const safeDisplayVal = Utils.escapeHtml(displayVal);
+            const safeDesc = Utils.escapeHtml(desc);
             rows.push(`
                 <div class="config-field config-field-readonly" style="max-width:500px;">
-                    <div class="config-field-label">🔒 ${desc}</div>
-                    <div class="config-field-readonly-value">当前值：${displayVal}</div>
+                    <div class="config-field-label">🔒 ${safeDesc}</div>
+                    <div class="config-field-readonly-value">当前值：${safeDisplayVal}</div>
                     <div class="config-field-readonly-note">⚠️ 心跳探测频率属于安全敏感配置，请在 AstrBot 平台插件配置页修改</div>
                 </div>`);
         });
         return rows.join('');
     },
 
-    async _loadHeartbeatStatus() {
+    async _loadHeartbeatStatus(isAutoRefresh = false) {
         const loading = document.getElementById('heartbeat-status-loading');
         const content = document.getElementById('heartbeat-status-content');
         if (!loading || !content) return;
+        if (this._heartbeatStatusLoading) return;
+        this._heartbeatStatusLoading = true;
 
-        const verify = await Api.verify();
-        if (!verify.ok) {
-            loading.textContent = '加载失败';
-            return;
+        try {
+            const isFirstLoad = content.classList.contains('hidden');
+
+            const verify = await Api.verify(isAutoRefresh ? { autoRefresh: true } : undefined);
+            if (!verify.ok) {
+                if (isFirstLoad) loading.textContent = '加载失败';
+                return;
+            }
+
+            const cfgRes = await Api.getConfig(isAutoRefresh ? { autoRefresh: true } : undefined);
+            const cfg = cfgRes && cfgRes.ok ? (cfgRes.config || {}) : {};
+            const heartbeatCfg = this._buildHeartbeatConfig(cfg);
+
+            // verify 本身就是一次会话有效性确认，成功后同步更新心跳成功时间
+            if (verify.ok && this._authMonitor) {
+                this._authMonitor.lastHeartbeatSuccessAt = Date.now();
+                this._authMonitor.lastHeartbeatStatus = 'ok';
+            }
+
+            if (isFirstLoad) loading.classList.add('hidden');
+
+            // 首次渲染：构建完整 DOM
+            if (isFirstLoad) {
+                content.classList.remove('hidden');
+                content.style.display = 'flex';
+                this._buildHeartbeatDOM(content, verify, heartbeatCfg);
+                // 启动自动刷新
+                this._startHeartbeatAutoRefresh(heartbeatCfg);
+                // 绑定控件事件
+                this._bindHeartbeatControls(heartbeatCfg);
+            } else {
+                // 增量更新：仅修改变化的 DOM 值
+                this._updateHeartbeatDOM(content, verify, heartbeatCfg);
+            }
+
+            // 保存上一次数据用于下次对比
+            this._heartbeatPrevData = { verify, heartbeatCfg };
+        } finally {
+            this._heartbeatStatusLoading = false;
         }
+    },
 
-        const cfgRes = await Api.getConfig();
-        const cfg = cfgRes && cfgRes.ok ? (cfgRes.config || {}) : {};
-        const heartbeatCfg = this._buildHeartbeatConfig(cfg);
-
-        loading.classList.add('hidden');
-        content.classList.remove('hidden');
-        content.style.display = 'flex';
-
+    /** 构建心跳状态 DOM（首次渲染） */
+    _buildHeartbeatDOM(content, verify, heartbeatCfg) {
         const statusBadgeMap = {
             idle: '<span class="heartbeat-status-badge heartbeat-status-badge--idle">idle（尚未开始）</span>',
             ok: '<span class="heartbeat-status-badge heartbeat-status-badge--ok">ok（正常）</span>',
@@ -1593,24 +2159,124 @@ const App = {
         };
 
         const rows = [
-            ['当前会话 ID', verify.session_id || '—'],
-            ['当前设备 ID', verify.device_id || '—'],
-            ['前台心跳间隔', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`],
-            ['后台心跳间隔', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`],
-            ['失败重试基准', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`],
-            ['失败重试上限', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`],
-            ['当前标签页角色', this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>'],
-            ['当前心跳状态', statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle],
-            ['最近一次心跳成功', this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功'],
-            ['缓冲重试期', (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>'],
-            ['会话剩余时间', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—'],
+            ['当前会话 ID', Utils.escapeHtml(verify.session_id || '—'), 'hb-sid'],
+            ['当前设备 ID', Utils.escapeHtml(verify.device_id || '—'), 'hb-did'],
+            ['前台心跳间隔', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`, 'hb-vis-int'],
+            ['后台心跳间隔', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`, 'hb-hid-int'],
+            ['失败重试基准', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`, 'hb-retry-base'],
+            ['失败重试上限', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`, 'hb-retry-max'],
+            ['当前标签页角色', this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>', 'hb-role'],
+            ['当前心跳状态', statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle, 'hb-status'],
+            ['最近一次心跳成功', Utils.escapeHtml(this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功'), 'hb-last-ok'],
+            ['缓冲重试期', (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>', 'hb-retry'],
+            ['会话剩余时间', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—', 'hb-ttl'],
         ];
 
-        content.innerHTML = rows.map(([label, value]) => `
-            <div class="config-field config-field-readonly" style="max-width:500px;">
+        content.innerHTML = rows.map(([label, value, id]) => `
+            <div class="config-field config-field-readonly" style="max-width:500px;" id="${id}">
                 <div class="config-field-label">${label}</div>
                 <div class="config-field-readonly-value heartbeat-status-value">${value}</div>
             </div>`).join('');
+    },
+
+    /** 增量更新心跳状态 DOM */
+    _updateHeartbeatDOM(content, verify, heartbeatCfg) {
+        const statusBadgeMap = {
+            idle: '<span class="heartbeat-status-badge heartbeat-status-badge--idle">idle（尚未开始）</span>',
+            ok: '<span class="heartbeat-status-badge heartbeat-status-badge--ok">ok（正常）</span>',
+            retrying: '<span class="heartbeat-status-badge heartbeat-status-badge--retrying">retrying（重试中）</span>',
+            invalid: '<span class="heartbeat-status-badge heartbeat-status-badge--invalid">invalid（会话失效）</span>',
+            stopped: '<span class="heartbeat-status-badge heartbeat-status-badge--stopped">stopped（已停止）</span>',
+        };
+
+        const leaderLabel = this._authMonitor?.leader ? '<span class="heartbeat-status-badge heartbeat-status-badge--ok">Leader（负责发心跳）</span>' : '<span class="heartbeat-status-badge heartbeat-status-badge--idle">Follower（仅监听广播）</span>';
+        const statusLabel = statusBadgeMap[this._authMonitor?.lastHeartbeatStatus || 'idle'] || statusBadgeMap.idle;
+        const lastOk = this._authMonitor?.lastHeartbeatSuccessAt ? new Date(this._authMonitor.lastHeartbeatSuccessAt).toLocaleString() : '尚未成功';
+        const retryLabel = (this._authMonitor?.consecutiveNetworkFailures || 0) > 0 ? `<span class="heartbeat-status-badge heartbeat-status-badge--retrying">是（连续失败 ${this._authMonitor.consecutiveNetworkFailures} 次）</span>` : '<span class="heartbeat-status-badge heartbeat-status-badge--ok">否</span>';
+
+        const updates = [
+            ['hb-sid', Utils.escapeHtml(verify.session_id || '—')],
+            ['hb-did', Utils.escapeHtml(verify.device_id || '—')],
+            ['hb-vis-int', `${Math.round(heartbeatCfg.visibleIntervalMs / 1000)} 秒`],
+            ['hb-hid-int', `${Math.round(heartbeatCfg.hiddenIntervalMs / 1000)} 秒`],
+            ['hb-retry-base', `${Math.round(heartbeatCfg.retryBaseIntervalMs / 1000)} 秒`],
+            ['hb-retry-max', `${Math.round(heartbeatCfg.retryMaxIntervalMs / 1000)} 秒`],
+            ['hb-role', leaderLabel],
+            ['hb-status', statusLabel],
+            ['hb-last-ok', Utils.escapeHtml(lastOk)],
+            ['hb-retry', retryLabel],
+            ['hb-ttl', verify.ttl_seconds != null ? `${verify.ttl_seconds} 秒` : '—'],
+        ];
+
+        updates.forEach(([id, val]) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const valEl = el.querySelector('.heartbeat-status-value');
+            if (!valEl) return;
+            if (valEl.innerHTML !== val) {
+                valEl.innerHTML = val;
+                Utils.highlightChange(el);
+            }
+        });
+    },
+
+    /** 启动心跳状态自动刷新定时器（仅首次创建，之后只设标志位）。
+     *  定时器一旦创建永不停止——心跳计时必须与配置保持同步，
+     *  开关仅控制是否更新 DOM，不清除定时器以免节奏偏移。 */
+    _startHeartbeatAutoRefresh(heartbeatCfg) {
+        this._heartbeatAutoRefresh = true;
+        if (this._heartbeatRefreshTimer) return;
+        const intervalMs = Math.max(5000, Math.round(heartbeatCfg.visibleIntervalMs / 2));
+        const intervalSec = Math.round(intervalMs / 1000);
+        const labelSpan = document.querySelector('#heartbeat-auto-refresh + span');
+        if (labelSpan) labelSpan.textContent = `自动刷新（${intervalSec}秒）`;
+        this._heartbeatRefreshTimer = setInterval(() => {
+            // 每次循环确保标签显示最新间隔（防止 DOM 重建后丢失）
+            const span = document.querySelector('#heartbeat-auto-refresh + span');
+            if (span) span.textContent = `自动刷新（${intervalSec}秒）`;
+            if (document.visibilityState !== 'visible') return;
+            if (this._currentView === 'settings' && this._heartbeatAutoRefresh) {
+                this._loadHeartbeatStatus(true);
+            }
+        }, intervalMs);
+    },
+
+    /** 关闭心跳状态自动刷新（仅设标志位，定时器不停） */
+    _stopHeartbeatAutoRefresh() {
+        this._heartbeatAutoRefresh = false;
+    },
+
+    /** 绑定心跳状态控件事件 */
+    _bindHeartbeatControls(heartbeatCfg) {
+        const manualBtn = document.getElementById('btn-refresh-heartbeat');
+        const autoToggle = document.getElementById('heartbeat-auto-refresh');
+        const dot = document.getElementById('heartbeat-refresh-dot');
+
+        if (manualBtn && !manualBtn._hbBound) {
+            manualBtn._hbBound = true;
+            manualBtn.addEventListener('click', async () => {
+                manualBtn.disabled = true;
+                manualBtn.textContent = '刷新中...';
+                try {
+                    await this._loadHeartbeatStatus();
+                    Utils.toast('心跳状态已刷新', 'success', 2000);
+                } catch (e) {
+                    Utils.toast('刷新失败', 'error', 3000);
+                } finally {
+                    manualBtn.disabled = false;
+                    manualBtn.textContent = '🔄 刷新';
+                }
+            });
+        }
+
+        if (autoToggle && !autoToggle._hbBound) {
+            autoToggle._hbBound = true;
+            autoToggle.addEventListener('change', (e) => {
+                // 定时器永不停止，仅切换标志位控制 DOM 是否更新
+                this._heartbeatAutoRefresh = e.target.checked;
+                if (dot) dot.className = 'dot' + (this._heartbeatAutoRefresh ? ' active' : '');
+            });
+        }
     },
 
     _redirectToLogin(reason, message, options = {}) {
@@ -1756,6 +2422,12 @@ const App = {
                 if (payload.type === 'logout') {
                     App._redirectToLogin('logout', '您已退出登录', { showAlert: false });
                 }
+                // Leader 心跳成功后同步状态到 Follower 标签页
+                if (payload.type === 'session-ok') {
+                    this.lastHeartbeatSuccessAt = Date.now();
+                    this.lastHeartbeatStatus = 'ok';
+                    this.consecutiveNetworkFailures = 0;
+                }
             },
             markAuthenticated() {
                 this.authenticated = true;
@@ -1849,14 +2521,10 @@ document.addEventListener('DOMContentLoaded', () => App.start());
 
         clearTimeout(pendingScroll);
         pendingScroll = setTimeout(() => {
-            // visualViewport.height 是键盘弹出后的可视高度
             const vpH = window.visualViewport.height;
             const rect = active.getBoundingClientRect();
-            // 如果元素在可视区域下半部（被键盘遮挡），强制滚动到顶部区域
-            if (rect.top > vpH * 0.35) {
-                // 需要滚动的距离：把元素移到可视区域 10% 位置
-                const scrollDelta = rect.top - vpH * 0.1;
-                window.scrollBy({ top: scrollDelta, behavior: 'smooth' });
+            if (rect.bottom > vpH * 0.9 || rect.top > vpH * 0.35) {
+                active.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
             }
         }, 200);
     });

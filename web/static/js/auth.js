@@ -34,7 +34,7 @@ const Auth = {
         if (!res.password_changed) {
             App.showPage('password-change');
         } else {
-            window.location.href = '/panel';
+            window.location.href = '/panel?from=login';
         }
     },
 
@@ -44,7 +44,7 @@ const Auth = {
         const confirmPw = document.getElementById('confirm-password').value.trim();
 
         if (!oldPw || !newPw) return this._showError('pw-change-error', '请填写所有字段');
-        if (newPw.length < 6) return this._showError('pw-change-error', '新密码至少6位');
+        if (newPw.length < 8) return this._showError('pw-change-error', '新密码至少8位');
         if (newPw !== confirmPw) return this._showError('pw-change-error', '两次密码不一致');
 
         const res = await Api.changePassword(oldPw, newPw);

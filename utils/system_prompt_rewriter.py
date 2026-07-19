@@ -21,6 +21,9 @@ class SystemPromptRewriteResult:
     preserved_order: bool = False
     persona_detected: bool = False
     ltm_detected: bool = False
+    prefix_detected: bool = False
+    suffix_detected: bool = False
+    duplicate_suspected: bool = False
 
 
 class SystemPromptRewriter:
@@ -35,8 +38,12 @@ class SystemPromptRewriter:
     _KNOWN_LTM_PATTERNS = [
         re.compile(
             (
+                # 精确匹配平台 LTM Normal 模式注入到 system_prompt 的格式
+                # 每条记录: [昵称/HH:MM:SS]: 内容（可多行），记录间以 \n---\n 分隔
+                # 使用 (?!---\n) 负向前瞻防止内容跨越多条记录，同时支持单条消息内换行
                 r"You are now in a chatroom\. The chat history is as follows:\s*\n?"
-                r"[^\n]*(?:\n---\n[^\n]*)*"
+                r"(?:\[[^\]]+/\d{2}:\d{2}:\d{2}\]:.*(?:\n(?!---\n).*)*)"
+                r"(?:\n---\n\[[^\]]+/\d{2}:\d{2}:\d{2}\]:.*(?:\n(?!---\n).*)*)*"
             ),
             re.IGNORECASE,
         ),
@@ -54,6 +61,29 @@ class SystemPromptRewriter:
         r"(?:^|\n)# Persona Instructions\s*\n+",
         re.IGNORECASE,
     )
+
+    @classmethod
+    def _compress_duplicate_blocks(cls, text: str) -> tuple[str, bool]:
+        normalized = cls._normalize_light(text)
+        if not normalized:
+            return "", False
+        parts = [part.strip() for part in normalized.split("\n\n") if part.strip()]
+        deduped_parts: list[str] = []
+        seen = set()
+        duplicate_suspected = False
+        for part in parts:
+            fingerprint = re.sub(r"\s+", " ", part).strip().lower()
+            if fingerprint in seen:
+                duplicate_suspected = True
+                continue
+            seen.add(fingerprint)
+            deduped_parts.append(part)
+        return "\n\n".join(deduped_parts).strip(), duplicate_suspected
+
+    @classmethod
+    def _join_parts_preserving_order(cls, parts: list[str]) -> tuple[str, bool]:
+        combined = "\n".join(part for part in parts if part).strip()
+        return cls._compress_duplicate_blocks(combined)
 
     @classmethod
     def _build_loose_persona_pattern(
@@ -130,19 +160,20 @@ class SystemPromptRewriter:
     ) -> SystemPromptRewriteResult:
         prefix_cleaned, prefix_ltm = cls._strip_known_ltm(prefix)
         suffix_cleaned, suffix_ltm = cls._strip_known_ltm(suffix)
-        additions_parts = [part for part in [prefix_cleaned, suffix_cleaned] if part]
-        additions = "\n".join(additions_parts).strip()
-        merged_parts = [part for part in [plugin_system_prompt, additions] if part]
-        merged = "\n".join(merged_parts).strip()
-        merged = re.sub(r"\n{3,}", "\n\n", merged).strip()
+        merged, duplicate_suspected = cls._join_parts_preserving_order(
+            [prefix_cleaned, plugin_system_prompt, suffix_cleaned]
+        )
         return SystemPromptRewriteResult(
             merged_system_prompt=merged,
             strategy="exact-match",
             confidence="high",
             warnings=[],
-            preserved_order=not bool(prefix_cleaned),
+            preserved_order=True,
             persona_detected=True,
             ltm_detected=prefix_ltm or suffix_ltm,
+            prefix_detected=bool(prefix_cleaned),
+            suffix_detected=bool(suffix_cleaned),
+            duplicate_suspected=duplicate_suspected,
         )
 
     @classmethod
@@ -155,11 +186,9 @@ class SystemPromptRewriter:
     ) -> SystemPromptRewriteResult:
         prefix_cleaned, prefix_ltm = cls._strip_known_ltm(prefix)
         suffix_cleaned, suffix_ltm = cls._strip_known_ltm(suffix)
-        additions_parts = [part for part in [prefix_cleaned, suffix_cleaned] if part]
-        additions = "\n".join(additions_parts).strip()
-        merged_parts = [part for part in [plugin_system_prompt, additions] if part]
-        merged = "\n".join(merged_parts).strip()
-        merged = re.sub(r"\n{3,}", "\n\n", merged).strip()
+        merged, duplicate_suspected = cls._join_parts_preserving_order(
+            [prefix_cleaned, plugin_system_prompt, suffix_cleaned]
+        )
         warnings: list[str] = []
         if matched_persona and matched_persona != plugin_system_prompt:
             warnings.append("人格提示通过包装块归一化识别，未使用精确字符串命中")
@@ -168,9 +197,12 @@ class SystemPromptRewriter:
             strategy="wrapped-persona-match",
             confidence="medium",
             warnings=warnings,
-            preserved_order=not bool(prefix_cleaned),
+            preserved_order=True,
             persona_detected=True,
             ltm_detected=prefix_ltm or suffix_ltm,
+            prefix_detected=bool(prefix_cleaned),
+            suffix_detected=bool(suffix_cleaned),
+            duplicate_suspected=duplicate_suspected,
         )
 
     @staticmethod
@@ -179,17 +211,25 @@ class SystemPromptRewriter:
         current_system_prompt: str,
         ltm_detected: bool,
     ) -> SystemPromptRewriteResult:
+        merged, duplicate_suspected = SystemPromptRewriter._compress_duplicate_blocks(
+            stripped_current or current_system_prompt
+        )
         warnings = [
             "未命中精确 persona 字符串，已保留当前 system_prompt 并仅移除已知平台 LTM 片段"
         ]
+        if duplicate_suspected:
+            warnings.append("检测到疑似重复的 system_prompt 片段，已做轻量压缩")
         return SystemPromptRewriteResult(
-            merged_system_prompt=stripped_current or current_system_prompt,
+            merged_system_prompt=merged or stripped_current or current_system_prompt,
             strategy="conservative-keep-current",
             confidence="medium" if ltm_detected else "low",
             warnings=warnings,
             preserved_order=False,
             persona_detected=True,
             ltm_detected=ltm_detected,
+            prefix_detected=True,
+            suffix_detected=True,
+            duplicate_suspected=duplicate_suspected,
         )
 
     @staticmethod
@@ -198,14 +238,16 @@ class SystemPromptRewriter:
         stripped_current: str,
         ltm_detected: bool,
     ) -> SystemPromptRewriteResult:
-        merged_parts = [part for part in [plugin_system_prompt, stripped_current] if part]
-        merged = "\n".join(merged_parts).strip()
-        merged = re.sub(r"\n{3,}", "\n\n", merged).strip()
+        merged, duplicate_suspected = SystemPromptRewriter._join_parts_preserving_order(
+            [plugin_system_prompt, stripped_current]
+        )
         warnings = ["未能高置信度识别 persona 边界，已进入保守兼容模式"]
         if not ltm_detected:
             warnings.append(
                 "未识别到已知平台 LTM 片段，可能保留了未来版本 AstrBot 的重复提示词"
             )
+        if duplicate_suspected:
+            warnings.append("检测到疑似重复的 system_prompt 片段，已做轻量压缩")
         return SystemPromptRewriteResult(
             merged_system_prompt=merged,
             strategy="conservative-prepend-plugin",
@@ -214,35 +256,52 @@ class SystemPromptRewriter:
             preserved_order=False,
             persona_detected=False,
             ltm_detected=ltm_detected,
+            prefix_detected=bool(stripped_current),
+            suffix_detected=False,
+            duplicate_suspected=duplicate_suspected,
         )
 
     @staticmethod
     def _build_no_plugin_result(
         current_system_prompt: str,
     ) -> SystemPromptRewriteResult:
-        merged = SystemPromptRewriter._normalize_light(current_system_prompt)
+        merged, duplicate_suspected = SystemPromptRewriter._compress_duplicate_blocks(
+            current_system_prompt
+        )
+        warnings = ["插件未提供 system_prompt，直接保留当前 system_prompt"]
+        if duplicate_suspected:
+            warnings.append("检测到疑似重复的 system_prompt 片段，已做轻量压缩")
         return SystemPromptRewriteResult(
             merged_system_prompt=merged,
             strategy="no-plugin-system-prompt",
             confidence="medium",
-            warnings=["插件未提供 system_prompt，直接保留当前 system_prompt"],
+            warnings=warnings,
             preserved_order=True,
             persona_detected=False,
             ltm_detected=False,
+            prefix_detected=False,
+            suffix_detected=False,
+            duplicate_suspected=duplicate_suspected,
         )
 
     @staticmethod
     def _build_empty_current_result(
         plugin_system_prompt: str,
     ) -> SystemPromptRewriteResult:
+        merged, duplicate_suspected = SystemPromptRewriter._compress_duplicate_blocks(
+            plugin_system_prompt
+        )
         return SystemPromptRewriteResult(
-            merged_system_prompt=plugin_system_prompt,
+            merged_system_prompt=merged,
             strategy="empty-current-system-prompt",
             confidence="high",
             warnings=[],
             preserved_order=True,
             persona_detected=True,
             ltm_detected=False,
+            prefix_detected=False,
+            suffix_detected=False,
+            duplicate_suspected=duplicate_suspected,
         )
 
     @classmethod
@@ -281,8 +340,10 @@ class SystemPromptRewriter:
                 plugin_system_prompt=plugin_system_prompt,
             )
 
-        prefix, matched_persona, suffix, wrapped_detected = cls._extract_persona_segment_by_header(
-            current_system_prompt, plugin_system_prompt
+        prefix, matched_persona, suffix, wrapped_detected = (
+            cls._extract_persona_segment_by_header(
+                current_system_prompt, plugin_system_prompt
+            )
         )
         if wrapped_detected:
             return cls._build_wrapped_match_result(

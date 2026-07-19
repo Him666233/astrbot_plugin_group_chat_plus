@@ -382,12 +382,13 @@ const FlowData = {
                     promptDataKey: 'frequency-ai',
                     sharedConfig: {
                         title: '判断型AI共用配置',
-                        text: '这两个推理起止标志符不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
+                        text: '以下配置项不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
                         badgeText: '共用',
                         fieldNote: '此项为三处判断型AI共用配置：读空气AI、主动对话判断AI、频率判断AI。修改后会同步影响全部。',
-                        keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker']
+                        keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker', 'decision_ai_fallback_provider_ids']
                     },
-                    keys: ['enable_frequency_adjuster', 'frequency_check_interval',
+                    keys: ['enable_frequency_adjuster', 'decision_ai_fallback_provider_ids',
+                           'frequency_check_interval',
                            'frequency_analysis_timeout', 'frequency_adjust_duration',
                            'frequency_analysis_message_count',
                            'frequency_min_message_count',
@@ -455,7 +456,8 @@ const FlowData = {
                     desc: '图片转文字(OCR)、多模态识别、平台描述提取、缓存管理',
                     toggle: 'enable_image_processing',
                     keys: ['enable_image_processing', 'image_to_text_scope',
-                           'image_to_text_provider_id', 'image_to_text_prompt',
+                           'image_to_text_provider_id', 'image_to_text_fallback_provider_ids',
+                           'image_to_text_prompt',
                            'image_to_text_timeout', 'max_images_per_message',
                            'enable_image_description_cache', 'image_description_cache_max_entries',
                            'gcp_clear_image_cache_allowed_user_ids'],
@@ -467,7 +469,7 @@ const FlowData = {
                     name: '元数据注入',
                     icon: '🏷️',
                     desc: '为消息添加时间戳和发送者信息，帮助AI理解对话上下文；对于单独的、不包含任何信息的 @ 消息，系统会先在前置阶段识别事实，再在通过读空气筛选后、进入回复生成时动态追加上下文提醒。',
-                    keys: ['include_timestamp', 'include_sender_info',
+                    keys: ['include_timestamp', 'include_sender_info', 'include_environment_info',
                            'single_at_message_reply_link_max_messages', 'single_at_message_reply_link_max_seconds'],
                     onFail: 'pass',
                     next: 'context-build'
@@ -479,7 +481,8 @@ const FlowData = {
                     desc: '组装历史消息上下文，控制消息数量和缓存策略',
                     keys: ['max_context_messages', 'custom_storage_max_messages',
                            'pending_cache_max_count', 'pending_cache_ttl_seconds',
-                           'enable_idle_cache_flush', 'idle_cache_flush_delay_seconds'],
+                           'enable_idle_cache_flush', 'idle_cache_flush_delay_seconds',
+                           'tool_call_max_args_length', 'tool_call_max_result_length'],
                     onFail: 'pass',
                     next: null
                 }
@@ -517,17 +520,21 @@ const FlowData = {
                     promptDataKey: 'decision-ai',
                     sharedConfig: {
                         title: '判断型AI共用配置',
-                        text: '这两个推理起止标志符不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
+                        text: '以下配置项不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
                         badgeText: '共用',
                         fieldNote: '此项为三处判断型AI共用配置：读空气AI、主动对话判断AI、频率判断AI。修改后会同步影响全部。',
-                        keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker']
+                        keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker', 'decision_ai_fallback_provider_ids']
                     },
-                    keys: ['decision_ai_provider_id', 'decision_ai_include_persona',
+                    keys: ['decision_ai_provider_id', 'decision_ai_fallback_provider_ids',
+                           'decision_ai_include_persona',
                            'decision_ai_persona_name', 'decision_ai_prompt_mode',
                            'decision_ai_extra_prompt', 'decision_ai_timeout',
                            'enable_decision_ai_reasoning', 'decision_ai_reasoning_log',
                            'decision_ai_reasoning_log_mode',
-                           'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker'],
+                           'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker',
+                           'enable_identity_prompt', 'identity_prompt_ai_targets',
+                           'identity_prompt_include_group_info',
+                           'identity_prompt_save_to_history', 'identity_prompt_save_group_mode'],
                     onFail: 'drop',
                     failLabel: 'AI判定不回复 → 缓存消息',
                     next: 'concurrent-lock'
@@ -545,7 +552,9 @@ const FlowData = {
                         }
                     },
                     keys: ['concurrent_wait_max_loops', 'concurrent_wait_interval',
-                           'concurrent_mode', 'enable_smart_batch_reply_hint', 'smart_concurrent_merge_wait'],
+                           'concurrent_mode', 'enable_smart_batch_reply_hint',
+                           'smart_concurrent_merge_wait', 'smart_concurrent_max_batch_size',
+                           'smart_concurrent_claim_delay'],
                     onFail: 'pass',
                     next: null
                 }
@@ -593,7 +602,10 @@ const FlowData = {
                            'enable_smart_batch_reply_hint',
                            'enable_tools_reminder', 'tools_reminder_persona_filter',
                            'reply_timeout_warning_threshold',
-                           'reply_generation_timeout_warning'],
+                           'reply_generation_timeout_warning',
+                           'enable_identity_prompt', 'identity_prompt_ai_targets',
+                           'identity_prompt_include_group_info',
+                           'identity_prompt_save_to_history', 'identity_prompt_save_group_mode'],
                     onFail: 'pass',
                     next: 'content-filter'
                 },
@@ -757,19 +769,23 @@ const FlowData = {
                         promptDataKey: 'proactive-ai-judge',
                         sharedConfig: {
                             title: '判断型AI共用配置',
-                            text: '这两个推理起止标志符不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
+                            text: '以下配置项不是当前节点独占，而是由读空气AI、主动对话判断AI、频率判断AI三处共用。任意一处修改，其他两处会同步生效。',
                             badgeText: '共用',
                             fieldNote: '此项为三处判断型AI共用配置：读空气AI、主动对话判断AI、频率判断AI。修改后会同步影响全部。',
-                            keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker']
+                            keys: ['judgment_reasoning_start_marker', 'judgment_reasoning_end_marker', 'decision_ai_fallback_provider_ids']
                         },
                         keys: ['enable_proactive_ai_judge',
+                               'decision_ai_fallback_provider_ids',
                                'proactive_ai_judge_include_persona',
                                'proactive_ai_judge_persona_name',
                                'proactive_ai_judge_prompt',
                                'proactive_ai_judge_timeout',
                                'enable_proactive_ai_reasoning', 'proactive_ai_reasoning_log',
                                'proactive_ai_reasoning_log_mode',
-                               'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker'],
+                               'judgment_reasoning_start_marker', 'judgment_reasoning_end_marker',
+                               'enable_identity_prompt', 'identity_prompt_ai_targets',
+                               'identity_prompt_include_group_info',
+                               'identity_prompt_save_to_history', 'identity_prompt_save_group_mode'],
                         onFail: 'drop',
                         failLabel: 'AI判定不适合 → 跳过',
                         next: 'proactive-attention'
@@ -836,10 +852,14 @@ const FlowData = {
                         desc: '【正常路径】调用AI生成主动对话内容，支持重试和@转换',
                         promptDataKey: 'proactive-ai',
                         parentToggle: 'enable_proactive_chat',
-                        keys: ['proactive_prompt', 'proactive_retry_prompt',
+                        keys: ['proactive_prompt', 'proactive_gen_fallback_provider_ids',
+                               'proactive_retry_prompt',
                                'proactive_generation_timeout_warning',
                                'proactive_reply_context_prompt',
-                               'enable_proactive_at_conversion'],
+                               'enable_proactive_at_conversion',
+                               'enable_identity_prompt', 'identity_prompt_ai_targets',
+                               'identity_prompt_include_group_info',
+                               'identity_prompt_save_to_history', 'identity_prompt_save_group_mode'],
                         onFail: 'drop',
                         failLabel: '生成失败 → 累计失败次数',
                         next: null

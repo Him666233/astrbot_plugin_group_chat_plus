@@ -8,15 +8,13 @@
 - 低概率、高自然度
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 参考: MaiBot typo_generator.py (简化实现)
 """
 
 import random
 import json
-import os
 from typing import Optional, Tuple, Dict, List, Any
-from pypinyin import Style, pinyin
 
 from astrbot.api.all import logger
 
@@ -219,7 +217,7 @@ class TypoGenerator:
             custom_json = config["typo_homophones"]
             custom_homophones = self._parse_custom_homophones(custom_json)
             if not custom_json:
-                logger.info(f"[打字错误生成器] 未读取到自定义同音字配置，使用默认配置")
+                logger.info("[打字错误生成器] 未读取到自定义同音字配置，使用默认配置")
             # 合并配置：自定义配置覆盖默认配置
             if custom_homophones:
                 for char, alternatives in custom_homophones.items():

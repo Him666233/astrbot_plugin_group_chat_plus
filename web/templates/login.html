@@ -18,6 +18,8 @@
 </head>
 <body>
 
+    <canvas id="bg-canvas"></canvas>
+
     <!-- 登录页 -->
     <div id="page-login" class="page">
         <div class="login-container">
@@ -58,7 +60,7 @@
                 <input type="password" id="confirm-password" placeholder="确认新密码"
                        autocomplete="new-password" maxlength="128">
                 <p class="login-hint login-hint--password-req">
-                    密码要求：6 ~ 128 位，支持任意可打印字符（字母、数字、符号均可）。<br>
+                    密码要求：8 ~ 128 位，支持任意可打印字符（字母、数字、符号均可）。<br>
                     建议使用包含大小写字母、数字和符号的强密码，避免使用生日、连续数字等易猜内容。
                 </p>
                 <button id="btn-change-pw" class="btn btn-primary">修改密码</button>
@@ -69,6 +71,7 @@
 
     <script src="/static/js/utils.js"></script>
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/bg-animation.js"></script>
     <script>
     // 最小化登录逻辑 - 不依赖完整 app.js
     (function() {
@@ -97,9 +100,9 @@
             if (page) page.classList.remove('hidden');
         }
 
-        // 跳转到面板页
+        // 跳转到面板页（带 ?from=login 标记为系统跳转，区别于用户手动访问）
         function navigateToPanel() {
-            window.location.href = '/panel';
+            window.location.href = '/panel?from=login';
         }
 
         function handleAuthFailure(res) {
@@ -183,7 +186,7 @@
             var confirmPw = (document.getElementById('confirm-password') || {}).value.trim() || '';
 
             if (!oldPw || !newPw) { showError('pw-change-error', '请填写所有字段'); return; }
-            if (newPw.length < 6) { showError('pw-change-error', '新密码至少 6 位'); return; }
+            if (newPw.length < 8) { showError('pw-change-error', '新密码至少 8 位'); return; }
             if (newPw.length > 128) { showError('pw-change-error', '新密码不能超过 128 位'); return; }
             if (newPw !== confirmPw) { showError('pw-change-error', '两次密码不一致'); return; }
 
@@ -231,6 +234,12 @@
 
             // 检查是否已登录
             checkExistingSession();
+
+            // :has() 选择器回退（Firefox <121 等不支持 CSS :has 的浏览器）
+            var container = document.querySelector('.login-container');
+            if (container && container.querySelector('.login-upgrade-notice')) {
+                container.classList.add('has-upgrade-notice');
+            }
         });
     })();
     </script>

@@ -8,7 +8,7 @@
 - 自动微调概率参数
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 参考: MaiBot frequency_control.py (简化实现)
 
 v1.2.0 更新：
@@ -16,10 +16,13 @@ v1.2.0 更新：
 """
 
 import time
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-from astrbot.api.all import Context, logger
-from astrbot.api.event import AstrMessageEvent
+from ..compat_api.astrbot_api.astrbot_api_main import (
+    AstrMessageEvent,
+    Context,
+    logger,
+)
 
 from .ai_response_filter import AIResponseFilter
 from .decision_ai import DecisionAI
@@ -28,7 +31,7 @@ from .decision_ai import DecisionAI
 DEBUG_MODE: bool = False
 
 if TYPE_CHECKING:
-    from .decision_ai import DecisionAI as _DecisionAIType
+    pass
 
 
 class FrequencyAdjuster:
@@ -80,6 +83,20 @@ class FrequencyAdjuster:
             "judgment_reasoning_start_marker", ""
         )
         self.reasoning_end_marker = self.config.get("judgment_reasoning_end_marker", "")
+
+        # 动态时间段配置（用于运行时频率检查）
+        self.enable_dynamic_reply_probability = self.config.get(
+            "enable_dynamic_reply_probability", False
+        )
+        self.reply_time_periods = self.config.get("reply_time_periods", "")
+        self.reply_time_transition_minutes = self.config.get(
+            "reply_time_transition_minutes", 30
+        )
+        self.reply_time_min_factor = self.config.get("reply_time_min_factor", 0.2)
+        self.reply_time_max_factor = self.config.get("reply_time_max_factor", 1.5)
+        self.reply_time_use_smooth_curve = self.config.get(
+            "reply_time_use_smooth_curve", True
+        )
 
         # 存储每个会话的检查状态（使用完整的会话标识确保隔离）
         # 格式: {chat_key: {"last_check_time": 时间戳, "message_count": 消息数}}
@@ -163,6 +180,7 @@ class FrequencyAdjuster:
         recent_messages: str,
         provider_id: str = "",
         timeout: int = 20,
+        fallback_provider_ids: Optional[List[str]] = None,
     ) -> Optional[str]:
         """
         使用AI分析发言频率是否合适
@@ -173,6 +191,7 @@ class FrequencyAdjuster:
             recent_messages: 最近的消息记录
             provider_id: AI提供商ID
             timeout: 超时时间
+            fallback_provider_ids: 备用AI提供商ID列表（有序），留空=不启用备用
 
         Returns:
             "过于频繁" / "过少" / "正常" / None(分析失败)
@@ -183,17 +202,15 @@ class FrequencyAdjuster:
             time_context = ""
 
             # 如果开启了动态时间段概率功能（与主插件配置保持一致），
-            # 则在频率分析时也让 AI 知道“现在是一天中的哪个时间段、活跃度系数是多少”。
+            # 则在频率分析时也让 AI 知道”现在是一天中的哪个时间段、活跃度系数是多少”。
             # 注意：这里只是把时间信息写进提示词，不直接修改概率数值。
-            # 🔧 使用字典键访问替代 config.get()，避免 astrBot 平台多次读取配置的问题
-            if self.config["enable_dynamic_reply_probability"]:
+            if self.enable_dynamic_reply_probability:
                 try:
                     from .time_period_manager import TimePeriodManager
                     from datetime import datetime as dt
 
                     # 读取时间段配置 JSON，完全复用 TimePeriodManager 的解析与校验逻辑
-                    # 🔧 使用字典键访问替代 config.get()
-                    periods_json = self.config["reply_time_periods"]
+                    periods_json = self.reply_time_periods
                     # silent=True 避免频繁重复解析时在日志中刷屏
                     periods = TimePeriodManager.parse_time_periods(
                         periods_json, silent=True
@@ -201,20 +218,17 @@ class FrequencyAdjuster:
 
                     if periods:
                         # 使用与 ProbabilityManager / DecisionAI 一致的时间系数计算方法
-                        # current_factor 表示当前时间下推荐的“活跃度倍率”，例如：
+                        # current_factor 表示当前时间下推荐的”活跃度倍率”，例如：
                         #  - 0.2 表示应该明显少说话
                         #  - 1.0 表示正常
                         #  - 1.5 表示可以更活跃
-                        # 🔧 使用字典键访问替代 config.get()
                         current_factor = TimePeriodManager.calculate_time_factor(
                             current_time=None,
                             periods_config=periods,
-                            transition_minutes=self.config[
-                                "reply_time_transition_minutes"
-                            ],
-                            min_factor=self.config["reply_time_min_factor"],
-                            max_factor=self.config["reply_time_max_factor"],
-                            use_smooth_curve=self.config["reply_time_use_smooth_curve"],
+                            transition_minutes=self.reply_time_transition_minutes,
+                            min_factor=self.reply_time_min_factor,
+                            max_factor=self.reply_time_max_factor,
+                            use_smooth_curve=self.reply_time_use_smooth_curve,
                         )
 
                         now = dt.now()
@@ -332,13 +346,14 @@ class FrequencyAdjuster:
 
             prompt = f"""你是一个群聊观察者。请根据下方提供的聊天记录，判断AI助手的发言频率是否合适。
 
-{DecisionAI.build_judgment_persona_notice('频率判断')}
+{DecisionAI.build_judgment_persona_notice("频率判断")}
 {DecisionAI.build_frequency_judgment_notice()}
 【当前人格与时间说明】
 - 你需要结合你当前的人格设定，判断在不同时间段下你应该多活跃或少活跃。
 - 如果下方提供了「当前时间与活跃度提示」，请参考用户配置的活跃度系数来判断现在说话是否合适。
 
 【消息格式说明】
+- 每条消息都用大括号 {{ }} 包裹以明确消息边界。
 - 「user: xxx」 = 用户发送的消息
 - 「assistant: xxx」 = AI助手（你）发送的消息
 
@@ -375,6 +390,7 @@ class FrequencyAdjuster:
                 include_persona=self.frequency_ai_include_persona,
                 configured_persona_name=self.frequency_ai_persona_name,
                 context_label="频率动态调整器",
+                fallback_provider_ids=fallback_provider_ids,
             )
 
             if not response:

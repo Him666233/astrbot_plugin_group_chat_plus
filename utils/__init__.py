@@ -3,7 +3,7 @@
 导出所有工具类供主插件使用
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 from .probability_manager import ProbabilityManager
@@ -37,7 +37,7 @@ from .humanize_mode import HumanizeModeManager
 # v1.2.0 新增功能 - 注意力冷却机制
 from .cooldown_manager import CooldownManager
 
-# v1.2.0 新增功能 - 平台 LTM 辅助（获取平台图片描述）
+# v1.2.0 新增功能 - 平台群聊上下文辅助（获取平台图片描述）
 from .platform_ltm_helper import PlatformLTMHelper
 
 # v1.2.0 新增功能 - 消息缓存管理器
@@ -61,12 +61,14 @@ from .reply_density_manager import ReplyDensityManager
 # v1.2.1 新增功能 - 消息质量预判器
 from .message_quality_scorer import MessageQualityScorer
 
-# v1.2.2 新增功能 - 智能并发合并管理器
+# v1.2.2-hotfix.1 新增功能 - 智能并发合并管理器
 from .smart_concurrent_manager import SmartConcurrentManager
 
-# v1.2.3 新增功能 - AI 服务商错误格式化器
+# v1.2.2-hotfix.1 新增功能 - AI 服务商错误格式化器
 from .ai_error_formatter import format_ai_error
 from .system_prompt_rewriter import SystemPromptRewriter, SystemPromptRewriteResult
+from .identity_prompt import IdentityPromptBuilder
+from .group_role_resolver import GroupRoleResolver
 
 # 全局调试日志开关（供各模块统一读取）
 DEBUG_MODE: bool = False
@@ -107,7 +109,7 @@ __all__ = [
     "HumanizeModeManager",
     # v1.2.0 开始的新增 - 注意力冷却机制
     "CooldownManager",
-    # v1.2.0 开始的新增 - 平台 LTM 辅助
+    # v1.2.0 开始的新增 - 平台群聊上下文辅助
     "PlatformLTMHelper",
     # v1.2.0 开始的新增 - 消息缓存管理器
     "MessageCacheManager",
@@ -124,13 +126,17 @@ __all__ = [
     "ReplyDensityManager",
     # v1.2.1 开始的新增 - 消息质量预判器
     "MessageQualityScorer",
-    # v1.2.2 开始的新增 - 智能并发合并管理器
+    # v1.2.2-hotfix.1 开始的新增 - 智能并发合并管理器
     "SmartConcurrentManager",
-    # v1.2.3 开始的新增 - AI 服务商错误格式化器
+    # v1.2.2-hotfix.1 开始的新增 - AI 服务商错误格式化器
     "format_ai_error",
-    # v1.2.3 开始的新增 - system_prompt 重写器
+    # v1.2.2-hotfix.1 开始的新增 - system_prompt 重写器
     "SystemPromptRewriter",
     "SystemPromptRewriteResult",
+    # 身份提示模块
+    "IdentityPromptBuilder",
+    # 群身份角色解析模块
+    "GroupRoleResolver",
     # 全局调试
     "DEBUG_MODE",
     "set_debug_mode",

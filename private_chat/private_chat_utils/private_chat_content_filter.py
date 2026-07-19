@@ -12,7 +12,7 @@ AI回复内容过滤器 - 可配置的内容清理模块
 - 保存过滤：控制AI保存到历史记录的内容
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import re
@@ -201,7 +201,7 @@ class ContentFilter:
                 )
 
         if content != original_content and DEBUG_MODE:
-            logger.info(f"[内容过滤] 过滤完成")
+            logger.info("[内容过滤] 过滤完成")
             logger.info(f"  原始长度: {len(original_content)}")
             logger.info(f"  过滤后长度: {len(content)}")
 
@@ -286,7 +286,7 @@ class ContentFilterManager:
         DEBUG_MODE = debug_mode
 
         if debug_mode:
-            logger.info(f"[内容过滤管理器] 初始化完成")
+            logger.info("[内容过滤管理器] 初始化完成")
             logger.info(
                 f"  输出过滤: {'启用' if enable_output_filter else '禁用'}, 规则数: {len(self.output_filter_rules)}"
             )

@@ -1,9 +1,9 @@
 """
-平台 LTM (Long Term Memory) 辅助模块
-用于从平台的聊天记忆增强功能中提取图片描述信息
+平台群聊上下文辅助模块
+用于从平台 LongTermMemory / GroupChatContext 中提取图片描述信息
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import re
@@ -22,11 +22,62 @@ _DEFAULT_FAST_CHECK_COUNT: int = 5  # 默认快速检查次数
 _FAST_CHECK_INTERVAL: float = 0.02  # 快速检查间隔(秒)，固定20ms
 
 
+def _get_ltm_data(ltm_instance, umo):
+    """兼容 LongTermMemory.session_chats (旧版) 和 GroupChatContext.raw_records (新版 4.25.2+)"""
+    if hasattr(ltm_instance, "session_chats"):
+        return ltm_instance.session_chats.get(umo, [])
+    if hasattr(ltm_instance, "raw_records"):
+        return list(ltm_instance.raw_records.get(umo, []))
+    return []
+
+
+def _ltm_has_session(ltm_instance, umo):
+    """兼容新旧版本：检查 umo 对应的会话数据是否存在且非空"""
+    if hasattr(ltm_instance, "session_chats"):
+        return umo in ltm_instance.session_chats and bool(
+            ltm_instance.session_chats.get(umo)
+        )
+    if hasattr(ltm_instance, "raw_records"):
+        return umo in ltm_instance.raw_records and bool(
+            ltm_instance.raw_records.get(umo)
+        )
+    return False
+
+
+def _has_unprocessed_image_marker(chat_record: str) -> bool:
+    """检测独立 [Image] 占位，避免把 [Image: xxx] 误判为未处理。"""
+    return bool(re.search(r"\[Image\](?!\s*:)", chat_record or ""))
+
+
+def _count_original_image_markers(text: str) -> int:
+    """统计原始消息中的图片占位数量。"""
+    if not text:
+        return 0
+    return text.count("[图片]") + text.count("[Image]")
+
+
+def _count_platform_image_markers(chat_record: str) -> int:
+    """统计平台记录中已处理/未处理的图片数量。"""
+    if not chat_record:
+        return 0
+    return chat_record.count("[Image:") + len(
+        re.findall(r"\[Image\](?!\s*:)", chat_record)
+    )
+
+
+def _platform_image_count_insufficient(chat_record: str, original_text: str) -> bool:
+    """平台记录中的图片数量少于原始消息时，继续等待而不是提前回退。"""
+    original_image_count = _count_original_image_markers(original_text)
+    if original_image_count <= 0:
+        return False
+    return _count_platform_image_markers(chat_record) < original_image_count
+
+
 class PlatformLTMHelper:
     """
-    平台 LTM 辅助类
+    平台群聊上下文辅助类
 
-    用于从平台的 LongTermMemory 模块中提取当前消息的图片描述信息
+    用于从平台 LongTermMemory / GroupChatContext 模块中提取当前消息的图片描述信息
     平台会将图片转换为 [Image: 描述] 格式存储
 
     性能优化策略：
@@ -83,14 +134,14 @@ class PlatformLTMHelper:
         try:
             # === 第一阶段：快速失败检查（零等待） ===
 
-            # 获取平台的 LTM 实例（使用缓存）
+            # 获取平台群聊上下文实例（使用缓存）
             ltm = PlatformLTMHelper._get_platform_ltm(context)
             if not ltm:
                 if DEBUG_MODE:
-                    logger.info("[PlatformLTM] 未找到平台 LTM 实例")
+                    logger.info("[PlatformLTM] 未找到平台群聊上下文实例")
                 return False, None
 
-            # 检查 LTM 是否启用了图片理解功能（快速失败点）
+            # 检查平台群聊上下文是否启用了图片理解功能（快速失败点）
             cfg = ltm.cfg(event)
             if not cfg.get("image_caption", False):
                 # 用户未开启图片理解，立即返回，零开销
@@ -132,16 +183,21 @@ class PlatformLTMHelper:
                     logger.info("[PlatformLTM] 无需等待平台处理")
                 return False, None
 
-            # === 第三阶段：等待平台处理完成 ===
+            # === 第三阶段：等待平台处理完成（进度感知） ===
             if DEBUG_MODE:
                 logger.info(
                     f"[PlatformLTM] 检测到平台可能正在处理图片，开始等待(最多{max_wait}秒)..."
                 )
 
-            # 🔧 优化：记录会话是否曾经存在，用于判断平台是否会处理这条消息
-            session_ever_existed = umo in ltm.session_chats and bool(
-                ltm.session_chats.get(umo)
-            )
+            original_image_count = _count_original_image_markers(original_text)
+            # 🔧 进度追踪：记录已处理图片数，有进展则重置停滞计数器
+            prev_processed_count = 0
+            no_progress_streak = 0
+            # 停滞阈值：总重试次数的 1/4，至少 fast_check_count+5
+            stall_limit = max(fast_check_count + 5, max_retry_count // 4)
+
+            # 🔧 记录会话是否曾经存在，用于判断平台是否会处理这条消息
+            session_ever_existed = _ltm_has_session(ltm, umo)
 
             for retry in range(max_retry_count):
                 # 动态调整等待间隔（前几次更快）
@@ -150,42 +206,148 @@ class PlatformLTMHelper:
                 else:
                     await asyncio.sleep(retry_interval_sec)
 
-                # 重新尝试提取
-                result = PlatformLTMHelper._try_extract_caption(
-                    ltm, umo, sender_name, original_text, msg_timestamp
-                )
+                # 🔧 定期检查平台图片理解配置是否被关闭（每 fast_check_count*3 次）
+                if retry > 0 and retry % (fast_check_count * 3) == 0:
+                    try:
+                        if not ltm.cfg(event).get("image_caption", False):
+                            if DEBUG_MODE:
+                                logger.info(
+                                    "[PlatformLTM] 平台图片理解功能在等待期间被关闭，停止等待"
+                                )
+                            return False, None
+                    except Exception:
+                        pass
 
-                if result[0]:
-                    # 成功获取图片描述
-                    if DEBUG_MODE:
-                        logger.info(f"[PlatformLTM] 第 {retry + 1} 次重试成功")
-                    return result
+                # 检查会话存在性
+                if not _ltm_has_session(ltm, umo):
+                    if not session_ever_existed:
+                        if retry >= fast_check_count:
+                            if DEBUG_MODE:
+                                logger.info(
+                                    "[PlatformLTM] 会话一直不存在，停止等待"
+                                )
+                            return False, None
+                    else:
+                        # 会话之前存在但消失了
+                        if DEBUG_MODE:
+                            logger.info("[PlatformLTM] 会话在等待期间消失，停止等待")
+                        return False, None
+                    no_progress_streak += 1
+                    if no_progress_streak >= stall_limit:
+                        return False, None
+                    continue
 
-                # 检查是否平台处理失败（出现 [Image] 而非 [Image: xxx]）
-                if PlatformLTMHelper._check_platform_failed(
-                    ltm, umo, sender_name, msg_timestamp
-                ):
-                    if DEBUG_MODE:
-                        logger.info("[PlatformLTM] 检测到平台图片处理失败，停止等待")
-                    return False, None
+                session_chats = _get_ltm_data(ltm, umo)
+                session_ever_existed = True
+                if not session_chats:
+                    no_progress_streak += 1
+                    if no_progress_streak >= stall_limit:
+                        return False, None
+                    continue
 
-                # 🔧 优化：如果会话从未存在，且已经等待了足够长时间（超过快速检查阶段），
-                # 说明平台 LTM 可能不会处理这条消息，提前退出
-                if not session_ever_existed and retry >= fast_check_count:
-                    current_session_exists = umo in ltm.session_chats and bool(
-                        ltm.session_chats.get(umo)
+                # 查找匹配的聊天记录
+                if msg_timestamp:
+                    matched_chat = PlatformLTMHelper._find_message_by_timestamp(
+                        session_chats, sender_name, msg_timestamp, original_text
                     )
-                    if not current_session_exists:
+                else:
+                    matched_chat = session_chats[-1] if session_chats else None
+                    if matched_chat and not PlatformLTMHelper._verify_message_match(
+                        matched_chat, sender_name, original_text, None
+                    ):
+                        matched_chat = None
+
+                if not matched_chat:
+                    no_progress_streak += 1
+                    if no_progress_streak >= stall_limit:
+                        return False, None
+                    continue
+
+                # 统计当前已处理的图片数量（[Image:] 标记数）
+                current_processed = matched_chat.count("[Image:")
+                # 检查是否还有未处理的 [Image] 占位
+                has_unprocessed = _has_unprocessed_image_marker(matched_chat)
+
+                # 全部处理完成
+                if not has_unprocessed and current_processed > 0:
+                    if original_image_count <= 0 or current_processed >= original_image_count:
+                        processed_text = PlatformLTMHelper._extract_message_content(
+                            matched_chat
+                        )
+                        if processed_text:
+                            if DEBUG_MODE:
+                                logger.info(
+                                    f"[PlatformLTM] 第 {retry + 1} 次重试成功"
+                                    f"（{current_processed}/{original_image_count}张）"
+                                )
+                            return True, processed_text
+
+                # 🔧 进度追踪：有进展则重置停滞计数器
+                if current_processed > prev_processed_count:
+                    prev_processed_count = current_processed
+                    no_progress_streak = 0
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"[PlatformLTM] 图片处理进度: "
+                            f"{current_processed}/{original_image_count}张"
+                        )
+                else:
+                    no_progress_streak += 1
+
+                # 🔧 停滞检测：超过阈值且无进展
+                if no_progress_streak >= stall_limit:
+                    # 有部分结果 → 提取返回
+                    if prev_processed_count > 0:
+                        processed_text = (
+                            PlatformLTMHelper._extract_message_content(matched_chat)
+                        )
+                        if processed_text:
+                            logger.info(
+                                f"[PlatformLTM] 等待停滞但已有部分结果 "
+                                f"（{prev_processed_count}/{original_image_count}张），返回部分描述"
+                            )
+                            return True, processed_text
+
+                    # 无结果 → 检查平台是否彻底失败
+                    if PlatformLTMHelper._check_platform_failed(
+                        ltm, umo, sender_name, msg_timestamp
+                    ):
                         if DEBUG_MODE:
                             logger.info(
-                                "[PlatformLTM] 会话一直不存在，平台可能不会处理这条消息，停止等待"
+                                "[PlatformLTM] 检测到平台图片处理失败，停止等待"
                             )
                         return False, None
-                    else:
-                        # 会话现在存在了，更新标记
-                        session_ever_existed = True
 
-            # 超时，返回失败
+                    if DEBUG_MODE:
+                        logger.info(
+                            f"[PlatformLTM] {stall_limit}次重试无进展，停止等待"
+                        )
+                    return False, None
+
+            # 🔧 总超时：尝试提取部分结果
+            if prev_processed_count > 0:
+                if _ltm_has_session(ltm, umo):
+                    session_chats = _get_ltm_data(ltm, umo)
+                    if session_chats:
+                        if msg_timestamp:
+                            matched_chat = PlatformLTMHelper._find_message_by_timestamp(
+                                session_chats, sender_name, msg_timestamp, original_text
+                            )
+                        else:
+                            matched_chat = (
+                                session_chats[-1] if session_chats else None
+                            )
+                        if matched_chat:
+                            processed_text = (
+                                PlatformLTMHelper._extract_message_content(matched_chat)
+                            )
+                            if processed_text:
+                                logger.info(
+                                    f"[PlatformLTM] 等待超时但已有部分结果 "
+                                    f"（{prev_processed_count}张），返回部分描述"
+                                )
+                                return True, processed_text
+
             if DEBUG_MODE:
                 logger.info("[PlatformLTM] 等待超时，平台可能处理失败")
             return False, None
@@ -304,10 +466,10 @@ class PlatformLTMHelper:
             (是否成功, 处理后的文本)
         """
         try:
-            if umo not in ltm.session_chats:
+            if not _ltm_has_session(ltm, umo):
                 return False, None
 
-            session_chats = ltm.session_chats[umo]
+            session_chats = _get_ltm_data(ltm, umo)
             if not session_chats:
                 return False, None
 
@@ -327,22 +489,21 @@ class PlatformLTMHelper:
                 ):
                     return False, None
 
-            # 🔧 修复多图片场景：检查是否所有图片都已处理完成
-            # 如果存在未处理的 [Image]（没有描述），说明还有图片在处理中
-            if "[Image]" in matched_chat:
-                # 检查是否有未处理的图片（[Image] 后面不是 :）
-                # 使用正则匹配独立的 [Image]（不是 [Image: xxx] 的一部分）
-                import re
-
-                # 匹配 [Image] 但不匹配 [Image: xxx]
-                unprocessed_images = re.findall(r"\[Image\](?!\s*:)", matched_chat)
-                if unprocessed_images:
-                    # 还有未处理的图片
-                    return False, None
+            # 🔧 修复多图片场景：只要还有独立 [Image] 占位，就说明尚未全部处理完成。
+            if _has_unprocessed_image_marker(matched_chat):
+                return False, None
 
             # 检查是否包含完整的图片描述 [Image: xxx]
             if "[Image:" not in matched_chat:
                 return False, None
+
+            # 多图完整性校验：平台在图片理解失败时可能不写 [Image] 占位，
+            # 因此不能只看是否存在 [Image:]。数量不足时继续等待，最后回退到缓存/过滤。
+            original_image_count = _count_original_image_markers(original_text)
+            if original_image_count > 0:
+                platform_image_count = _count_platform_image_markers(matched_chat)
+                if platform_image_count < original_image_count:
+                    return False, None
 
             # 提取消息内容
             processed_text = PlatformLTMHelper._extract_message_content(matched_chat)
@@ -549,17 +710,17 @@ class PlatformLTMHelper:
             是否应该等待
         """
         try:
-            if umo not in ltm.session_chats:
-                # 🔧 修复：会话不存在时，可能是平台 LTM 还没处理到，应该等待
+            if not _ltm_has_session(ltm, umo):
+                # 🔧 修复：会话不存在时，可能是平台群聊上下文还没处理到，应该等待
                 if DEBUG_MODE:
                     logger.info(
                         "[PlatformLTM] 会话不存在，平台可能还没处理到，需要等待"
                     )
                 return True
 
-            session_chats = ltm.session_chats[umo]
+            session_chats = _get_ltm_data(ltm, umo)
             if not session_chats:
-                # 🔧 修复：会话为空时，可能是平台 LTM 还没处理到，应该等待
+                # 🔧 修复：会话为空时，可能是平台群聊上下文还没处理到，应该等待
                 if DEBUG_MODE:
                     logger.info("[PlatformLTM] 会话为空，平台可能还没处理到，需要等待")
                 return True
@@ -580,7 +741,9 @@ class PlatformLTMHelper:
                     # 检查是否是当前消息（通过时间戳匹配）
                     if f"[{sender_name}/{msg_timestamp}]" in chat[:50]:
                         # 找到了，检查是否有 [Image] 标记
-                        if "[Image]" in chat and "[Image:" not in chat:
+                        if _has_unprocessed_image_marker(chat):
+                            return True
+                        if _platform_image_count_insufficient(chat, original_text):
                             return True
                         # 已经有描述或没有图片，不需要等待
                         return False
@@ -594,7 +757,11 @@ class PlatformLTMHelper:
                         if PlatformLTMHelper._timestamps_close(
                             msg_timestamp, record_time, tolerance=1
                         ):
-                            if "[Image]" in chat and "[Image:" not in chat:
+                            if _has_unprocessed_image_marker(chat):
+                                return True
+                            if _platform_image_count_insufficient(
+                                chat, original_text
+                            ):
                                 return True
                             return False
                 # 没找到匹配的消息，可能平台还没处理到
@@ -607,13 +774,16 @@ class PlatformLTMHelper:
             if f"[{sender_name}" not in last_chat[:50]:
                 return False
 
-            # 如果已经有图片描述，不需要等待
+            # 如果有 [Image] 标记（无描述），说明平台可能正在处理或已失败
+            if _has_unprocessed_image_marker(last_chat):
+                return True
+
+            if _platform_image_count_insufficient(last_chat, original_text):
+                return True
+
+            # 如果已经有图片描述且没有未处理占位，不需要等待
             if "[Image:" in last_chat:
                 return False
-
-            # 如果有 [Image] 标记（无描述），说明平台可能正在处理或已失败
-            if "[Image]" in last_chat:
-                return True
 
             return False
 
@@ -634,10 +804,10 @@ class PlatformLTMHelper:
             是否处理失败
         """
         try:
-            if umo not in ltm.session_chats:
+            if not _ltm_has_session(ltm, umo):
                 return False
 
-            session_chats = ltm.session_chats[umo]
+            session_chats = _get_ltm_data(ltm, umo)
             if not session_chats:
                 return False
 
@@ -661,9 +831,7 @@ class PlatformLTMHelper:
 
                     if is_match:
                         # 🔧 修复多图片场景：检查是否有未处理的图片
-                        # 使用正则匹配独立的 [Image]（不是 [Image: xxx] 的一部分）
-                        unprocessed_images = re.findall(r"\[Image\](?!\s*:)", chat)
-                        if unprocessed_images:
+                        if _has_unprocessed_image_marker(chat):
                             # 还有未处理的图片，但不一定是失败，可能还在处理中
                             # 只有当没有任何 [Image: xxx] 时才认为是失败
                             if "[Image:" not in chat:
@@ -681,8 +849,7 @@ class PlatformLTMHelper:
                 return False
 
             # 🔧 修复多图片场景：检查是否有未处理的图片
-            unprocessed_images = re.findall(r"\[Image\](?!\s*:)", last_chat)
-            if unprocessed_images:
+            if _has_unprocessed_image_marker(last_chat):
                 # 还有未处理的图片，但不一定是失败
                 # 只有当没有任何 [Image: xxx] 时才认为是失败
                 if "[Image:" not in last_chat:
@@ -696,9 +863,9 @@ class PlatformLTMHelper:
     @staticmethod
     def _get_platform_ltm(context):
         """
-        获取平台的 LongTermMemory 实例
+        获取平台的 LongTermMemory 或 GroupChatContext 实例
 
-        通过遍历已注册的 Star 插件来查找平台的 LTM
+        通过遍历已注册的 Star 插件来查找平台群聊上下文模块
         """
         try:
             # 方法1: 通过 context.get_all_stars() 获取所有插件的 Metadata
@@ -715,6 +882,12 @@ class PlatformLTMHelper:
                                     f"[PlatformLTM] 从插件 {star_md.name} 找到 LTM 实例"
                                 )
                             return star_inst.ltm
+                        if hasattr(star_inst, "group_chat_context") and star_inst.group_chat_context is not None:
+                            if DEBUG_MODE:
+                                logger.info(
+                                    f"[PlatformLTM] 从插件 {star_md.name} 找到 GroupChatContext 实例"
+                                )
+                            return star_inst.group_chat_context
 
             # 方法2: 尝试直接导入 star_registry（备用方案）
             try:
@@ -729,6 +902,12 @@ class PlatformLTMHelper:
                                     f"[PlatformLTM] 从 star_registry 的插件 {star_md.name} 找到 LTM 实例"
                                 )
                             return star_inst.ltm
+                        if hasattr(star_inst, "group_chat_context") and star_inst.group_chat_context is not None:
+                            if DEBUG_MODE:
+                                logger.info(
+                                    f"[PlatformLTM] 从 star_registry 的插件 {star_md.name} 找到 GroupChatContext 实例"
+                                )
+                            return star_inst.group_chat_context
             except ImportError:
                 pass
 
@@ -737,6 +916,8 @@ class PlatformLTMHelper:
                 for star in context.stars:
                     if hasattr(star, "ltm") and star.ltm is not None:
                         return star.ltm
+                    if hasattr(star, "group_chat_context") and star.group_chat_context is not None:
+                        return star.group_chat_context
 
             # 方法4: 尝试从 star_manager 获取
             if hasattr(context, "star_manager"):
@@ -745,12 +926,16 @@ class PlatformLTMHelper:
                     for star in star_manager.stars:
                         if hasattr(star, "ltm") and star.ltm is not None:
                             return star.ltm
+                        if hasattr(star, "group_chat_context") and star.group_chat_context is not None:
+                            return star.group_chat_context
 
             # 方法5: 尝试从 _stars 属性获取
             if hasattr(context, "_stars"):
                 for star in context._stars:
                     if hasattr(star, "ltm") and star.ltm is not None:
                         return star.ltm
+                    if hasattr(star, "group_chat_context") and star.group_chat_context is not None:
+                        return star.group_chat_context
 
             # 方法6: 尝试从 _star_manager 获取
             if hasattr(context, "_star_manager") and context._star_manager:
@@ -759,6 +944,8 @@ class PlatformLTMHelper:
                     for star in star_manager.star_insts:
                         if hasattr(star, "ltm") and star.ltm is not None:
                             return star.ltm
+                        if hasattr(star, "group_chat_context") and star.group_chat_context is not None:
+                            return star.group_chat_context
 
             return None
 

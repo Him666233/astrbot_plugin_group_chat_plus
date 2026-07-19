@@ -13,7 +13,7 @@
 5. 旧版持久化数据迁移 - 仅在升级时读取旧冷却数据并迁入内存
 
 作者: Him666233
-版本: v1.2.2
+版本: V1.2.3.hotfix.2
 """
 
 import time
@@ -122,30 +122,52 @@ class CooldownManager:
         return data, {}
 
     @staticmethod
-    def _restore_active_entry(chat_key: str, user_id: str, info: Dict[str, Any]) -> None:
+    def _restore_active_entry(
+        chat_key: str, user_id: str, info: Dict[str, Any]
+    ) -> None:
         if chat_key not in CooldownManager._cooldown_map:
             CooldownManager._cooldown_map[chat_key] = {}
         CooldownManager._cooldown_map[chat_key][user_id] = {
-            "cooldown_start": float(info.get("cooldown_start", time.time()) or time.time()),
-            "reason": str(info.get("reason", "legacy_migrated_cooldown") or "legacy_migrated_cooldown"),
+            "cooldown_start": float(
+                info.get("cooldown_start", time.time()) or time.time()
+            ),
+            "reason": str(
+                info.get("reason", "legacy_migrated_cooldown")
+                or "legacy_migrated_cooldown"
+            ),
             "user_name": str(info.get("user_name", "未知") or "未知"),
             "promoted_from_pending": bool(info.get("promoted_from_pending", False)),
             "trigger_message_id": str(info.get("trigger_message_id", "") or ""),
-            "trigger_message_timestamp": float(info.get("trigger_message_timestamp", 0) or 0),
+            "trigger_message_timestamp": float(
+                info.get("trigger_message_timestamp", 0) or 0
+            ),
         }
 
     @staticmethod
-    def _restore_pending_entry(chat_key: str, user_id: str, info: Dict[str, Any]) -> None:
+    def _restore_pending_entry(
+        chat_key: str, user_id: str, info: Dict[str, Any]
+    ) -> None:
         if chat_key not in CooldownManager._pending_cooldown_map:
             CooldownManager._pending_cooldown_map[chat_key] = {}
         CooldownManager._pending_cooldown_map[chat_key][user_id] = {
-            "pending_start": float(info.get("pending_start", time.time()) or time.time()),
-            "reason": str(info.get("reason", "legacy_migrated_pending") or "legacy_migrated_pending"),
+            "pending_start": float(
+                info.get("pending_start", time.time()) or time.time()
+            ),
+            "reason": str(
+                info.get("reason", "legacy_migrated_pending")
+                or "legacy_migrated_pending"
+            ),
             "user_name": str(info.get("user_name", "未知") or "未知"),
             "trigger_message_id": str(info.get("trigger_message_id", "") or ""),
-            "trigger_message_timestamp": float(info.get("trigger_message_timestamp", 0) or 0),
-            "trigger_attention_before": float(info.get("trigger_attention_before", 0.0) or 0.0),
-            "trigger_attention_after": float(info.get("trigger_attention_after", 0.0) or 0.0),
+            "trigger_message_timestamp": float(
+                info.get("trigger_message_timestamp", 0) or 0
+            ),
+            "trigger_attention_before": float(
+                info.get("trigger_attention_before", 0.0) or 0.0
+            ),
+            "trigger_attention_after": float(
+                info.get("trigger_attention_after", 0.0) or 0.0
+            ),
             "grace_message_budget": max(
                 1,
                 int(
@@ -156,18 +178,30 @@ class CooldownManager:
                     or CooldownManager.PENDING_COOLDOWN_GRACE_USER_MESSAGES
                 ),
             ),
-            "consumed_user_messages": max(0, int(info.get("consumed_user_messages", 0) or 0)),
+            "consumed_user_messages": max(
+                0, int(info.get("consumed_user_messages", 0) or 0)
+            ),
             "same_user_reengage_seen": bool(info.get("same_user_reengage_seen", False)),
-            "last_same_user_message_id": str(info.get("last_same_user_message_id", "") or ""),
-            "last_same_user_message_timestamp": float(info.get("last_same_user_message_timestamp", 0) or 0),
+            "last_same_user_message_id": str(
+                info.get("last_same_user_message_id", "") or ""
+            ),
+            "last_same_user_message_timestamp": float(
+                info.get("last_same_user_message_timestamp", 0) or 0
+            ),
             "last_same_user_is_at_ai": bool(info.get("last_same_user_is_at_ai", False)),
-            "last_same_user_mention_other": bool(info.get("last_same_user_mention_other", False)),
-            "last_same_user_decision": str(info.get("last_same_user_decision", "unknown") or "unknown"),
+            "last_same_user_mention_other": bool(
+                info.get("last_same_user_mention_other", False)
+            ),
+            "last_same_user_decision": str(
+                info.get("last_same_user_decision", "unknown") or "unknown"
+            ),
             "decay_applied": bool(info.get("decay_applied", False)),
         }
 
     @staticmethod
-    async def import_legacy_payload(data: Any, source_name: str = "legacy") -> Dict[str, int]:
+    async def import_legacy_payload(
+        data: Any, source_name: str = "legacy"
+    ) -> Dict[str, int]:
         """将旧版持久化数据导入当前内存态。"""
         active_map, pending_map = CooldownManager._normalize_legacy_payload(data)
         imported_active = 0
@@ -180,7 +214,9 @@ class CooldownManager:
                 for user_id, info in chat_users.items():
                     if not isinstance(info, dict):
                         continue
-                    CooldownManager._restore_active_entry(str(chat_key), str(user_id), info)
+                    CooldownManager._restore_active_entry(
+                        str(chat_key), str(user_id), info
+                    )
                     imported_active += 1
 
             for chat_key, chat_users in pending_map.items():
@@ -189,7 +225,9 @@ class CooldownManager:
                 for user_id, info in chat_users.items():
                     if not isinstance(info, dict):
                         continue
-                    CooldownManager._restore_pending_entry(str(chat_key), str(user_id), info)
+                    CooldownManager._restore_pending_entry(
+                        str(chat_key), str(user_id), info
+                    )
                     imported_pending += 1
 
         logger.info(
@@ -230,7 +268,10 @@ class CooldownManager:
                 )
         except Exception as e:
             result["error"] = str(e)
-            logger.warning(f"[注意力冷却] 迁移旧冷却文件失败: {file_path}, error={e}", exc_info=True)
+            logger.warning(
+                f"[注意力冷却] 迁移旧冷却文件失败: {file_path}, error={e}",
+                exc_info=True,
+            )
         return result
 
     @staticmethod
@@ -320,9 +361,7 @@ class CooldownManager:
             return True
 
     @staticmethod
-    async def get_pending_info(
-        chat_key: str, user_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_pending_info(chat_key: str, user_id: str) -> Optional[Dict[str, Any]]:
         async with CooldownManager._lock:
             if chat_key not in CooldownManager._pending_cooldown_map:
                 return None
@@ -333,7 +372,8 @@ class CooldownManager:
             info["elapsed_time"] = time.time() - info.get("pending_start", 0)
             info["remaining_time"] = max(
                 0,
-                CooldownManager.PENDING_COOLDOWN_MAX_WAIT_SECONDS - info["elapsed_time"],
+                CooldownManager.PENDING_COOLDOWN_MAX_WAIT_SECONDS
+                - info["elapsed_time"],
             )
             return info
 
@@ -391,7 +431,9 @@ class CooldownManager:
                 "user_name": pending_info.get("user_name", "未知"),
                 "promoted_from_pending": True,
                 "trigger_message_id": pending_info.get("trigger_message_id", ""),
-                "trigger_message_timestamp": pending_info.get("trigger_message_timestamp", 0),
+                "trigger_message_timestamp": pending_info.get(
+                    "trigger_message_timestamp", 0
+                ),
             }
 
             del chat_pending[user_id]
@@ -442,13 +484,11 @@ class CooldownManager:
                 pending_info["last_same_user_decision"] = "ambiguous"
 
             snapshot = pending_info.copy()
-            snapshot["should_promote"] = (
-                not pending_info.get("same_user_reengage_seen", False)
-                and pending_info.get("consumed_user_messages", 0)
-                >= pending_info.get(
-                    "grace_message_budget",
-                    CooldownManager.PENDING_COOLDOWN_GRACE_USER_MESSAGES,
-                )
+            snapshot["should_promote"] = not pending_info.get(
+                "same_user_reengage_seen", False
+            ) and pending_info.get("consumed_user_messages", 0) >= pending_info.get(
+                "grace_message_budget",
+                CooldownManager.PENDING_COOLDOWN_GRACE_USER_MESSAGES,
             )
             return snapshot
 
@@ -722,10 +762,28 @@ class CooldownManager:
         return removed_users + pending_removed_users
 
     @staticmethod
-    async def sync_with_attention_map(chat_key: str, attention_map: Optional[Dict[str, Any]]) -> List[str]:
+    async def sync_with_attention_map(
+        chat_key: str, attention_map: Optional[Dict[str, Any]]
+    ) -> List[str]:
         """与当前注意力追踪表同步，移除不再被追踪的 active / pending 用户。"""
         attention_user_ids = list((attention_map or {}).keys())
-        return await CooldownManager.sync_with_attention_list(chat_key, attention_user_ids)
+        return await CooldownManager.sync_with_attention_list(
+            chat_key, attention_user_ids
+        )
+
+    @staticmethod
+    async def on_attention_user_removed(chat_key: str, user_id: str) -> None:
+        """当用户从注意力追踪中被淘汰时，同步清理其冷却/待冷却状态。
+
+        由 AttentionManager 在淘汰低优先级用户时调用，
+        防止已不在追踪列表中的用户残留孤儿冷却记录。
+        """
+        await CooldownManager.remove_from_cooldown(
+            chat_key, user_id, reason="attention_evicted"
+        )
+        await CooldownManager.clear_pending_cooldown(
+            chat_key, user_id, reason="attention_evicted"
+        )
 
     @staticmethod
     async def clear_session_cooldown(chat_key: str) -> int:
@@ -738,7 +796,9 @@ class CooldownManager:
                 del CooldownManager._cooldown_map[chat_key]
 
             if chat_key in CooldownManager._pending_cooldown_map:
-                pending_cleared_count = len(CooldownManager._pending_cooldown_map[chat_key])
+                pending_cleared_count = len(
+                    CooldownManager._pending_cooldown_map[chat_key]
+                )
                 del CooldownManager._pending_cooldown_map[chat_key]
 
             total = cleared_count + pending_cleared_count

@@ -7,13 +7,13 @@ v1.0.4 更新：
 - 在开启include_sender_info时，在消息末尾添加系统提示帮助AI识别发送者
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import re
 from datetime import datetime
 from astrbot.api.all import *
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -98,7 +98,7 @@ class MessageProcessor:
                     # 构建系统提示（使用特殊标记【】，确保不会被MessageCleaner过滤）
                     # 注意：措辞要对决策AI和回复AI都适用，不要加"请判断是否回复"这种话
                     mention_notice = (
-                        f"\n【@指向说明】这条消息通过@符号指定发送给其他用户"
+                        "\n【@指向说明】这条消息通过@符号指定发送给其他用户"
                     )
                     if mentioned_name:
                         mention_notice += (
@@ -276,7 +276,7 @@ class MessageProcessor:
                     ]
                     weekday = weekday_names[dt.weekday()]
                     timestamp_str = dt.strftime(f"%Y-%m-%d {weekday} %H:%M:%S")
-                except:
+                except Exception:
                     # 如果时间戳转换失败，使用当前时间
                     dt = datetime.now()
                     weekday_names = [
@@ -319,7 +319,7 @@ class MessageProcessor:
                     # 构建系统提示（使用特殊标记【】，确保不会被MessageCleaner过滤）
                     # 注意：措辞要对决策AI和回复AI都适用，不要加"请判断是否回复"这种话
                     mention_notice = (
-                        f"\n【@指向说明】这条消息通过@符号指定发送给其他用户"
+                        "\n【@指向说明】这条消息通过@符号指定发送给其他用户"
                     )
                     if mentioned_name:
                         mention_notice += (

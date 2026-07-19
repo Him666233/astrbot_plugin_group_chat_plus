@@ -247,6 +247,18 @@ const TechTree = {
         tooltip.innerHTML = '<div class="flow-tooltip-name"></div><div class="flow-tooltip-desc"></div>';
         canvas.appendChild(tooltip);
         this._tooltip = tooltip;
+
+        // Zoom controls — find existing element in HTML, wire click handlers
+        const zoomCtrl = document.getElementById('zoom-ctrl');
+        if (zoomCtrl) {
+            zoomCtrl.classList.remove('hidden');
+            const btnIn = zoomCtrl.querySelector('.zoom-ctrl-in');
+            const btnFit = zoomCtrl.querySelector('.zoom-ctrl-fit');
+            const btnOut = zoomCtrl.querySelector('.zoom-ctrl-out');
+            if (btnIn) btnIn.onclick = (e) => { e.stopPropagation(); this._zoomIn(); };
+            if (btnOut) btnOut.onclick = (e) => { e.stopPropagation(); this._zoomOut(); };
+            if (btnFit) btnFit.onclick = (e) => { e.stopPropagation(); this._zoomToFit(); };
+        }
     },
 
     _setSVGSize(w, h) {
@@ -286,11 +298,12 @@ const TechTree = {
 
         // Responsive layout constants
         const isMobile = window.innerWidth < 768;
-        const STAGE_H_GAP = isMobile ? 180 : this.STAGE_H_GAP;
-        const PIPELINE_V_GAP = isMobile ? 200 : this.PIPELINE_V_GAP;
-        const LEFT_MARGIN = isMobile ? 100 : this.LEFT_MARGIN;
-        const TOP_MARGIN = isMobile ? 100 : this.TOP_MARGIN;
-        const WAVE_AMP = isMobile ? 40 : this.WAVE_AMP;
+        const isTablet = window.innerWidth >= 768 && window.innerWidth < 1100;
+        const STAGE_H_GAP = isMobile ? 220 : (isTablet ? 230 : this.STAGE_H_GAP);
+        const PIPELINE_V_GAP = isMobile ? 240 : (isTablet ? 250 : this.PIPELINE_V_GAP);
+        const LEFT_MARGIN = isMobile ? 120 : (isTablet ? 150 : this.LEFT_MARGIN);
+        const TOP_MARGIN = isMobile ? 110 : (isTablet ? 120 : this.TOP_MARGIN);
+        const WAVE_AMP = isMobile ? 44 : (isTablet ? 50 : this.WAVE_AMP);
 
         const pipelines = FlowData.pipelines;
         console.log('流水线数据:', pipelines);
@@ -312,14 +325,17 @@ const TechTree = {
 
         const totalW = maxX + 300;
         const totalH = TOP_MARGIN + pipelines.length * PIPELINE_V_GAP + WAVE_AMP + 100;
-        this._setSVGSize(Math.max(totalW, 1200), Math.max(totalH, 800));
+        this._contentW = Math.max(totalW, 1200);
+        this._contentH = Math.max(totalH, 800);
+        this._setSVGSize(this._contentW, this._contentH);
 
         pipelines.forEach((pipeline, pi) => {
             const baseY = TOP_MARGIN + pi * PIPELINE_V_GAP;
             const label = document.createElement('div');
             label.className = 'pipeline-title';
             if (pipeline.disabled) label.style.opacity = '0.3';
-            label.style.left = '20px';
+            const labelLeft = isMobile ? '10px' : (isTablet ? '14px' : '20px');
+            label.style.left = labelLeft;
             label.style.top = (baseY - WAVE_AMP - 70) + 'px';
             label.innerHTML = `<span class="pipeline-title-icon">${pipeline.icon}</span>${pipeline.name}<span class="pipeline-title-sub">${pipeline.desc}</span>`;
             this._nodesLevel0.appendChild(label);
@@ -672,17 +688,18 @@ const TechTree = {
 
     _renderStepsForStage(stage, stagePos) {
         const steps = stage.steps;
+        const isMobile = window.innerWidth < 768;
+        const isTablet = window.innerWidth >= 768 && window.innerWidth < 1100;
         const count = steps.length;
         const canvas = document.getElementById('tech-tree-canvas');
         const vw = canvas.clientWidth || 1200;
         const vh = canvas.clientHeight || 800;
 
-        const S = 1.15; // Smooth zoom scale
-        const availW = (vw * 0.7) / S; 
-        const availH = (vh * 0.6) / S; 
+        const S = 1.15;
+        const availW = (vw * (isMobile ? 0.82 : (isTablet ? 0.76 : 0.7))) / S;
+        const availH = (vh * (isMobile ? 0.74 : (isTablet ? 0.68 : 0.6))) / S;
 
-        // Start step flow slightly to the right of the stage
-        const startX = stagePos.x + 90; 
+        const startX = stagePos.x + (isMobile ? 110 : 90);
         const startY = stagePos.y;
 
         // Clear Level 1
@@ -1082,6 +1099,101 @@ const TechTree = {
         this._renderBreadcrumb();
     },
 
+    _zoomIn() {
+        const canvas = document.getElementById('tech-tree-canvas');
+        if (!canvas) return;
+        this._zoomAtPoint(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.25);
+    },
+
+    _zoomOut() {
+        const canvas = document.getElementById('tech-tree-canvas');
+        if (!canvas) return;
+        this._zoomAtPoint(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.25);
+    },
+
+    _zoomAtPoint(sx, sy, factor) {
+        const oldS = this._baseScale;
+        const newS = Math.max(0.5, Math.min(2.5, oldS * factor));
+        if (newS === oldS) return;
+
+        const oldTX = this._baseTranslateX + this._panX;
+        const oldTY = this._baseTranslateY + this._panY;
+
+        const ratio = newS / oldS;
+        this._baseTranslateX = sx - (sx - oldTX) * ratio - this._panX;
+        this._baseTranslateY = sy - (sy - oldTY) * ratio - this._panY;
+        this._baseScale = newS;
+        this._applyViewportTransform();
+    },
+
+    _zoomToFit() {
+        const canvas = document.getElementById('tech-tree-canvas');
+        if (!canvas) return;
+
+        const vw = canvas.clientWidth;
+        const vh = canvas.clientHeight;
+        const pad = 48;
+
+        // Calculate actual bounding box of visible nodes
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const container = this._viewLevel === 0 ? this._nodesLevel0 : this._nodesLevel1;
+        if (container) {
+            const nodes = container.querySelectorAll('.flow-node, .flow-step-node');
+            nodes.forEach(node => {
+                const l = parseFloat(node.style.left) || 0;
+                const t = parseFloat(node.style.top) || 0;
+                const w = node.offsetWidth || 180;
+                const h = node.offsetHeight || 72;
+                minX = Math.min(minX, l);
+                minY = Math.min(minY, t);
+                maxX = Math.max(maxX, l + w);
+                maxY = Math.max(maxY, t + h);
+            });
+        }
+        // Also include pipeline titles in overview mode
+        if (this._viewLevel === 0 && this._nodesLevel0) {
+            const titles = this._nodesLevel0.querySelectorAll('.pipeline-title');
+            titles.forEach(el => {
+                const l = parseFloat(el.style.left) || 0;
+                const t = parseFloat(el.style.top) || 0;
+                const w = el.offsetWidth || 120;
+                const h = el.offsetHeight || 24;
+                minX = Math.min(minX, l);
+                minY = Math.min(minY, t);
+                maxX = Math.max(maxX, l + w);
+                maxY = Math.max(maxY, t + h);
+            });
+        }
+
+        let cw, ch, cx, cy;
+        if (isFinite(minX)) {
+            cw = maxX - minX;
+            ch = maxY - minY;
+            cx = minX;
+            cy = minY;
+        } else if (this._contentW && this._contentH) {
+            cw = this._contentW;
+            ch = this._contentH;
+            cx = 0;
+            cy = 0;
+        } else {
+            return;
+        }
+
+        const fitS = Math.min((vw - pad * 2) / cw, (vh - pad * 2) / ch);
+        const newS = Math.max(0.5, Math.min(2.5, fitS));
+
+        this._baseScale = newS;
+        this._baseTranslateX = (vw - cw * newS) / 2 - cx * newS;
+        this._baseTranslateY = (vh - ch * newS) / 2 - cy * newS;
+        this._panX = 0;
+        this._panY = 0;
+        this._applyViewportTransform();
+        this._viewport.style.transition = 'transform 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+        clearTimeout(this._fitTransitionTimer);
+        this._fitTransitionTimer = setTimeout(() => { this._viewport.style.transition = ''; }, 500);
+    },
+
     // ==================== Config Panel ====================
 
     _selectStep(step) {
@@ -1103,6 +1215,9 @@ const TechTree = {
         title.textContent = `${step.icon} ${step.name}`;
         panel.classList.remove('hidden');
         panel.classList.add('visible');
+        if (typeof App !== 'undefined') {
+            App.setConfigPanelOpen?.(true);
+        }
 
         // Internal steps with no configurable keys
         if (step.internal) {
@@ -1162,6 +1277,9 @@ const TechTree = {
     _closeConfigPanel() {
         const panel = document.getElementById('config-panel');
         if (panel) panel.classList.remove('visible');
+        if (typeof App !== 'undefined') {
+            App.setConfigPanelOpen?.(false);
+        }
         this._activeStepId = null;
         Object.values(this._stepElements).forEach(el => el.classList.remove('active'));
     },
@@ -1215,17 +1333,27 @@ const TechTree = {
         }
     },
 
-    _showTooltip(name, desc, event) {
+    _showTooltip(name, desc, event, side) {
         if (!this._tooltip) return;
         this._tooltip.querySelector('.flow-tooltip-name').textContent = name;
         this._tooltip.querySelector('.flow-tooltip-desc').textContent = desc;
-        this._tooltip.style.left = (event.clientX + 14) + 'px';
+        if (side === 'left') {
+            this._tooltip.style.left = 'auto';
+            this._tooltip.style.right = (window.innerWidth - event.clientX + 14) + 'px';
+        } else {
+            this._tooltip.style.left = (event.clientX + 14) + 'px';
+            this._tooltip.style.right = 'auto';
+        }
         this._tooltip.style.top = (event.clientY + 14) + 'px';
         this._tooltip.classList.add('show');
     },
 
     _hideTooltip() {
-        if (this._tooltip) this._tooltip.classList.remove('show');
+        if (this._tooltip) {
+            this._tooltip.classList.remove('show');
+            this._tooltip.style.left = '';
+            this._tooltip.style.right = '';
+        }
     },
 
     _updateAllStatuses() {
@@ -1495,8 +1623,10 @@ const TechTree = {
         const floater = document.createElement('div');
         floater.className = 'prompt-floater';
         const count = Object.keys(this._floaters).length;
-        floater.style.top = (80 + count * 30) + 'px';
-        floater.style.left = Math.max(20, window.innerWidth - 580 - count * 30) + 'px';
+        const initTop = Math.min(80 + count * 30, window.innerHeight - 200);
+        const initLeft = Math.max(20, Math.min(window.innerWidth - 580 - count * 30, window.innerWidth - 380));
+        floater.style.top = initTop + 'px';
+        floater.style.left = initLeft + 'px';
         const titlebar = document.createElement('div');
         titlebar.className = 'prompt-floater-titlebar';
         const title = document.createElement('span');
@@ -1520,8 +1650,14 @@ const TechTree = {
         pre.textContent = data.content;
         body.appendChild(pre);
         floater.appendChild(body);
-        floater.addEventListener('mousedown', () => this._bringFloaterToTop(floater));
+        const bringTop = () => this._bringFloaterToTop(floater);
+        floater.addEventListener('mousedown', bringTop);
+        floater.addEventListener('touchstart', bringTop, { passive: true });
+        const resizeHandle = document.createElement('div');
+        resizeHandle.className = 'prompt-floater-resize-handle';
+        floater.appendChild(resizeHandle);
         this._enableDrag(floater, titlebar);
+        this._enableResize(floater, resizeHandle);
         document.body.appendChild(floater);
         this._floaters[promptKey] = floater;
         this._bringFloaterToTop(floater);
@@ -1546,26 +1682,87 @@ const TechTree = {
     },
 
     _enableDrag(floater, handle) {
-        let sX, sY, sL, sT;
+        let sX, sY, sL, sT, sW, sH;
+        const clamp = (floater) => {
+            const r = floater.getBoundingClientRect();
+            const w = r.width, h = r.height;
+            const maxLeft = window.innerWidth - w;
+            const maxTop = window.innerHeight - h;
+            let left = parseFloat(floater.style.left) || 0;
+            let top = parseFloat(floater.style.top) || 0;
+            left = Math.max(0, Math.min(left, maxLeft));
+            top = Math.max(0, Math.min(top, maxTop));
+            floater.style.left = left + 'px';
+            floater.style.top = top + 'px';
+        };
         const down = (e) => {
             if (e.target.classList.contains('prompt-floater-close')) return;
             e.preventDefault();
-            sX = e.clientX; sY = e.clientY;
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            sX = clientX; sY = clientY;
             const r = floater.getBoundingClientRect();
             sL = r.left; sT = r.top;
+            sW = r.width; sH = r.height;
             document.addEventListener('mousemove', move);
             document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, { passive: false });
+            document.addEventListener('touchend', up);
             this._bringFloaterToTop(floater);
         };
         const move = (e) => {
-            floater.style.left = (sL + e.clientX - sX) + 'px';
-            floater.style.top = (sT + e.clientY - sY) + 'px';
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            floater.style.left = (sL + clientX - sX) + 'px';
+            floater.style.top = (sT + clientY - sY) + 'px';
+        };
+        const up = (e) => {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            document.removeEventListener('touchmove', move);
+            document.removeEventListener('touchend', up);
+            clamp(floater);
+        };
+        handle.addEventListener('mousedown', down);
+        handle.addEventListener('touchstart', down, { passive: false });
+    },
+
+    _enableResize(floater, handle) {
+        let rX, rY, rW, rH, rL, rT;
+        const down = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            rX = clientX; rY = clientY;
+            const rect = floater.getBoundingClientRect();
+            rW = rect.width; rH = rect.height;
+            rL = parseFloat(floater.style.left) || rect.left;
+            rT = parseFloat(floater.style.top) || rect.top;
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, { passive: false });
+            document.addEventListener('touchend', up);
+            this._bringFloaterToTop(floater);
+        };
+        const move = (e) => {
+            const clientX = e.clientX !== undefined ? e.clientX : e.touches[0].clientX;
+            const clientY = e.clientY !== undefined ? e.clientY : e.touches[0].clientY;
+            let newW = rW + clientX - rX;
+            let newH = rH + clientY - rY;
+            newW = Math.max(280, Math.min(newW, window.innerWidth - rL - 12));
+            newH = Math.max(160, Math.min(newH, window.innerHeight - rT - 12));
+            floater.style.width = newW + 'px';
+            floater.style.height = newH + 'px';
         };
         const up = () => {
             document.removeEventListener('mousemove', move);
             document.removeEventListener('mouseup', up);
+            document.removeEventListener('touchmove', move);
+            document.removeEventListener('touchend', up);
         };
         handle.addEventListener('mousedown', down);
+        handle.addEventListener('touchstart', down, { passive: false });
     },
 
     // ==================== Viewport Pan & Transform ====================
@@ -1785,19 +1982,41 @@ const TechTree = {
         return results;
     },
 
-    _highlightMatch(text, query) {
-        if (!query || !text) return text;
-        const tokens = query.trim().toLowerCase().split(/\s+/).filter(t => t.length > 0);
-        let result = text;
-        for (const token of tokens) {
-            const idx = result.toLowerCase().indexOf(token);
-            if (idx !== -1) {
-                const matched = result.substring(idx, idx + token.length);
-                result = result.substring(0, idx) +
-                    '<span class="flow-search-highlight">' + matched + '</span>' +
-                    result.substring(idx + token.length);
-            }
+    _escapeHtml(text) {
+        if (typeof Utils !== 'undefined' && typeof Utils.escapeHtml === 'function') {
+            return Utils.escapeHtml(String(text || ''));
         }
+        return String(text || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+
+    _highlightMatch(text, query) {
+        if (!query || !text) return this._escapeHtml(text);
+        const raw = String(text);
+        const lower = raw.toLowerCase();
+        const tokens = query.trim().toLowerCase().split(/\s+/).filter(t => t.length > 0);
+        const ranges = [];
+        for (const token of tokens) {
+            const idx = lower.indexOf(token);
+            if (idx === -1) continue;
+            const end = idx + token.length;
+            if (ranges.some(([s, e]) => idx < e && end > s)) continue;
+            ranges.push([idx, end]);
+        }
+        if (!ranges.length) return this._escapeHtml(raw);
+        ranges.sort((a, b) => a[0] - b[0]);
+        let result = '';
+        let cursor = 0;
+        for (const [start, end] of ranges) {
+            result += this._escapeHtml(raw.slice(cursor, start));
+            result += '<span class="flow-search-highlight">' + this._escapeHtml(raw.slice(start, end)) + '</span>';
+            cursor = end;
+        }
+        result += this._escapeHtml(raw.slice(cursor));
         return result;
     },
 
@@ -1829,7 +2048,7 @@ const TechTree = {
 
             const nameRow = document.createElement('div');
             nameRow.className = 'flow-search-item-name';
-            nameRow.innerHTML = `${r.icon} ${this._highlightMatch(r.name, query)}`;
+            nameRow.innerHTML = `${this._escapeHtml(r.icon)} ${this._highlightMatch(r.name, query)}`;
             item.appendChild(nameRow);
 
             const pathRow = document.createElement('div');
@@ -1921,11 +2140,22 @@ const TechTree = {
             }, { passive: false });
         }
 
-        // Mouse wheel → pan
+        // Mouse wheel → pan (Ctrl+wheel → zoom)
         canvas.addEventListener('wheel', (e) => {
             // Don't intercept when scrolling inside config panel
             if (e.target.closest('.config-panel')) return;
             e.preventDefault();
+
+            if (e.ctrlKey || e.metaKey) {
+                // Ctrl+wheel → zoom centered on cursor
+                const rect = canvas.getBoundingClientRect();
+                const sx = e.clientX - rect.left;
+                const sy = e.clientY - rect.top;
+                const factor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
+                this._zoomAtPoint(sx, sy, factor);
+                return;
+            }
+
             this._panX -= e.deltaX;
             this._panY -= e.deltaY;
             // Apply immediately without CSS transition for smooth feel

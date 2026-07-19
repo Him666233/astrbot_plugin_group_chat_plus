@@ -22,13 +22,24 @@ v1.2.0 更新：
 - 新增清理：历史判断记录、兴趣话题检测提示等
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import re
 from astrbot.api.all import *
-from astrbot.api.message_components import Plain, At, Image, Reply
+from astrbot.api.message_components import Plain, At, AtAll, Image, Reply
 from astrbot.core.message.components import Forward
+
+# 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
+try:
+    from astrbot.core.message.components import Video, Record, File
+except ImportError:
+    try:
+        from astrbot.api.message_components import Video, Record, File
+    except ImportError:
+        Video = None
+        Record = None
+        File = None
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -143,6 +154,52 @@ class MessageCleaner:
         r"\n*=+\n*🔄 【对话收尾提示】[\s\S]*?=+\n*",  # 回复AI的收尾提示
         r"与当前用户的连续对话轮次:[\s\S]*?(?=\n\n|$)",  # 疲劳轮次信息
         r"你已经与这个用户连续对话了 \d+ 轮[\s\S]*?(?=\n\n|$)",  # 收尾提示内容
+        # 🆕 v1.2.2-hotfix.1: 人格中立化改造 - 新格式 [系统信息-xxx] 标记
+        r"\[系统信息-时间与活跃度\][\s\S]*?(?=\n\n|$)",
+        r"\[系统信息-关键词触发\][\s\S]*?(?=\n\n|$)",
+        r"\[系统信息-兴趣话题\][\s\S]*?(?=\n\n|$)",
+        r"\[系统信息-对话疲劳\][\s\S]*?(?=\n\n|$)",
+        r"\[系统信息-主动对话上下文\][\s\S]*?(?=\n\n|$)",
+        r"\[系统指令-历史上下文识别\][\s\S]*?(?=请开始|$)",
+        r"你是一个群聊参与者，请严格按照你的人格设定[\s\S]*?请开始判断",  # 新版决策AI开头
+        # 🆕 窗口缓冲消息区域（追加消息提示词，保存时需过滤）
+        r"--- 以下是你收到这条消息后，同一用户或其他用户紧接着又发的消息 ---[\s\S]*?--- 以上为紧接着的追加消息 ---",
+        r"这些追加消息帮助你理解完整对话背景。追加消息的发送者可能与当前对话对象不同，注意根据名字和ID区分。",
+        r"\[系统信息-Smart并发追加消息\][\s\S]*?(?=\n\n|$)",
+        r"\[系统提示-Smart并发\][\s\S]*?(?=\n\n|$)",  # Smart批次回复提示增强
+        r"\[第三方插件补充信息\][\s\S]*?\[第三方插件补充信息结束\]",  # 第三方插件补充信息整块（新旧格式外层）
+        r"\[第三方插件补充 - [^\]]+\]",  # 逐插件具名 prompt 开头（孤儿兜底）
+        r"\[第三方插件补充 - [^\]]+ 结束\]",  # 逐插件具名 prompt 结束（孤儿兜底）
+        r"\[第三方插件片段 \d+\][\s\S]*?\[第三方插件片段 \d+ 结束\]",  # 旧差分编号片段兜底
+        # 第三方插件上下文消息清理（contexts 中的 system 消息）
+        r"\[第三方插件注入上下文 - [^\]]+\]\n以下对话记录来自插件 '[^']+' 的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+        r"\[第三方插件注入上下文 - [^\]]+ 结束\]",
+        r"\[第三方插件注入上下文\]\n以下对话记录来自其他插件的提示词系统，请作为额外的对话上下文理解，与主对话历史融合参考。",
+        r"\[第三方插件注入上下文 结束\]",
+        # 🆕 v1.2.1: 新版历史标记和分隔线
+        r"【禁止重复-你的历史回复】",  # 新版 bot 历史回复前缀标记
+        r"=== 以上全部是历史消息，你已经处理过了，不要重复回答 ===",  # 新版历史分隔提示
+        r"=== 【重要】以下是当前新消息（请优先关注这条消息的核心内容）===",  # 新版当前消息分隔线
+        r"\[系统信息-回复密度\][\s\S]*?(?=\n\n|$)",  # 回复密度提示
+        r"\[Smart合并\][^\n]*",  # 🆕 Smart并发合并虚拟AI回复标记
+        r"\[系统信息-最近未接上对话\][\s\S]*?(?=\n\n|$)",  # 最近未接上对话（决策AI）
+        r"\[系统提示-单独无信息@消息上下文提醒\][\s\S]*?(?=\n\n|$)",  # 单独无信息@消息提醒
+        r"\[空@补充提示\][\s\S]*?(?=\n\n|$)",  # 兼容旧版空@中性强化提示
+        r"如果最近未接上的人不是当前发送者本人，不要强行续接别人的话题。",  # 最近未接上补充尾句
+        r"当前这个单独@你的人，和你最近一次明确回复的对象是同一个人，[\s\S]*?不要强行续话。",  # 兼容旧版空@同人强化
+        r"当前这个人单独@了你，但没有附带其他内容。[\s\S]*?不要死盯上一段对话。",  # 兼容旧版空@异人/中性强化
+        r"空@AI强化始终默认生效，不提供单独配置项",  # 兼容旧版展示文案兜底
+        r"\[系统提示-工具提醒开始\][\s\S]*?\[系统提示-工具提醒结束\]",  # 工具提醒整块
+        # ── 一次性系统提示词清理（on_llm_request 注入到 system_prompt，不应保存到历史） ──
+        r"\[系统-Skills开始\][\s\S]*?\[系统-Skills结束\]",  # Skills 提示词整块
+        r"\[系统-Skills开始\]",  # Skills 开始标记（孤儿兜底）
+        r"\[系统-Skills结束\]",  # Skills 结束标记（孤儿兜底）
+        r"\[系统-工具调用指引开始\][\s\S]*?\[系统-工具调用指引结束\]",  # 工具调用指引整块
+        r"\[系统-工具调用指引开始\]",  # 工具调用指引开始标记（孤儿兜底）
+        r"\[系统-工具调用指引结束\]",  # 工具调用指引结束标记（孤儿兜底）
+        r"\[系统-情绪提示开始\][\s\S]*?\[系统-情绪提示结束\]",  # 情绪提示整块
+        r"\[系统-情绪提示开始\]",  # 情绪提示开始标记（孤儿兜底）
+        r"\[系统-情绪提示结束\]",  # 情绪提示结束标记（孤儿兜底）
     ]
 
     @staticmethod
@@ -319,7 +376,9 @@ class MessageCleaner:
         return bool(re.match(pattern, cleaned, flags=re.IGNORECASE))
 
     @staticmethod
-    def extract_raw_message_from_event(event: AstrMessageEvent) -> str:
+    def extract_raw_message_from_event(
+        event: AstrMessageEvent, self_id: str = None
+    ) -> str:
         """
         从事件中提取纯净的原始消息（不含任何系统添加的内容）
 
@@ -350,12 +409,54 @@ class MessageCleaner:
                         raw_parts.append("[图片]")
                     elif isinstance(component, Reply):
                         # 引用消息组件，提取引用信息
-                        reply_text = MessageCleaner._format_reply_component(component)
+                        reply_text = MessageCleaner._format_reply_component(
+                            component, self_id=self_id
+                        )
                         if reply_text:
                             raw_parts.append(reply_text)
                     elif isinstance(component, Forward):
                         # 转发消息组件：如果未被提前解析（如转发解析功能关闭），使用占位标记
                         raw_parts.append("[转发消息]")
+                    elif Video is not None and isinstance(component, Video):
+                        # 视频组件，尝试保留路径/URL等原始信息
+                        vid_ref = (
+                            getattr(component, "file", None)
+                            or getattr(component, "path", None)
+                            or getattr(component, "url", None)
+                        )
+                        if vid_ref and str(vid_ref).strip():
+                            raw_parts.append(f"[视频: {str(vid_ref).strip()}]")
+                        else:
+                            raw_parts.append("[视频]")
+                    elif Record is not None and isinstance(component, Record):
+                        # 语音/音频组件，尝试保留路径/URL等原始信息
+                        rec_ref = (
+                            getattr(component, "url", None)
+                            or getattr(component, "file", None)
+                            or getattr(component, "path", None)
+                        )
+                        if rec_ref and str(rec_ref).strip():
+                            raw_parts.append(f"[语音: {str(rec_ref).strip()}]")
+                        else:
+                            raw_parts.append("[语音]")
+                    elif File is not None and isinstance(component, File):
+                        # 文件组件，保留文件名+路径信息
+                        file_name = getattr(component, "name", "") or ""
+                        file_ref = (
+                            getattr(component, "file_", None)
+                            or getattr(component, "url", None)
+                            or getattr(component, "file", None)
+                        )
+                        if file_name and file_ref and str(file_ref).strip():
+                            raw_parts.append(
+                                f"[文件: {file_name}, {str(file_ref).strip()}]"
+                            )
+                        elif file_name:
+                            raw_parts.append(f"[文件: {file_name}]")
+                        elif file_ref and str(file_ref).strip():
+                            raw_parts.append(f"[文件: {str(file_ref).strip()}]")
+                        else:
+                            raw_parts.append("[文件]")
 
                 if raw_parts:
                     raw_message = "".join(raw_parts).strip()
@@ -423,8 +524,109 @@ class MessageCleaner:
             # 发生错误时返回空字符串
             return ""
 
+    # 🔧 私聊版 Reply 组件 chain 提取最大递归深度
+    _REPLY_CHAIN_EXTRACT_MAX_DEPTH: int = 5
+
     @staticmethod
-    def _format_reply_component(reply_component) -> str:
+    def _extract_text_from_reply_component_chain(
+        reply_component, depth: int = 0
+    ) -> str:
+        """从Reply组件的chain中提取文本表示。私聊版，与群聊版逻辑一致。"""
+        if depth > MessageCleaner._REPLY_CHAIN_EXTRACT_MAX_DEPTH:
+            return ""
+
+        chain = getattr(reply_component, "chain", None)
+        if not chain or not isinstance(chain, list):
+            return ""
+
+        return MessageCleaner._extract_text_from_component_chain(
+            chain, depth=depth + 1
+        )
+
+    @staticmethod
+    def _extract_text_from_component_chain(chain: list, depth: int = 0) -> str:
+        """从消息组件链中提取文本。私聊版，与群聊版逻辑一致。"""
+        if depth > MessageCleaner._REPLY_CHAIN_EXTRACT_MAX_DEPTH:
+            return ""
+
+        parts = []
+        for comp in chain:
+            if isinstance(comp, Plain):
+                if comp.text is not None:
+                    parts.append(str(comp.text))
+            elif isinstance(comp, At):
+                if hasattr(comp, "qq") and comp.qq:
+                    parts.append(f"[At:{comp.qq}]")
+                else:
+                    parts.append("[At]")
+            elif isinstance(comp, AtAll):
+                parts.append("[At:all]")
+            elif isinstance(comp, Image):
+                # 提取图片原始信息：优先 url → file → path
+                img_ref = (
+                    getattr(comp, "url", None)
+                    or getattr(comp, "file", None)
+                    or getattr(comp, "path", None)
+                )
+                if img_ref and str(img_ref).strip():
+                    parts.append(f"[图片: {str(img_ref).strip()}]")
+                else:
+                    parts.append("[图片]")
+            elif isinstance(comp, Reply):
+                nested_text = (
+                    MessageCleaner._extract_text_from_reply_component_chain(
+                        comp, depth=depth + 1
+                    )
+                )
+                if nested_text:
+                    parts.append(f"[引用消息: {nested_text}]")
+                else:
+                    parts.append("[引用消息]")
+            elif isinstance(comp, Forward):
+                parts.append("[转发消息]")
+            elif Video is not None and isinstance(comp, Video):
+                # 提取视频原始信息：优先 file → url → path
+                vid_ref = (
+                    getattr(comp, "file", None)
+                    or getattr(comp, "url", None)
+                    or getattr(comp, "path", None)
+                )
+                if vid_ref and str(vid_ref).strip():
+                    parts.append(f"[视频: {str(vid_ref).strip()}]")
+                else:
+                    parts.append("[视频]")
+            elif Record is not None and isinstance(comp, Record):
+                # 提取语音原始信息：优先 url → file → path
+                rec_ref = (
+                    getattr(comp, "url", None)
+                    or getattr(comp, "file", None)
+                    or getattr(comp, "path", None)
+                )
+                if rec_ref and str(rec_ref).strip():
+                    parts.append(f"[语音: {str(rec_ref).strip()}]")
+                else:
+                    parts.append("[语音]")
+            elif File is not None and isinstance(comp, File):
+                file_name = getattr(comp, "name", "") or ""
+                file_path = (
+                    getattr(comp, "file_", None)
+                    or getattr(comp, "url", None)
+                )
+                if file_name and file_path and str(file_path).strip():
+                    parts.append(
+                        f"[文件: {file_name}, {str(file_path).strip()}]"
+                    )
+                elif file_name:
+                    parts.append(f"[文件: {file_name}]")
+                elif file_path and str(file_path).strip():
+                    parts.append(f"[文件: {str(file_path).strip()}]")
+                else:
+                    parts.append("[文件]")
+
+        return "".join(parts)
+
+    @staticmethod
+    def _format_reply_component(reply_component, self_id: str = None) -> str:
         """
         格式化引用消息组件为文本表示
 
@@ -436,8 +638,7 @@ class MessageCleaner:
         """
         try:
             # 尝试提取引用的消息内容
-            # Reply组件包含：sender_id, sender_nickname, message_str等字段
-            parts = []
+            # Reply组件包含：sender_id, sender_nickname, message_str, chain 等字段
 
             # 🆕 获取发送者ID和昵称（根据AstrBot的Reply组件定义）
             sender_id = None
@@ -455,29 +656,65 @@ class MessageCleaner:
                 if hasattr(reply_component.sender, "nickname"):
                     sender_nickname = reply_component.sender.nickname
 
-            # 尝试获取消息内容
+            # 🔧 优先从 Reply 组件的 chain 中提取消息文本
+            # chain 包含被引用消息的完整组件链，遍历 chain 可保留非文本
+            # 组件在原始位置的占位标记。message_str 仅作兜底。
             message_content = None
-            if hasattr(reply_component, "message_str"):
-                message_content = reply_component.message_str
-            elif hasattr(reply_component, "message"):
-                message_content = reply_component.message
+            chain_text = MessageCleaner._extract_text_from_reply_component_chain(
+                reply_component
+            )
+            if chain_text:
+                message_content = chain_text
+                if DEBUG_MODE:
+                    logger.info(
+                        f"[消息清理] 从 Reply chain 提取到引用内容: "
+                        f"{chain_text[:100]}..."
+                    )
+            else:
+                # chain 不可用或为空，回退到 message_str / message
+                if hasattr(reply_component, "message_str"):
+                    message_content = reply_component.message_str
+                elif hasattr(reply_component, "message"):
+                    message_content = reply_component.message
+
+                if (not message_content or
+                        not str(message_content).strip()):
+                    if DEBUG_MODE:
+                        logger.info(
+                            "[消息清理] Reply chain 和 message_str 均无法提取内容"
+                        )
+
+            # 检测被引用消息的发送者是否为AI自己
+            if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
+                sender_nickname = None
+            is_self = self_id and sender_id and str(sender_id) == str(self_id)
+            self_suffix = "(你)" if is_self else ""
 
             # 🆕 构建引用消息格式（与其他消息格式保持一致：发送者名字(ID:xxx)）
             if sender_nickname and sender_id and message_content:
-                # 完整格式：[引用 发送者名字(ID:xxx): 消息内容]
-                return f"[引用 {sender_nickname}(ID:{sender_id}): {message_content}]"
+                # 完整格式：[引用 发送者名字(你)(ID:xxx): 消息内容]
+                return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
             elif sender_id and message_content:
                 # 有ID但没有昵称
-                return f"[引用 用户(ID:{sender_id}): {message_content}]"
+                return (
+                    f"[引用 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
+                )
             elif sender_nickname and message_content:
                 # 有昵称但没有ID（兼容情况）
-                return f"[引用 {sender_nickname}: {message_content}]"
+                return f"[引用 {sender_nickname}{self_suffix}: {message_content}]"
             elif message_content:
                 # 只有消息内容
                 return f"[引用消息: {message_content}]"
             else:
-                # 什么都没有
-                return "[引用消息]"
+                # 内容无法提取，但有发送者信息时保留引用框架
+                if sender_nickname and sender_id:
+                    return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_id:
+                    return f"[引用 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+                elif sender_nickname:
+                    return f"[引用 {sender_nickname}{self_suffix}: (无法获取引用内容)]"
+                else:
+                    return "[引用消息]"
 
         except Exception as e:
             if DEBUG_MODE:
@@ -518,7 +755,7 @@ class MessageCleaner:
         """
         处理缓存消息中的图片
 
-        概率筛选失败时，缓存的消息需要特殊处理图片：
+        未通过概率筛选时，缓存的消息需要特殊处理图片：
         - 如果消息只包含图片（纯图片），不缓存（返回 False）
         - 如果消息是文本+图片，移除图片标记，只保留文本
         - 如果消息只有文本，直接保留

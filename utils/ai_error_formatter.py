@@ -148,7 +148,11 @@ def _truncate(msg: str, max_len: int = _MAX_ERROR_LENGTH) -> str:
 
 def _build_html_error_message(label: str, status: Optional[int]) -> str:
     code_str = f" HTTP {status}" if status else ""
-    detail = _HTTP_STATUS_MAP.get(status, "") if status else "返回了 HTML 错误页面（可能是网关/代理/CNAM 错误）"
+    detail = (
+        _HTTP_STATUS_MAP.get(status, "")
+        if status
+        else "返回了 HTML 错误页面（可能是网关/代理/CNAM 错误）"
+    )
     return (
         f"[{label}] ⚠️ AI 服务商故障{code_str}：{detail}\n"
         f"   → 这不是插件代码的问题，请检查 AI API 服务是否正常运行"
@@ -165,14 +169,12 @@ def _build_upstream_empty_output_message(label: str, raw: str) -> str:
 
 
 def _build_http_error_message(label: str, code: int, raw: str) -> str:
-    detail = _HTTP_STATUS_MAP.get(code, f"未知 HTTP 错误")
+    detail = _HTTP_STATUS_MAP.get(code, "未知 HTTP 错误")
     is_provider_fault = code >= 500
     fault_type = "AI 服务商故障" if is_provider_fault else "请求参数/配置问题"
     extra = _truncate(raw) if len(raw) < _MAX_ERROR_LENGTH and raw != detail else ""
     extra_line = f"\n   → 原始信息: {extra}" if extra else ""
-    return (
-        f"[{label}] ⚠️ {fault_type}（HTTP {code}）：{detail}{extra_line}"
-    )
+    return f"[{label}] ⚠️ {fault_type}（HTTP {code}）：{detail}{extra_line}"
 
 
 def _build_network_error_message(label: str, hint: str, raw: str) -> str:

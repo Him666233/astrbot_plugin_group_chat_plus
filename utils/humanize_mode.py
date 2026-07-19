@@ -9,7 +9,7 @@
 4. 动态消息阈值 - 根据连续不回复次数调整触发阈值
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import time
@@ -108,22 +108,20 @@ class HumanizeModeManager:
             config: 插件配置（由 main.py 统一提取）
         """
         cls._config = config
+        # 提取所有配置到类变量，运行时直接读取类变量
+        cls._silent_mode_max_duration = config.get("silent_mode_max_duration", 600)
+        cls._silent_mode_max_messages = config.get("silent_mode_max_messages", 8)
+        cls._interest_keywords = config.get("interest_keywords", [])
+        cls._silent_mode_threshold = config.get("silent_mode_threshold", 3)
+        cls._enable_dynamic_threshold = config.get("enable_dynamic_threshold", True)
+        cls._base_message_threshold = config.get("base_message_threshold", 1)
+        cls._max_message_threshold = config.get("max_message_threshold", 3)
+        cls._include_decision_history_in_prompt = config.get(
+            "include_decision_history_in_prompt", True
+        )
+        cls._interest_boost_probability = config.get("interest_boost_probability", 0.3)
         if DEBUG_MODE:
             logger.info("[拟人增强] 管理器已初始化")
-
-    @classmethod
-    def get_config(cls, key: str, default: Any = None) -> Any:
-        """
-        获取配置值
-
-        说明：配置由 main.py 统一提取后传入，此处直接从 _config 中获取，
-        如果 _config 为 None 则使用 DEFAULT_CONFIG 作为兜底（仅用于单元测试场景）
-        """
-        if cls._config is None:
-            # 仅用于单元测试场景，正常运行时 _config 不应为 None
-            return cls.DEFAULT_CONFIG.get(key, default)
-        # 直接从配置中获取，不再提供默认值
-        return cls._config.get(key, default)
 
     @classmethod
     async def get_or_create_state(cls, chat_key: str) -> ChatHumanizeState:
@@ -172,13 +170,13 @@ class HumanizeModeManager:
 
         # 检查2: 是否超过最大静默时间
         silent_duration = current_time - state.silent_start_time
-        max_duration = cls.get_config("silent_mode_max_duration", 600)
+        max_duration = cls._silent_mode_max_duration
         if silent_duration > max_duration:
             await cls._exit_silent_mode(chat_key, f"静默超时({int(silent_duration)}秒)")
             return False, ""
 
         # 检查3: 是否积累了足够多的消息
-        max_messages = cls.get_config("silent_mode_max_messages", 8)
+        max_messages = cls._silent_mode_max_messages
         if state.pending_message_count >= max_messages:
             await cls._exit_silent_mode(
                 chat_key, f"消息积累({state.pending_message_count}条)"
@@ -186,7 +184,7 @@ class HumanizeModeManager:
             return False, ""
 
         # 检查4: 兴趣话题检测
-        interest_keywords = cls.get_config("interest_keywords", [])
+        interest_keywords = cls._interest_keywords
         if interest_keywords and message_text:
             for keyword in interest_keywords:
                 if keyword and keyword.lower() in message_text.lower():
@@ -266,7 +264,7 @@ class HumanizeModeManager:
                 )
 
             # 检查是否应该进入静默模式
-            threshold = cls.get_config("silent_mode_threshold", 3)
+            threshold = cls._silent_mode_threshold
             if (
                 state.consecutive_no_reply_count >= threshold
                 and not state.silent_until_called
@@ -292,13 +290,13 @@ class HumanizeModeManager:
         Returns:
             消息阈值
         """
-        if not cls.get_config("enable_dynamic_threshold", True):
-            return cls.get_config("base_message_threshold", 1)
+        if not cls._enable_dynamic_threshold:
+            return cls._base_message_threshold
 
         state = await cls.get_or_create_state(chat_key)
 
-        base = cls.get_config("base_message_threshold", 1)
-        max_threshold = cls.get_config("max_message_threshold", 3)
+        base = cls._base_message_threshold
+        max_threshold = cls._max_message_threshold
 
         # 根据连续不回复次数计算阈值
         # 0-2次: 基础阈值
@@ -340,7 +338,7 @@ class HumanizeModeManager:
             return False, "", 0
 
         # 如果未启用动态阈值，不跳过
-        if not cls.get_config("enable_dynamic_threshold", True):
+        if not cls._enable_dynamic_threshold:
             return False, "", 0
 
         state = await cls.get_or_create_state(chat_key)
@@ -402,7 +400,7 @@ class HumanizeModeManager:
         Returns:
             历史决策提示词文本
         """
-        if not cls.get_config("include_decision_history_in_prompt", True):
+        if not cls._include_decision_history_in_prompt:
             return ""
 
         state = await cls.get_or_create_state(chat_key)
@@ -446,7 +444,7 @@ class HumanizeModeManager:
         Returns:
             (is_match, matched_keyword): 是否匹配, 匹配到的关键词
         """
-        interest_keywords = cls.get_config("interest_keywords", [])
+        interest_keywords = cls._interest_keywords
 
         if not interest_keywords or not message_text:
             return False, None
@@ -472,7 +470,7 @@ class HumanizeModeManager:
         is_match, keyword = await cls.check_interest_match(message_text)
 
         if is_match:
-            boost = cls.get_config("interest_boost_probability", 0.3)
+            boost = cls._interest_boost_probability
             if DEBUG_MODE:
                 logger.info(f"[拟人增强] 检测到兴趣话题 '{keyword}'，概率提升 {boost}")
             return boost

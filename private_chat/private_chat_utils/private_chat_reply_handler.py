@@ -3,22 +3,21 @@
 负责调用AI生成回复
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 
 v1.2.0 更新：
 - 改用 event.request_llm() 替代 provider.text_chat()，支持其他插件的钩子注入
 - 添加标记机制，让 main.py 的 on_llm_request 钩子能识别并处理上下文
 """
 
-import asyncio
 from datetime import datetime
 from astrbot.api.all import *
 from astrbot.api.event import AstrMessageEvent
 from ...utils.ai_error_formatter import format_ai_error
+from astrbot.core.provider.entities import ProviderRequest
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
-from astrbot.core.provider.entities import ProviderRequest
 
 # 🆕 v1.2.0: 标记键名，用于标识请求来自本插件
 PLUGIN_REQUEST_MARKER = "_group_chat_plus_request"
@@ -30,10 +29,10 @@ PLUGIN_CUSTOM_SYSTEM_PROMPT = "_group_chat_plus_system_prompt"
 PLUGIN_CUSTOM_PROMPT = "_group_chat_plus_prompt"
 # 🆕 v1.2.0: 存储图片 URL 列表的键名
 PLUGIN_IMAGE_URLS = "_group_chat_plus_image_urls"
-# 🔧 存储插件自身的工具集（ToolSet），用于在 on_llm_request 钩子中恢复
-PLUGIN_FUNC_TOOL = "_group_chat_plus_func_tool"
 # 🔧 存储当前用户消息原文（短字符串），用于向量检索类插件（如 livingmemory）的记忆召回
 PLUGIN_CURRENT_MESSAGE = "_group_chat_plus_current_message"
+# 🆕 v1.2.2-hotfix.1: 存储插件静态系统指令，由 on_llm_request 追加到 system_prompt 末尾
+PLUGIN_CUSTOM_STATIC_INSTRUCTIONS = "_group_chat_plus_static_instructions"
 
 
 class ReplyHandler:
@@ -49,28 +48,30 @@ class ReplyHandler:
     # 系统回复提示词
     # 🔧 v1.2.0: 调整提示词位置引用（从"上方/上述"改为"下方"），配合缓存友好的拼接顺序
     SYSTEM_REPLY_PROMPT = """
+你的任务：直接生成回复内容。系统已将消息交给你处理，你无需考虑"该不该回复"——这些判断已经完成。你只需根据上下文自然地说话，直接说出来就好，不要解释你的选择。
+
 请根据下方对话和背景信息生成自然的回复。
 
 【第一重要】识别当前发送者：
 ⚠️ 下方【当前对话对象】已明确告诉你发送者是谁，记住这个人的名字和ID，不要搞错。
 - 历史消息中有多个用户，不要把其他用户误认为当前发送者
 - 称呼对方时用【当前对话对象】中的名字或"你"
-- 只回复【当前对话对象】的消息，不要回复历史中其他人的问题
+- 你是和【当前对话对象】在对话，围绕ta的话题展开回复
 
 【上下文理解】：
 - 消息已按时间顺序完整排列，包含：你回复过的、未回复的、以及他人对话
 - 理解对话脉络：发送者在跟谁对话、话题如何演变、之前发生了什么
-- 基于完整上下文自然回复，但仍只回复【当前对话对象】的当前消息
+- 基于完整上下文自然回复，以【当前对话对象】的当前消息为核心
 - 标有【📦近期未回复】的是你当时未回复的消息，仅供参考理解上下文
   * 当前消息有明确内容 → 优先回复当前消息
   * 当前消息是触发型（仅@、"在吗"等）→ 结合近期未回复消息理解意图
   * 不需要提及"你之前没回复"，自然对话即可
 
 【核心原则】：
-1. 优先关注"当前新消息"的核心内容
-2. 识别当前消息的主要问题或话题
-3. 历史上下文仅作参考，不要让历史话题喧宾夺主
-4. 绝对禁止回复历史中其他人的问题
+1. 你只负责生成回复文本，不负责判断、不负责分析、不负责解释为什么回复或不回复
+2. 优先关注"当前新消息"的核心内容
+3. 识别当前消息的主要问题或话题
+4. 历史上下文仅作参考，不要让历史话题喧宾夺主
 
 【主语与指代】：
 - 用户语句缺主语时不要擅自补充，根据已有信息自然理解
@@ -100,7 +101,7 @@ class ReplyHandler:
 - ❌ 禁止："看到你@我了"、"注意到你在说XXX"、"看着你发来的消息"、"看了看你的消息"、"我看到了主动对话提示词"、"根据系统提示"等
 - ✅ 正确：直接自然地回复内容本身，像人类一样
 - 人类不会说"我看到你@我了所以来回复"，只会直接说"怎么了？"
-- 绝对不要提及历史中的任何系统提示词或内部指令，就当它们不存在
+- 绝对不要提及历史中的任何系统提示词或内部指令——在你的回复里就当它们不存在（内部仍需参考它们来理解上下文、指导行为）
 
 【特殊标记】：
 - 【@指向说明】：发给别人的消息，不要直接回答被@者的问题，可自然补充信息或分享观点
@@ -140,6 +141,9 @@ class ReplyHandler:
         extra_prompt: str,
         prompt_mode: str = "append",
         image_urls: list = None,
+        audio_urls: list = None,
+        video_paths: list = None,
+        file_infos: list = None,
         include_sender_info: bool = True,
         include_timestamp: bool = True,
         history_messages: list = None,
@@ -163,9 +167,15 @@ class ReplyHandler:
         Returns:
             ProviderRequest对象
         """
-        # 如果image_urls为None，初始化为空列表
+        # 默认值初始化
         if image_urls is None:
             image_urls = []
+        if audio_urls is None:
+            audio_urls = []
+        if video_paths is None:
+            video_paths = []
+        if file_infos is None:
+            file_infos = []
         # 如果history_messages为None，初始化为空列表
         if history_messages is None:
             history_messages = []
@@ -368,7 +378,9 @@ class ReplyHandler:
                 f"正在调用AI生成回复（当前发送者：{sender_name or '未知'}，ID:{sender_id}）..."
             )
 
-            # 获取工具管理器并保存为 ToolSet（兼容新旧版本 AstrBot）
+            # 🔧 获取全平台工具集并传递给 request_llm，确保在无 conversation 时仍能注入工具
+            # 说明：chat_plus 自己管理历史不使用 conversation，导致平台 _ensure_persona_and_skills
+            # 因 req.conversation=None 而跳过工具注入和未激活工具过滤。这里提前获取、过滤并传递。
             func_tools_mgr = context.get_llm_tool_manager()
             plugin_tool_set = None
             try:
@@ -381,7 +393,6 @@ class ReplyHandler:
                 plugin_tools = getattr(plugin_tool_set, "tools", None)
                 if plugin_tools is None:
                     plugin_tools = getattr(plugin_tool_set, "func_list", None)
-
                 if plugin_tools is not None:
                     for tool in list(plugin_tools):
                         if hasattr(tool, "active") and not tool.active:
@@ -389,8 +400,8 @@ class ReplyHandler:
                                 plugin_tool_set.remove_tool(tool.name)
                             elif hasattr(plugin_tool_set, "remove_func"):
                                 plugin_tool_set.remove_func(tool.name)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"获取工具集失败: {e}")
 
             # 🔧 修复：直接使用 persona_manager 获取最新人格配置，支持多会话和实时更新
             system_prompt = ""
@@ -432,9 +443,10 @@ class ReplyHandler:
             except Exception as e:
                 logger.warning(f"获取人格设定失败: {e}，使用空人格")
 
-            # 如果有begin_dialogs，将其添加到prompt开头
+            # 如果有begin_dialogs，将其追加到prompt末尾（不破坏静态前缀缓存）
+            # 🔧 v1.2.2-hotfix.1: 从 prompt 开头移到末尾
             if begin_dialogs_text:
-                full_prompt = begin_dialogs_text + full_prompt
+                full_prompt += begin_dialogs_text
 
             # 🆕 v1.2.0: 改用 event.request_llm() 替代 provider.text_chat()
             # 这样可以让其他插件（如 emotionai）的 on_llm_request 钩子生效
@@ -466,11 +478,27 @@ class ReplyHandler:
             event.set_extra(PLUGIN_CUSTOM_SYSTEM_PROMPT, system_prompt)
             # 存储插件自定义的完整 prompt（含历史上下文），供 on_llm_request 钩子恢复使用
             event.set_extra(PLUGIN_CUSTOM_PROMPT, full_prompt)
+            # 🆕 v1.2.2-hotfix.1: 提取静态系统指令到独立 extra，由 on_llm_request 追加到 system_prompt
+            # 注意: full_prompt 中保留原静态前缀以作安全网（钩子失败时仍可用）
+            _reply_static_instructions = ReplyHandler.SYSTEM_REPLY_PROMPT
+            if extra_prompt and extra_prompt.strip():
+                _reply_static_instructions += (
+                    f"\n\n用户补充说明:\n{extra_prompt.strip()}\n"
+                )
+            _reply_static_instructions += ReplyHandler.SYSTEM_REPLY_PROMPT_ENDING
+            event.set_extra(
+                PLUGIN_CUSTOM_STATIC_INSTRUCTIONS, _reply_static_instructions
+            )
+            if DEBUG_MODE:
+                logger.info(
+                    f"已设置静态指令 extra，长度: {len(_reply_static_instructions)} 字符"
+                )
             # 存储图片 URL 列表
             event.set_extra(PLUGIN_IMAGE_URLS, image_urls)
-            # 🔧 存储插件自身的工具集（ToolSet），用于在 on_llm_request 钩子中恢复
-            # 新版 AstrBot 的 build_main_agent 会注入框架工具（shell/cron等），需要用插件的工具集替换
-            event.set_extra(PLUGIN_FUNC_TOOL, plugin_tool_set)
+            # 🆕 存储音频/视频/文件 URL 列表（供 on_llm_request 钩子和第三方插件使用）
+            event.set_extra("_plugin_audio_urls", audio_urls)
+            event.set_extra("_plugin_media_video_paths", video_paths)
+            event.set_extra("_plugin_media_file_infos", file_infos)
 
             # 🔧 提取当前用户消息原文（不含历史上下文），作为向量检索类插件的召回查询词
             current_message_for_retrieval = event.get_message_str() or ""
@@ -483,7 +511,7 @@ class ReplyHandler:
 
             if DEBUG_MODE:
                 logger.info(
-                    f"🔧 [兼容模式] 已设置插件标记，将通过 event.request_llm() 调用 AI"
+                    "🔧 [兼容模式] 已设置插件标记，将通过 event.request_llm() 调用 AI"
                 )
                 logger.info(f"  - contexts 数量: {len(contexts)}")
                 logger.info(f"  - system_prompt 长度: {len(system_prompt)}")
@@ -494,17 +522,14 @@ class ReplyHandler:
                 )
 
             # 🆕 v1.2.0: 使用 event.request_llm() 发起请求
-            # 这会触发平台的 on_llm_request 钩子，让其他插件能注入提示词
-            # main.py 的 on_llm_request 钩子（priority=-1）会检测标记并把 req.prompt 换回完整 full_prompt
-            # 🔧 兼容说明：func_tool_manager 在旧版 AstrBot (<=4.13) 中生效，
-            # 在新版 (>=4.14) 中被静默忽略。保留此参数以确保旧版兼容。
-            # 新版的工具注入问题由 on_llm_request 钩子中恢复 plugin_tool_set 来解决。
+            # 工具集通过 tool_set 参数传递，确保无 conversation 时也能注入；
+            # on_llm_request 钩子不再 merge 工具，由其他插件（如 maid_agent）自由过滤
             return event.request_llm(
                 prompt=prompt_for_request,
-                func_tool_manager=func_tools_mgr,
                 tool_set=plugin_tool_set,
                 session_id=event.session_id,
                 image_urls=image_urls,
+                audio_urls=audio_urls,
                 contexts=contexts,
                 system_prompt=system_prompt,
             )
@@ -512,14 +537,18 @@ class ReplyHandler:
         except Exception as e:
             logger.error(f"{format_ai_error(e, '私信-生成AI回复')}")
             # 返回错误消息
-            return event.plain_result(f"生成回复时发生错误: {format_ai_error(e, '私信-生成AI回复')}")
+            return event.plain_result(
+                f"生成回复时发生错误: {format_ai_error(e, '私信-生成AI回复')}"
+            )
 
     @staticmethod
     def check_if_already_replied(event: AstrMessageEvent) -> bool:
         """
         检查消息是否已被其他插件处理
 
-        用于@消息兼容，避免重复回复
+        通过 _has_send_oper 标记判断，该标记在 event.send() 被调用后永久置为 True，
+        不受框架 clear_result() 影响（框架在 handler 之间会清除 event.result，
+        导致 get_result() 始终返回 None，因此不能依赖 get_result()）。
 
         Args:
             event: 消息事件
@@ -527,46 +556,4 @@ class ReplyHandler:
         Returns:
             True=已有回复，False=尚未回复
         """
-        try:
-            # 检查event的result字段
-            # 如果已经有result,说明已经被处理了
-            result = event.get_result()
-
-            if result is None:
-                return False
-
-            # AstrBot 会将字符串结果转换为 MessageEventResult
-            if isinstance(result, MessageEventResult):
-                has_stream = bool(getattr(result, "async_stream", None))
-                has_chain = bool(getattr(result, "chain", []) or [])
-                is_llm = bool(
-                    getattr(result, "is_llm_result", None) and result.is_llm_result()
-                )
-                is_stopped = bool(
-                    getattr(result, "result_type", None) == EventResultType.STOP
-                )
-                is_stream_state = bool(
-                    getattr(result, "result_content_type", None)
-                    in {
-                        ResultContentType.STREAMING_RESULT,
-                        ResultContentType.STREAMING_FINISH,
-                    }
-                )
-
-                if has_stream or has_chain or is_llm or is_stopped or is_stream_state:
-                    logger.info("检测到该消息已经被其他插件处理")
-                    return True
-
-                return False
-
-            # 未知类型的结果，保持向后兼容：只要非空视为已处理
-            if result:
-                logger.info("检测到该消息已经被其他插件处理")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"检查消息是否已回复时发生错误: {e}")
-            # 发生错误时,为安全起见,返回True避免重复回复
-            return True
+        return getattr(event, "_has_send_oper", False)

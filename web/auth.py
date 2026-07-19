@@ -6,6 +6,7 @@ Argon2id 密码哈希（内存硬化，防 GPU 暴力破解）+ JWT + 服务端�
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -19,6 +20,7 @@ from pathlib import Path
 try:
     from astrbot.api import logger
 except ImportError:
+
     class _FallbackLogger:
         def info(self, msg):
             print(f"[Web Panel] INFO: {msg}")
@@ -34,7 +36,7 @@ except ImportError:
 _DEFAULT_PW_LENGTH = 12
 ARGON2_TIME_COST = 3
 ARGON2_MEMORY_COST = 65536
-ARGON2_PARALLELISM = 4
+ARGON2_PARALLELISM = 2
 HASH_VERSION_ARGON2 = "argon2id"
 HASH_VERSION_PBKDF2 = "pbkdf2"
 PBKDF2_ITERATIONS = 100000
@@ -44,7 +46,11 @@ _MAX_REVOKED_REVISIONS = 16
 
 try:
     from argon2 import PasswordHasher
-    from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+    from argon2.exceptions import (
+        InvalidHashError,
+        VerificationError,
+        VerifyMismatchError,
+    )
 
     _ph = PasswordHasher(
         time_cost=ARGON2_TIME_COST,
@@ -120,14 +126,18 @@ def hash_password(password: str, salt: bytes = None) -> tuple:
         return hash_password_argon2(password), ""
     if salt is None:
         salt = os.urandom(32)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
+    dk = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS
+    )
     return dk.hex(), salt.hex()
 
 
 def verify_password(password: str, stored_hash: str, salt_hex: str = "") -> bool:
     if stored_hash.startswith("$argon2"):
         if not _ARGON2_AVAILABLE:
-            logger.error("auth.json 使用 Argon2id 哈希，但 argon2-cffi 未安装，无法验证密码")
+            logger.error(
+                "auth.json 使用 Argon2id 哈希，但 argon2-cffi 未安装，无法验证密码"
+            )
             return False
         try:
             return _ph.verify(stored_hash, password)
@@ -199,7 +209,9 @@ class AuthManager:
         return {
             "password_hash": pw_hash,
             "salt": salt,
-            "hash_version": HASH_VERSION_ARGON2 if _ARGON2_AVAILABLE else HASH_VERSION_PBKDF2,
+            "hash_version": HASH_VERSION_ARGON2
+            if _ARGON2_AVAILABLE
+            else HASH_VERSION_PBKDF2,
             "password_changed": password_changed,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
@@ -244,7 +256,10 @@ class AuthManager:
         self._remind_temp_password_if_needed()
 
     def _migrate_jwt_secret_from_auth(self):
-        if "jwt_secret" not in self._auth_data and "_web_initiated_reload" not in self._auth_data:
+        if (
+            "jwt_secret" not in self._auth_data
+            and "_web_initiated_reload" not in self._auth_data
+        ):
             return
 
         migrated_fields = {}
@@ -307,7 +322,10 @@ class AuthManager:
         try:
             with open(self.jwt_secret_file, "r", encoding="utf-8") as f:
                 self._jwt_data = json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                f"🔒 jwt_secret.json 读取失败，已生成新的 JWT 密钥，所有现存会话将失效: {e}"
+            )
             self._jwt_data = self._build_jwt_data()
             self._save_jwt()
         self._jwt_data.setdefault("jwt_secret", os.urandom(32).hex())
@@ -331,7 +349,9 @@ class AuthManager:
 
     def _save(self):
         save_data = {
-            k: v for k, v in self._auth_data.items() if k not in ("jwt_secret", "_web_initiated_reload")
+            k: v
+            for k, v in self._auth_data.items()
+            if k not in ("jwt_secret", "_web_initiated_reload")
         }
         with open(self.auth_file, "w", encoding="utf-8") as f:
             json.dump(save_data, f, indent=2, ensure_ascii=False)
@@ -371,6 +391,10 @@ class AuthManager:
         if changed and persist:
             self._save_sessions()
 
+    def cleanup_sessions(self):
+        """清理过期/过旧会话，供 Web 后台维护任务定期调用。"""
+        self._cleanup_sessions(persist=True)
+
     def _advance_token_revision(self, reason: str):
         current = int(self._jwt_data.get("token_revision", 1))
         revoked = dict(self._jwt_data.get("revoked_revisions", {}))
@@ -392,7 +416,19 @@ class AuthManager:
             session["revoked_at"] = now
         self._save_sessions()
 
-    def _create_session(self, *, device_id: str, client_ip: str | None, user_agent: str) -> dict:
+    @staticmethod
+    def _normalize_ip(ip: str | None) -> str:
+        """将 IP 地址规范化为标准字符串形式（IPv4/IPv6 统一比较）。"""
+        if not ip:
+            return ""
+        try:
+            return str(ipaddress.ip_address(ip.strip()))
+        except ValueError:
+            return ip.strip()
+
+    def _create_session(
+        self, *, device_id: str, client_ip: str | None, user_agent: str
+    ) -> dict:
         now = _now()
         sid = uuid.uuid4().hex
         expires_at = now + JWT_EXPIRY
@@ -405,14 +441,16 @@ class AuthManager:
             "last_heartbeat_at": 0,
             "status": "active",
             "reason": "",
-            "bound_ip": client_ip or "",
+            "bound_ip": self._normalize_ip(client_ip),
             "ua_hash": _hash_user_agent(user_agent),
         }
         self._sessions[sid] = record
         self._save_sessions()
         return record
 
-    def touch_session(self, sid: str, *, heartbeat: bool = False, persist: bool = False):
+    def touch_session(
+        self, sid: str, *, heartbeat: bool = False, persist: bool = False
+    ):
         session = self._sessions.get(sid)
         if not session:
             return
@@ -451,7 +489,9 @@ class AuthManager:
         ):
             return None
 
-        if _ARGON2_AVAILABLE and not self._auth_data["password_hash"].startswith("$argon2"):
+        if _ARGON2_AVAILABLE and not self._auth_data["password_hash"].startswith(
+            "$argon2"
+        ):
             self._auth_data["password_hash"] = hash_password_argon2(password)
             self._auth_data["salt"] = ""
             self._auth_data["hash_version"] = HASH_VERSION_ARGON2
@@ -495,7 +535,9 @@ class AuthManager:
         # 这里只负责会话有效性判断，不刷新 24 小时绝对过期时间。
         payload, jwt_reason = verify_jwt(token, self.jwt_secret)
         if payload is None:
-            return AuthCheckResult(False, reason=jwt_reason or AuthFailureReason.SIGNATURE_INVALID)
+            return AuthCheckResult(
+                False, reason=jwt_reason or AuthFailureReason.SIGNATURE_INVALID
+            )
         if jwt_reason == AuthFailureReason.EXPIRED:
             sid = payload.get("sid")
             if sid and sid in self._sessions:
@@ -503,25 +545,38 @@ class AuthManager:
                 self._sessions[sid]["reason"] = AuthFailureReason.EXPIRED
                 self._sessions[sid]["revoked_at"] = _now()
                 self._save_sessions()
-            return AuthCheckResult(False, payload=payload, reason=AuthFailureReason.EXPIRED)
+            return AuthCheckResult(
+                False, payload=payload, reason=AuthFailureReason.EXPIRED
+            )
 
         token_revision = int(payload.get("rev", 0) or 0)
         if token_revision != self.token_revision:
             revoked_revisions = self._jwt_data.get("revoked_revisions", {})
-            reason = revoked_revisions.get(str(token_revision), AuthFailureReason.REVOKED)
+            reason = revoked_revisions.get(
+                str(token_revision), AuthFailureReason.REVOKED
+            )
             return AuthCheckResult(False, payload=payload, reason=reason)
 
         sid = payload.get("sid")
         if not sid:
-            return AuthCheckResult(False, payload=payload, reason=AuthFailureReason.SESSION_MISSING)
+            return AuthCheckResult(
+                False, payload=payload, reason=AuthFailureReason.SESSION_MISSING
+            )
 
         session = self._sessions.get(sid)
         if not session:
-            return AuthCheckResult(False, payload=payload, reason=AuthFailureReason.SESSION_MISSING)
+            return AuthCheckResult(
+                False, payload=payload, reason=AuthFailureReason.SESSION_MISSING
+            )
 
         status = session.get("status", "active")
         if status != "active":
-            return AuthCheckResult(False, payload=payload, session=session, reason=session.get("reason") or AuthFailureReason.REVOKED)
+            return AuthCheckResult(
+                False,
+                payload=payload,
+                session=session,
+                reason=session.get("reason") or AuthFailureReason.REVOKED,
+            )
 
         now = _now()
         expires_at = int(session.get("expires_at", 0) or 0)
@@ -530,14 +585,28 @@ class AuthManager:
             session["reason"] = AuthFailureReason.EXPIRED
             session["revoked_at"] = now
             self._save_sessions()
-            return AuthCheckResult(False, payload=payload, session=session, reason=AuthFailureReason.EXPIRED)
+            return AuthCheckResult(
+                False,
+                payload=payload,
+                session=session,
+                reason=AuthFailureReason.EXPIRED,
+            )
 
-        if current_ip and payload.get("ip") and payload["ip"] != current_ip:
+        if (
+            current_ip
+            and payload.get("ip")
+            and payload["ip"] != self._normalize_ip(current_ip)
+        ):
             session["status"] = "revoked"
             session["reason"] = AuthFailureReason.IP_CHANGED
             session["revoked_at"] = now
             self._save_sessions()
-            return AuthCheckResult(False, payload=payload, session=session, reason=AuthFailureReason.IP_CHANGED)
+            return AuthCheckResult(
+                False,
+                payload=payload,
+                session=session,
+                reason=AuthFailureReason.IP_CHANGED,
+            )
 
         if touch:
             self.touch_session(sid, heartbeat=heartbeat, persist=persist_touch)
@@ -555,6 +624,10 @@ class AuthManager:
         self._save_sessions()
 
     def change_password(self, old_password: str, new_password: str) -> bool:
+        if not isinstance(new_password, str) or len(new_password) < 8:
+            return False
+        if len(new_password) > 128:
+            return False
         if not verify_password(
             old_password,
             self._auth_data["password_hash"],
@@ -564,7 +637,9 @@ class AuthManager:
         pw_hash, salt = hash_password(new_password)
         self._auth_data["password_hash"] = pw_hash
         self._auth_data["salt"] = salt
-        self._auth_data["hash_version"] = HASH_VERSION_ARGON2 if _ARGON2_AVAILABLE else HASH_VERSION_PBKDF2
+        self._auth_data["hash_version"] = (
+            HASH_VERSION_ARGON2 if _ARGON2_AVAILABLE else HASH_VERSION_PBKDF2
+        )
         self._auth_data["password_changed"] = True
         self._save()
         self._jwt_data.pop("_temp_plain_password", None)

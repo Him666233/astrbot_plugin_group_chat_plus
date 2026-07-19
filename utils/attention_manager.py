@@ -15,7 +15,7 @@
 - Enhanced: 多用户追踪 + 情绪系统 + 渐进式调整
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 
 """
 
@@ -27,7 +27,6 @@ import math
 
 import json
 
-import os
 
 from pathlib import Path
 
@@ -129,7 +128,11 @@ class AttentionManager:
 
     AUTO_SAVE_INTERVAL = 60  # 自动保存间隔（秒）
 
+    BACKGROUND_DECAY_INTERVAL = 60  # 后台衰减执行间隔（秒），与自动保存间隔一致
+
     _last_save_time: float = 0  # 上次保存时间
+
+    _background_decay_task: Optional[asyncio.Task] = None  # 后台衰减任务引用
 
     # 情感检测配置（v1.1.2新增）
 
@@ -494,6 +497,97 @@ class AttentionManager:
 
         AttentionManager._save_to_disk(force=False)
 
+    # ========== 后台衰减任务 ==========
+
+    @staticmethod
+    async def _apply_decay_to_all() -> None:
+        """
+        对所有会话的所有用户统一执行一次时间衰减。
+
+        由后台循环任务定期调用。持有锁时安全迭代，
+        每个用户的异常被独立捕获，不影响其他人。
+        """
+        current_time = time.time()
+        async with AttentionManager._lock:
+            for chat_key, chat_users in AttentionManager._attention_map.items():
+                for user_id, profile in list(chat_users.items()):
+                    try:
+                        await AttentionManager._apply_attention_decay(
+                            profile, current_time
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[注意力机制-后台衰减] 用户 {user_id} "
+                            f"在会话 {chat_key} 中衰减失败: {e}"
+                        )
+            # 批量衰减后触发一次按需保存
+            AttentionManager._save_to_disk(force=False)
+
+    @staticmethod
+    async def _run_background_decay_loop() -> None:
+        """
+        后台衰减循环任务。
+
+        每 BACKGROUND_DECAY_INTERVAL 秒对所有已追踪用户执行一次衰减。
+        捕获 CancelledError 以支持干净关闭，其他异常仅记录日志不中断循环。
+        """
+        try:
+            while True:
+                await asyncio.sleep(AttentionManager.BACKGROUND_DECAY_INTERVAL)
+                try:
+                    await AttentionManager._apply_decay_to_all()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"[注意力机制-后台衰减] 执行循环时发生异常: {e}",
+                        exc_info=True,
+                    )
+        except asyncio.CancelledError:
+            # 正常关闭，不做额外操作
+            pass
+
+    @staticmethod
+    def start_background_decay() -> None:
+        """
+        启动后台衰减任务。
+
+        幂等操作：如果任务已在运行则不重复启动。
+        由 main.py 的 initialize() 在群聊功能开启时调用。
+        """
+        task = AttentionManager._background_decay_task
+        if task is not None and not task.done():
+            return  # 已在运行
+
+        AttentionManager._background_decay_task = asyncio.create_task(
+            AttentionManager._run_background_decay_loop()
+        )
+        logger.info(
+            f"[注意力机制-后台衰减] 后台衰减任务已启动 "
+            f"(间隔={AttentionManager.BACKGROUND_DECAY_INTERVAL}秒)"
+        )
+
+    @staticmethod
+    async def stop_background_decay() -> None:
+        """
+        停止后台衰减任务并等待其完成。
+
+        幂等操作：没有运行中的任务时直接返回。
+        由 main.py 的 terminate() 在插件卸载时调用。
+        """
+        task = AttentionManager._background_decay_task
+        if task is None or task.done():
+            AttentionManager._background_decay_task = None
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        AttentionManager._background_decay_task = None
+        logger.info("[注意力机制-后台衰减] 后台衰减任务已停止")
+
     @staticmethod
     def get_chat_key(platform_name: str, is_private: bool, chat_id: str) -> str:
         """
@@ -584,6 +678,7 @@ class AttentionManager:
             "attention_score": 0.0,  # 初始注意力为0
             "emotion": 0.0,  # 初始情绪中性
             "last_interaction": time.time(),
+            "last_decay_time": time.time(),  # 上次衰减时间（与last_interaction解耦，防止重复衰减）
             "interaction_count": 0,
             "last_message_preview": "",
             "consecutive_replies": 0,  # 🆕 连续对话轮次（AI连续回复该用户的次数）
@@ -596,9 +691,10 @@ class AttentionManager:
     ) -> None:
         """
 
-        应用注意力和情绪的时间衰减
+        应用注意力和情绪的时间衰减（增强版）
 
-
+        使用 last_decay_time 追踪衰减基线，与 last_interaction 解耦。
+        兼容旧数据：如果 profile 没有 last_decay_time 字段，自动回退到 last_interaction。
 
         Args:
 
@@ -608,23 +704,31 @@ class AttentionManager:
 
         """
 
-        elapsed = current_time - profile.get("last_interaction", current_time)
+        # 读取衰减基线：优先使用 last_decay_time，兼容旧数据回退到 last_interaction
+        last_decay = profile.get("last_decay_time")
+        if last_decay is None:
+            last_decay = profile.get("last_interaction", current_time)
 
-        # 注意力衰减
+        elapsed = current_time - last_decay
 
-        attention_decay = AttentionManager._calculate_decay(
-            elapsed, AttentionManager.ATTENTION_DECAY_HALFLIFE
-        )
+        # 只有当实际经过了正时间时才执行衰减计算
+        if elapsed > 0:
+            # 注意力衰减
+            attention_decay = AttentionManager._calculate_decay(
+                elapsed, AttentionManager.ATTENTION_DECAY_HALFLIFE
+            )
+            profile["attention_score"] *= attention_decay
 
-        profile["attention_score"] *= attention_decay
+            # 情绪衰减（向0中性值）
+            emotion_decay = AttentionManager._calculate_decay(
+                elapsed, AttentionManager.EMOTION_DECAY_HALFLIFE
+            )
+            profile["emotion"] *= emotion_decay
 
-        # 情绪衰减（向0中性值）
-
-        emotion_decay = AttentionManager._calculate_decay(
-            elapsed, AttentionManager.EMOTION_DECAY_HALFLIFE
-        )
-
-        profile["emotion"] *= emotion_decay
+        # 始终更新 last_decay_time，标记本次衰减已处理
+        # 即使 elapsed <= 0（时钟回拨或紧接的连续调用）也更新，
+        # 防止下次调用重复使用旧的基线时间
+        profile["last_decay_time"] = current_time
 
     @staticmethod
     def _has_negation_before(text: str, keyword_pos: int) -> bool:

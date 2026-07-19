@@ -11,27 +11,22 @@ v1.1.0 更新：
 - 硬性限制在所有调整的最末尾应用
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 """
 
 import time
 import asyncio
 import copy
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 from astrbot.api.all import *
-from ._session_guard import guard_session, sample_guard
+from ._session_guard import guard_session
+
+if TYPE_CHECKING:
+    pass
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
-
-# 导入需要使用的其他模块
-# 使用 TYPE_CHECKING 避免循环导入
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .time_period_manager import TimePeriodManager
-    from .proactive_chat_manager import ProactiveChatManager
 
 
 class ProbabilityManager:

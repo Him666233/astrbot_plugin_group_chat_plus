@@ -3,7 +3,7 @@
 负责调用AI判断是否应该回复消息（读空气功能）
 
 作者: Him666233
-版本: v1.2.1
+版本: V1.2.3.hotfix.2
 
 更新日志 v1.2.0:
 - 新增当前时间与活跃度提示，让AI知道现在是什么时候并据此调整回复倾向
@@ -19,7 +19,10 @@ from typing import List, Optional, Dict, Any, Tuple
 from astrbot.api.all import *
 from .ai_response_filter import AIResponseFilter
 from .ai_error_formatter import format_ai_error
+from .ai_fallback import call_ai_with_fallback
 from ._session_guard import sample_guard
+from .identity_prompt import IdentityPromptBuilder
+from .group_role_resolver import GroupRoleResolver
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -54,6 +57,11 @@ class DecisionAI:
 - 你仍要结合当前发送者、上下文走向、时间和整体氛围继续判断。
 
 你是一个群聊参与者，请在遵守上面规则的前提下判断是否回复当前这条新消息。
+
+【用户额外提示词】：
+- 如果系统在下方提供了"用户补充说明:"，这代表用户对本次判断可能有特定的要求或偏好
+- 你必须严格遵循"用户补充说明:"中的指示进行判断，不要忽略
+- 如果本次没有提供"用户补充说明:"，则忽略本条
 
 【第一重要】识别当前发送者：
 下方[系统信息-当前发送者]已明确告诉你发送者是谁，记住这个人的名字和ID，不要搞错。
@@ -144,6 +152,8 @@ class DecisionAI:
   - 人格厌恶话题
 
 【特殊标记】：
+  - 每条消息都被大括号 { } 包裹以明确消息边界：{ 独占一行表示消息开始，} 独占一行表示消息结束。大括号内换行不代表消息分隔。
+  - 每条消息中的「: 」是系统元数据与用户消息的分界线：「: 」之前是时间、发送者、触发方式等系统信息，「: 」之后是用户发送的消息内容（可能包含图片描述、转发消息解析、@解析等衍生内容）
   - 【@指向说明】：发给别人的，通常不回复（除非明确邀请你参与）
   - [戳一戳提示]："有人在戳你"建议回复，"但不是戳你的"不回复
   - [戳过对方提示]：你刚戳过对方，供参考理解上下文，禁止提及
@@ -225,11 +235,16 @@ class DecisionAI:
             return
 
         reasoning_text = (parse_result or {}).get("reasoning_text")
-        if reasoning_text:
-            logger.info(f"{log_prefix} 推理过程:\n{reasoning_text}")
-
         protocol_followed = (parse_result or {}).get("protocol_followed")
         tail_line = (parse_result or {}).get("tail_line") or ""
+
+        if reasoning_text:
+            logger.info(f"{log_prefix} 推理过程:\n{reasoning_text}")
+        elif protocol_followed is True:
+            logger.info(
+                f"{log_prefix} 本次 AI 未输出推理过程，直接给出判断结果。最终答案: {tail_line}"
+            )
+
         if protocol_followed is False:
             if tail_line:
                 logger.warning(
@@ -279,7 +294,11 @@ class DecisionAI:
                     platform_name = None
             if not platform_name:
                 platform_name = getattr(event, "platform_name", None)
-        if not platform_name and isinstance(effective_umo, str) and ":" in effective_umo:
+        if (
+            not platform_name
+            and isinstance(effective_umo, str)
+            and ":" in effective_umo
+        ):
             platform_name = effective_umo.split(":", 1)[0]
 
         async def _resolve_current_session_persona() -> Tuple[Optional[dict], str]:
@@ -313,7 +332,9 @@ class DecisionAI:
                         return persona, "current-session"
                 except Exception as e:
                     if DEBUG_MODE:
-                        logger.info(f"{log_prefix} resolve_selected_persona 解析失败: {e}")
+                        logger.info(
+                            f"{log_prefix} resolve_selected_persona 解析失败: {e}"
+                        )
 
             if hasattr(persona_mgr, "get_default_persona_v3") and effective_umo:
                 try:
@@ -322,7 +343,9 @@ class DecisionAI:
                         return persona, "default-persona"
                 except Exception as e:
                     if DEBUG_MODE:
-                        logger.info(f"{log_prefix} get_default_persona_v3 解析失败: {e}")
+                        logger.info(
+                            f"{log_prefix} get_default_persona_v3 解析失败: {e}"
+                        )
 
             return None, "none"
 
@@ -337,14 +360,17 @@ class DecisionAI:
                         (
                             item
                             for item in getattr(persona_mgr, "personas_v3", [])
-                            if isinstance(item, dict) and item.get("name") == configured_name
+                            if isinstance(item, dict)
+                            and item.get("name") == configured_name
                         ),
                         None,
                     )
 
                 if isinstance(persona, dict):
                     result["system_prompt"] = persona.get("prompt", "") or ""
-                    result["persona_name"] = persona.get("name", configured_name) or configured_name
+                    result["persona_name"] = (
+                        persona.get("name", configured_name) or configured_name
+                    )
                     result["source"] = "configured"
                     logger.info(
                         f"{log_prefix} 已使用指定人格: {result['persona_name']}"
@@ -500,6 +526,15 @@ class DecisionAI:
         # 🆕 判断型AI人格配置
         include_persona: bool = True,
         configured_persona_name: str = "",
+        # 🆕 备用提供商（冗余/Failover）：读空气/主动对话预判断/频率判断三处共用
+        fallback_provider_ids: Optional[List[str]] = None,
+        # 🧬 身份提示配置（从 main.py 实例变量传入，避免重复读取 config）
+        enable_identity_prompt: bool = False,
+        identity_prompt_ai_targets: str = "all_four",
+        identity_prompt_include_group_info: bool = False,
+        enable_group_role_display: bool = False,
+        # 主动对话上下文提示词
+        proactive_reply_context_prompt: str = "",
     ) -> bool:
         """
         调用AI判断是否应该回复
@@ -530,22 +565,8 @@ class DecisionAI:
                     delattr(event, "_decision_ai_error")
                 except Exception:
                     event._decision_ai_error = False
-            # 获取AI提供商
-            if provider_id:
-                provider = context.get_provider_by_id(provider_id)
-                if not provider:
-                    logger.warning(f"无法找到提供商 {provider_id},使用默认提供商")
-                    provider = context.get_using_provider()
-            else:
-                provider = context.get_using_provider()
-
-            if not provider:
-                logger.error("无法获取AI提供商")
-                try:
-                    event._decision_ai_error = True
-                except Exception:
-                    pass
-                return False
+            # AI提供商解析与「主 → 各备用」的重试统一交给 call_ai_with_fallback
+            # 在实际调用处按顺序逐个解析与尝试（见下方）。这里不再提前解析单一提供商。
 
             persona_result = await DecisionAI.resolve_judgment_persona(
                 context=context,
@@ -567,10 +588,7 @@ class DecisionAI:
             proactive_hint = ""
             if is_proactive_reply:
                 # 从配置读取自定义提示词，如果没有配置则使用默认值
-                # 🔧 使用字典键访问替代 config.get()，避免 astrBot 平台多次读取配置的问题
-                custom_prompt = ""
-                if config and "proactive_reply_context_prompt" in config:
-                    custom_prompt = config["proactive_reply_context_prompt"]
+                custom_prompt = proactive_reply_context_prompt
 
                 # 如果配置为空或未设置，使用默认提示词
                 if not custom_prompt or not custom_prompt.strip():
@@ -700,8 +718,8 @@ class DecisionAI:
                     )
                 else:
                     interest_context += (
-                        f"当前消息未命中配置的兴趣话题\n"
-                        f"但如果消息内容与你的人格设定相关，仍可参与\n"
+                        "当前消息未命中配置的兴趣话题\n"
+                        "但如果消息内容与你的人格设定相关，仍可参与\n"
                     )
 
                 enhanced_context += interest_context
@@ -765,6 +783,58 @@ class DecisionAI:
             # 动态内容（格式化消息、发送者信息、增强上下文）放在后面。
             # 这样AI服务商的前缀缓存（prefix caching）可以命中静态部分，降低调用成本。
             # 即使AI服务商不支持前缀缓存，此顺序调整也不影响功能。
+
+            # 🆕 v1.2.3.hotfix.2: 构建发送者再确认（追加在 dynamic_prompt 末尾，
+            # 确保决策 AI 在读完所有历史/缓存消息后仍明确当前发送者，避免因混淆
+            # 发送者而给出错误的 yes/no 判断）
+            _decision_sender_tail = ""
+            if include_sender_info and sender_name:
+                _decision_sender_tail = (
+                    f"\n\n[确认] 当前消息发送者是 {sender_name}（ID:{sender_id}），"
+                    f"请基于此人的消息内容判断是否回复。"
+                    f"历史中【📦近期未回复】标记的缓存消息也需纳入判断考量——"
+                    f"如果当前消息内容很少但结合缓存消息能看出明确的对话意图，应倾向于回复。"
+                )
+
+            # ── 身份提示：告诉 AI 当前环境中的账号信息 ──
+            _identity_prompt_block = ""
+            if enable_identity_prompt:
+                _decision_gets_id = identity_prompt_ai_targets in (
+                    "decision_only", "decision_and_reply", "decision_and_proactive", "all_four"
+                )
+                if _decision_gets_id:
+                    _self_id_for_id = str(event.get_self_id() or "")
+                    _self_name_for_id = await IdentityPromptBuilder.resolve_self_name_async(event)
+                    _inc_group = identity_prompt_include_group_info
+                    _gid = str(event.get_group_id() or "")
+                    _gname = None
+                    if _inc_group:
+                        _gname, _gid = await IdentityPromptBuilder.resolve_group_info(
+                            event, group_id=_gid, include_group_info=True
+                        )
+                    # 🆕 解析 bot 自身的群角色（决策AI）
+                    _decision_role = ""
+                    if enable_group_role_display:
+                        try:
+                            _self_id_str = str(_self_id_for_id or "")
+                            if _gid and _self_id_str:
+                                _decision_role = await GroupRoleResolver.resolve_role(
+                                    event, _gid, _self_id_str
+                                )
+                        except Exception:
+                            pass
+                        if not _decision_role:
+                            _decision_role = "身份解析失败"
+                    _identity_prompt_block = IdentityPromptBuilder.build(
+                        self_name=_self_name_for_id,
+                        self_id=_self_id_for_id,
+                        group_name=_gname,
+                        group_id=_gid,
+                        include_group_info=_inc_group,
+                        group_role=_decision_role,  # 🆕
+                        log_prefix="[决策AI-身份提示]",
+                    )
+
             if prompt_mode == "override" and extra_prompt and extra_prompt.strip():
                 custom_prompt = extra_prompt.strip()
                 custom_prompt, protocol_injected = (
@@ -777,16 +847,21 @@ class DecisionAI:
                     )
                 )
                 # 覆盖模式：用户自定义提示词在前（静态），动态内容在后
-                # 🔧 v1.3.0: sender_emphasis 提前到 formatted_message 之前，
+                # 🔧 v1.2.2-hotfix.1: sender_emphasis 提前到 formatted_message 之前，
                 # 让 AI 在阅读历史消息前就明确当前发送者身份
-                full_prompt = (
+                dynamic_prompt = (
                     custom_prompt
                     + sender_emphasis
                     + "\n\n"
                     + formatted_message
                     + proactive_hint
                     + enhanced_context
+                    + _decision_sender_tail
                 )
+                # 覆盖模式下 system_prompt 仅含 persona（用户自定义 prompt 已替代系统指令）
+                combined_system_prompt = persona_prompt
+                if _identity_prompt_block:
+                    combined_system_prompt += _identity_prompt_block
                 if DEBUG_MODE:
                     if protocol_injected:
                         logger.info(
@@ -797,12 +872,16 @@ class DecisionAI:
                             "使用覆盖模式：用户自定义提示词完全替代默认系统提示词（缓存友好顺序）"
                         )
             else:
-                # 拼接模式（默认）：系统提示词（静态）在前，动态内容在后
-                full_prompt = DecisionAI.SYSTEM_DECISION_PROMPT
+                # 拼接模式（默认）- 静态指令移入 system_prompt（整块缓存），prompt 仅保留动态内容
+                # 🔧 v1.2.2-hotfix.1: 静态系统指令与 persona 合并传入 system_prompt，
+                # 使 AI 服务商的全块缓存（system message cache）覆盖全部静态指令。
+                static_instructions = DecisionAI.SYSTEM_DECISION_PROMPT
 
                 # 如果有用户自定义提示词,紧跟在系统提示词后面（也是相对静态的）
                 if extra_prompt and extra_prompt.strip():
-                    full_prompt += f"\n\n用户补充说明:\n{extra_prompt.strip()}\n"
+                    static_instructions += (
+                        f"\n\n用户补充说明:\n{extra_prompt.strip()}\n"
+                    )
                     if DEBUG_MODE:
                         logger.info(
                             "使用拼接模式：用户自定义提示词紧跟系统提示词（缓存友好顺序）"
@@ -810,42 +889,82 @@ class DecisionAI:
 
                 # 如果启用额外推理，注入推理输出协议说明（静态，利于缓存命中）
                 if enable_reasoning and reasoning_start_marker and reasoning_end_marker:
-                    full_prompt += DecisionAI._build_reasoning_protocol(
+                    static_instructions += DecisionAI._build_reasoning_protocol(
                         reasoning_start_marker,
                         reasoning_end_marker,
                         allowed_answers=["yes", "no"],
                     )
 
-                # 添加结束指令（静态）
-                full_prompt += DecisionAI.SYSTEM_DECISION_PROMPT_ENDING
+                # 身份提示（在结束指令之前，显眼位置）
+                if _identity_prompt_block:
+                    static_instructions += _identity_prompt_block
 
-                # 动态内容放在最后
-                # 🔧 v1.3.0: sender_emphasis 提前到 formatted_message 之前
-                full_prompt += (
+                # 添加结束指令（静态）
+                static_instructions += DecisionAI.SYSTEM_DECISION_PROMPT_ENDING
+
+                # 合并 persona 与静态指令为完整的 system_prompt（整块缓存）
+                combined_system_prompt = persona_prompt
+                if persona_prompt and static_instructions:
+                    combined_system_prompt += "\n\n"
+                combined_system_prompt += static_instructions
+
+                # prompt 仅保留动态内容（sender_emphasis 提前到 formatted_message 之前）
+                dynamic_prompt = (
                     sender_emphasis
                     + "\n"
                     + formatted_message
                     + proactive_hint
                     + enhanced_context
+                    + _decision_sender_tail
                 )
+
+                if DEBUG_MODE:
+                    logger.info(
+                        f"提示词缓存优化: 静态指令({len(static_instructions)}字)已移入 system_prompt，"
+                        f"prompt 仅含动态内容({len(dynamic_prompt)}字)"
+                    )
 
             logger.info(
                 f"正在调用决策AI判断是否回复（当前发送者：{sender_name or '未知'}，ID:{sender_id}）..."
             )
 
-            # 调用AI,添加超时控制
-            async def call_decision_ai():
+            # 调用AI（支持备用提供商：超时/报错/空响应自动换下一个，每个提供商各自计时）
+            async def _attempt(provider):
                 response = await provider.text_chat(
-                    prompt=full_prompt,
+                    prompt=dynamic_prompt,
                     contexts=[],
                     image_urls=image_urls if image_urls else [],
                     func_tool=None,
-                    system_prompt=persona_prompt,  # 包含人格设定
+                    system_prompt=combined_system_prompt,  # persona + 静态指令
+                    session_id=event.session_id if hasattr(event, "session_id") else "",
                 )
                 return response.completion_text
 
-            # 使用用户配置的超时时间
-            ai_response = await asyncio.wait_for(call_decision_ai(), timeout=timeout)
+            ai_response, _used_provider, _ai_errored = await call_ai_with_fallback(
+                context,
+                provider_id,
+                fallback_provider_ids,
+                _attempt,
+                timeout=timeout,
+                label="读空气AI",
+            )
+
+            if ai_response is None:
+                # 主提供商与所有备用提供商均未成功
+                if _ai_errored:
+                    # 至少一次超时/报错：沿用旧的“超时默认不回复”语义，并置错误标记
+                    logger.warning(
+                        f"读空气AI调用失败（超时/报错，已尝试全部提供商），默认不回复，"
+                        f"可在配置中调整 decision_ai_timeout 或补充 decision_ai_fallback_provider_ids"
+                    )
+                    try:
+                        event._decision_ai_error = True
+                    except Exception:
+                        pass
+                else:
+                    # 仅为空响应：沿用旧行为按“不回复”处理，且不置错误标记
+                    logger.info("决策AI判断: 不应该回复这条消息 (no)")
+                return False
 
             # 🆕 统一解析协议：先过滤模型原生思考链，再提取自定义推理块，最后归一化 yes/no
             parse_result = AIResponseFilter.parse_decision_response(
@@ -877,8 +996,9 @@ class DecisionAI:
             return decision
 
         except asyncio.TimeoutError:
+            # call_ai_with_fallback 内部已捕获超时并自动切换备用，此处不应到达
             logger.warning(
-                f"决策AI调用超时（超过 {timeout} 秒），默认不回复，可在配置中调整 decision_ai_timeout 参数"
+                f"决策AI判断阶段发生意外超时（超过 {timeout} 秒），默认不回复"
             )
             try:
                 event._decision_ai_error = True
@@ -904,6 +1024,8 @@ class DecisionAI:
         include_persona: bool = True,
         configured_persona_name: str = "",
         context_label: str = "通用AI调用",
+        # 🆕 备用提供商（冗余/Failover）：与读空气共用 decision_ai_fallback_provider_ids
+        fallback_provider_ids: Optional[List[str]] = None,
     ) -> str:
         """
         通用AI调用方法（供其他模块使用）
@@ -921,18 +1043,8 @@ class DecisionAI:
             AI的回复文本，失败返回空字符串
         """
         try:
-            # 获取AI提供商
-            if provider_id:
-                provider = context.get_provider_by_id(provider_id)
-                if not provider:
-                    logger.warning(f"无法找到提供商 {provider_id},使用默认提供商")
-                    provider = context.get_using_provider()
-            else:
-                provider = context.get_using_provider()
-
-            if not provider:
-                logger.error("无法获取AI提供商")
-                return ""
+            # AI提供商解析与「主 → 各备用」的重试统一交给 call_ai_with_fallback
+            # 在实际调用处按顺序逐个解析与尝试（见下方）。这里不再提前解析单一提供商。
 
             persona_result = await DecisionAI.resolve_judgment_persona(
                 context=context,
@@ -943,19 +1055,30 @@ class DecisionAI:
             )
             persona_prompt = persona_result.get("system_prompt", "") or ""
 
-            # 调用AI
-            async def _call_ai():
+            # 调用AI（支持备用提供商：超时/报错/空响应自动换下一个，每个提供商各自计时）
+            async def _attempt(provider):
                 response = await provider.text_chat(
                     prompt=prompt,
                     contexts=[],
                     image_urls=[],
                     func_tool=None,
                     system_prompt=persona_prompt,
+                    session_id=event.session_id if hasattr(event, "session_id") else "",
                 )
                 return response.completion_text
 
-            # 使用超时控制
-            ai_response = await asyncio.wait_for(_call_ai(), timeout=timeout)
+            ai_response, _used_provider, _ai_errored = await call_ai_with_fallback(
+                context,
+                provider_id,
+                fallback_provider_ids,
+                _attempt,
+                timeout=timeout,
+                label=context_label,
+            )
+
+            if ai_response is None:
+                # 主提供商与所有备用提供商均失败（超时/报错/空响应），沿用旧行为返回空字符串
+                return ""
 
             # 🆕 v1.1.2: 过滤AI响应中的思考链标记
             ai_response = AIResponseFilter.filter_thinking_chain(ai_response)
@@ -963,7 +1086,8 @@ class DecisionAI:
             return ai_response or ""
 
         except asyncio.TimeoutError:
-            logger.warning(f"[{context_label}] AI调用超时（超过 {timeout} 秒）")
+            # call_ai_with_fallback 内部已捕获超时并自动切换备用，此处不应到达
+            logger.warning(f"[{context_label}] AI调用意外报超时（超过 {timeout} 秒）")
             return ""
         except Exception as e:
             logger.error(format_ai_error(e, context_label))

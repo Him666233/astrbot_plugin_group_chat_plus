@@ -50,7 +50,7 @@
 .chart-canvas-wrap {
     position: relative;
     width: 100%;
-    height: 220px;
+    height: 260px;
 }
 .chart-canvas-wrap canvas {
     width: 100%;
@@ -146,9 +146,6 @@
 }
 
 /* ========== Session Detail ========== */
-#session-detail {
-    padding: 16px 24px;
-}
 .chat-history-viewer {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
@@ -252,20 +249,8 @@
 
 /* ========== Mobile Session Detail Keyboard Handling ========== */
 @media (max-width: 767px) {
-    #session-detail {
-        transition: transform 0.3s ease;
-        will-change: transform;
-    }
-    
     .file-editor.textarea {
-        /* 在移动端增大触控区域 */
         font-size: 14px;
         min-height: 300px;
-    }
-    
-    /* 确保 session-detail 可以被滚动 */
-    #session-detail.tab-history-active {
-        overflow-y: auto;
-        -webkit-overflow-scrolling: touch;
     }
 }

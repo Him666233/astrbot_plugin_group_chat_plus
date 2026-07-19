@@ -3,12 +3,12 @@ Web 配置面板 - 安全管理器
 IP 过滤、封禁、暴力破解防护、访问日志（含持久化）、防爬虫系统
 """
 
-import os
 import time
 import json
 import re
+import ipaddress
 from collections import deque, defaultdict
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from astrbot.api import logger
@@ -42,7 +42,9 @@ class BruteForceTracker:
 
     attempts: int = 0
     locked_until: float = 0.0
-    first_attempt: float = 0.0
+    last_attempt: float = 0.0
+    reached_max_tier: bool = False
+    rate_timestamps: list = None  # 懒初始化，避免可变默认值共享
 
 
 # 暴力破解阶梯延迟配置：(失败次数阈值, 锁定秒数)
@@ -51,6 +53,8 @@ _BRUTE_FORCE_TIERS = [
     (10, 60),
     (15, 300),
     (20, 600),
+    (30, 1800),
+    (50, 3600),
 ]
 
 # 访问日志文件最大大小（1MB）
@@ -59,6 +63,7 @@ _LOG_FILE_MAX_SIZE = 1 * 1024 * 1024
 _LOG_FILE_MAX_ROTATIONS = 2
 # 已登录认证请求默认速率阈值（次/分钟）
 _DEFAULT_AUTHENTICATED_RATE_LIMIT = 240
+_VALID_IP_MODES = {"disabled", "whitelist", "blacklist"}
 
 # 可疑 User-Agent 特征（正则）
 _SUSPICIOUS_UA_PATTERNS = [
@@ -66,7 +71,14 @@ _SUSPICIOUS_UA_PATTERNS = [
         r"bot|crawler|spider|scraper|scan|wget|curl|python-requests|go-http-client|okhttp|libwww",
         re.I,
     ),
-    re.compile(r"zgrab|masscan|nmap|nikto|sqlmap|nuclei|dirbuster|gobuster", re.I),
+    re.compile(
+        r"zgrab|masscan|nmap|nikto|sqlmap|nuclei|dirbuster|gobuster|ffuf",
+        re.I,
+    ),
+    re.compile(
+        r"headless|selenium|playwright|phantomjs|aiohttp|httpx|node-fetch|axios",
+        re.I,
+    ),
 ]
 
 # robots.txt 内容（君子协议）
@@ -84,12 +96,26 @@ _SCAN_PATH_PATTERNS = [
     r"\.php$",
     r"\.asp$",
     r"\.jsp$",
+    r"\.aspx$",
     r"wp-admin",
+    r"wp-login",
+    r"xmlrpc\.php",
     r"\.env$",
+    r"\.env\.",
     r"\.git/",
+    r"\.git$",
+    r"\.svn",
+    r"\.hg",
+    r"\.DS_Store$",
     r"admin\.php",
     r"phpinfo",
     r"\.sql$",
+    r"backup",
+    r"dump",
+    r"vendor/phpunit",
+    r"actuator",
+    r"server-status",
+    r"cgi-bin",
 ]
 
 
@@ -97,22 +123,39 @@ class SecurityManager:
     """集中式安全状态管理"""
 
     def __init__(self, config: dict, data_dir: str):
-        # IP 访问控制（从配置读取）
+        # IP 访问控制（从配置读取，规范化所有 IP 为统一格式）
         self.ip_mode: str = config.get("web_panel_ip_mode", "disabled")
-        self.ip_list: List[str] = list(config.get("web_panel_ip_list", []))
-        self.protected_ips: List[str] = list(config.get("web_panel_protected_ips", []))
+        if self.ip_mode not in _VALID_IP_MODES:
+            logger.warning(
+                f"🔒 配置警告：web_panel_ip_mode={self.ip_mode!r} 不是合法模式，"
+                "运行时将按失败关闭处理，仅受保护 IP 可访问。"
+            )
+        raw_ip_list = config.get("web_panel_ip_list", [])
+        raw_protected_ips = config.get("web_panel_protected_ips", [])
+
+        # 配置校验：检查 IP 名单中的潜在错误（无效IP、CIDR网段、未指定地址等）
+        SecurityManager._validate_ip_list_entries(raw_ip_list, "web_panel_ip_list")
+        SecurityManager._validate_ip_list_entries(
+            raw_protected_ips, "web_panel_protected_ips"
+        )
+        self.ip_list: List[str] = SecurityManager._normalize_valid_ip_list(raw_ip_list)
+        self.protected_ips: List[str] = SecurityManager._normalize_valid_ip_list(
+            raw_protected_ips
+        )
 
         # 防爬虫配置
         self.anti_spider_enabled: bool = config.get("web_panel_anti_spider", False)
-        self.anti_spider_rate_limit: int = config.get(
-            "web_panel_anti_spider_rate_limit", 60
+        self.anti_spider_rate_limit: int = self._int_config(
+            config, "web_panel_anti_spider_rate_limit", 60, min_value=1
         )
-        self.anti_spider_ban_duration: int = config.get(
-            "web_panel_anti_spider_ban_duration", 300
+        self.anti_spider_ban_duration: int = self._int_config(
+            config, "web_panel_anti_spider_ban_duration", 300, min_value=1
         )
-        self.authenticated_rate_limit: int = config.get(
+        self.authenticated_rate_limit: int = self._int_config(
+            config,
             "web_panel_authenticated_rate_limit",
             max(_DEFAULT_AUTHENTICATED_RATE_LIMIT, self.anti_spider_rate_limit * 4),
+            min_value=1,
         )
         # 每 IP 请求计数（1分钟滑动窗口）: ip -> deque of timestamps
         self._request_timestamps: Dict[str, deque] = defaultdict(lambda: deque())
@@ -141,29 +184,262 @@ class SecurityManager:
         # 暴力破解追踪 - 纯内存，重启清空
         self.brute_force: Dict[str, BruteForceTracker] = {}
 
-        # 启动时清理受保护 IP 误写入的封禁记录
-        self._purge_protected_from_bans()
+        # 暴力破解可配置参数（从配置文件读取）
+        self.brute_force_window: int = self._int_config(
+            config, "web_panel_brute_force_window", 3600, min_value=0
+        )
+        self.brute_force_rate_window: int = self._int_config(
+            config, "web_panel_brute_force_rate_window", 10, min_value=0
+        )
+        self.brute_force_rate_count: int = self._int_config(
+            config, "web_panel_brute_force_rate_count", 3, min_value=1
+        )
+        self.brute_force_ban_duration: int = self._int_config(
+            config, "web_panel_brute_force_ban_duration", 0, min_value=0
+        )
+        self.brute_force_tiers: List[Tuple[int, int]] = self._parse_tiers(
+            config.get("web_panel_brute_force_tiers", "")
+        )
+
+        # 启动时清理不可封禁 IP 误写入的封禁记录
+        self._purge_unbannable_from_bans()
+        self._purge_protected_from_brute_force()
 
     # ==================== 辅助 ====================
 
+    @staticmethod
+    def _normalize_ip(ip: str) -> str:
+        """将 IP 地址规范化为标准字符串形式。
+
+        对 IPv4 保持点分十进制；对 IPv6 压缩为 RFC 5952 规范形式。
+        这使得同一地址的不同文本表示（如 2001:db8::1 与 2001:db8:0:0:0:0:0:1）
+        在字符串比较时能正确匹配。
+
+        若输入为非法 IP 地址，返回原字符串（防御性降级）。
+        """
+        if ip is None:
+            return ""
+        ip = str(ip).strip()
+        if not ip:
+            return ""
+        try:
+            return str(ipaddress.ip_address(ip))
+        except ValueError:
+            return ip
+
+    @staticmethod
+    def _is_valid_ip(ip: str) -> bool:
+        """检查字符串是否为合法的 IPv4 或 IPv6 地址（不含 CIDR 网段）。"""
+        if not ip:
+            return False
+        try:
+            ipaddress.ip_address(ip.strip())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_network_notation(ip: str) -> bool:
+        """检查字符串是否为 CIDR 网段表示法（如 192.168.0.0/16）。"""
+        if not ip:
+            return False
+        try:
+            ipaddress.ip_network(ip.strip(), strict=False)
+            return "/" in ip  # 只有含 / 才算网段，避免裸 IP 被误判
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _normalize_valid_ip_list(ip_list: list) -> List[str]:
+        """只装载合法单个 IPv4/IPv6 地址，CIDR/非法条目只保留警告不参与匹配。"""
+        normalized: List[str] = []
+        seen: set[str] = set()
+        if not isinstance(ip_list, list):
+            return normalized
+        for entry in ip_list:
+            if not isinstance(entry, str):
+                entry = str(entry)
+            entry = entry.strip()
+            if not entry or not SecurityManager._is_valid_ip(entry):
+                continue
+            item = SecurityManager._normalize_ip(entry)
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _validate_ip_list_entries(ip_list: list, list_name: str):
+        """校验 IP 名单条目，对无效/误导性配置输出警告日志。
+
+        检测以下问题：
+        - 无效 IP 且非 CIDR 网段 → 永远不会匹配任何客户端
+        - CIDR 网段表示法 → 系统不支持子网匹配，不会按预期工作
+        - 未指定地址（0.0.0.0 / ::）→ 永远不会匹配实际对端 IP
+        """
+        _UNSPECIFIED = {
+            "0.0.0.0": "IPv4 未指定地址",
+            "::": "IPv6 未指定地址",
+        }
+        for entry in ip_list:
+            if entry is None:
+                continue
+            if not isinstance(entry, str):
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含非字符串条目 {entry!r}，"
+                    "将按文本形式校验；建议仅填写 IPv4/IPv6 地址字符串。"
+                )
+                entry = str(entry)
+            if not entry.strip():
+                continue
+            entry = entry.strip()
+
+            if entry in _UNSPECIFIED:
+                # 根据名单类型给出针对性说明
+                if list_name == "web_panel_protected_ips":
+                    _hint = "该条目不会匹配任何实际客户端 IP，无法起到保护作用。"
+                else:
+                    _hint = (
+                        "该条目不会匹配任何实际客户端 IP："
+                        "白名单模式 → 全员无法访问；黑名单模式 → 无实际拦截效果。"
+                    )
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含 {entry}"
+                    f"（{_UNSPECIFIED[entry]}）。{_hint}"
+                )
+                continue
+
+            if SecurityManager._is_network_notation(entry):
+                # CIDR 网段在黑/白名单中均无效
+                _hint = (
+                    "系统不支持子网/IP段匹配，该条目不会按网段生效。"
+                    "如需匹配整个网段，请逐条添加各 IP 地址。"
+                )
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含 {entry}，疑似 CIDR 网段表示法。"
+                    f"{_hint}"
+                )
+                continue
+
+            if not SecurityManager._is_valid_ip(entry):
+                # 无效 IP 在黑/白名单中均无效
+                if list_name == "web_panel_protected_ips":
+                    _hint = "无法起到保护作用。"
+                else:
+                    _hint = "白名单模式 → 全员无法访问；黑名单模式 → 无实际拦截效果。"
+                logger.warning(
+                    f"🔒 配置警告：{list_name} 中包含 {entry}，不是合法的 IPv4/IPv6 地址。"
+                    f"该条目永远不会匹配任何客户端 IP，可能是配置错误。{_hint}"
+                )
+
     def _is_protected(self, ip: str) -> bool:
         """检查 IP 是否在受保护名单中"""
-        return ip in self.protected_ips
+        return self._normalize_ip(ip) in self.protected_ips
 
-    def _purge_protected_from_bans(self):
+    def _is_whitelisted(self, ip: str) -> bool:
+        """检查 IP 是否命中白名单模式下的白名单。"""
+        return self.ip_mode == "whitelist" and self._normalize_ip(ip) in self.ip_list
+
+    @staticmethod
+    def _clean_text(value, max_len: int = 256) -> str:
+        """清洗用于日志/封禁备注的短文本，避免控制字符进入前端或持久化文件。"""
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            value = str(value)
+        value = value.replace("\x00", "").replace("\r", " ").replace("\n", " ")
+        return value.strip()[:max_len]
+
+    @staticmethod
+    def _int_config(
+        config: dict, key: str, default: int, *, min_value: int | None = None
+    ) -> int:
+        """读取整数配置，异常值回退默认值并按下限钳制。"""
+        value = config.get(key, default)
+        if isinstance(value, bool):
+            value = default
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            logger.warning(f"🔒 配置警告：{key}={value!r} 不是合法整数，已使用默认值 {default}")
+            value = default
+        if min_value is not None and value < min_value:
+            logger.warning(f"🔒 配置警告：{key}={value!r} 小于下限 {min_value}，已按下限处理")
+            value = min_value
+        return value
+
+    @staticmethod
+    def _parse_tiers(raw_value) -> List[Tuple[int, int]]:
+        """从配置原始值解析阶梯列表，无效时回退到默认值。
+
+        Args:
+            raw_value: 可以是 str (JSON), list, 或其他无效值
+
+        Returns:
+            排序后的 [(count, seconds), ...] 列表
         """
-        启动时检查：若受保护 IP 出现在封禁表中则自动删除并输出警告日志。
-        防止配置文件被手动篡改导致管理员 IP 被锁定。
+        try:
+            if isinstance(raw_value, list) and all(
+                isinstance(t, (list, tuple)) and len(t) == 2 for t in raw_value
+            ):
+                parsed = [(int(t[0]), int(t[1])) for t in raw_value]
+                parsed.sort(key=lambda x: x[0])
+                if parsed:
+                    return parsed
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            if isinstance(raw_value, str) and raw_value.strip():
+                parsed = json.loads(raw_value)
+                if isinstance(parsed, list) and all(
+                    isinstance(t, (list, tuple)) and len(t) == 2 for t in parsed
+                ):
+                    result = [(int(t[0]), int(t[1])) for t in parsed]
+                    result.sort(key=lambda x: x[0])
+                    if result:
+                        return result
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        return _BRUTE_FORCE_TIERS
+
+    def _purge_unbannable_from_bans(self) -> bool:
         """
-        to_remove = [ip for ip in self.ban_map if self._is_protected(ip)]
+        清理封禁表中不应被封禁的 IP。
+
+        受保护 IP 最高优先级，白名单模式下的白名单 IP 也不写入封禁表。
+        这里防御性处理历史数据或手工篡改导致的策略冲突。
+        """
+        to_remove: list[tuple[str, str]] = []
+        for ip in self.ban_map:
+            if self._is_protected(ip):
+                to_remove.append((ip, "受保护 IP"))
+            elif self._is_whitelisted(ip):
+                to_remove.append((ip, "白名单 IP"))
         if to_remove:
-            for ip in to_remove:
+            for ip, label in to_remove:
                 del self.ban_map[ip]
                 logger.warning(
-                    f"🔒 安全检测：受保护 IP {ip} 出现在封禁列表中，已自动移除。"
-                    f"受保护 IP 不可被封禁，请检查配置文件是否被篡改。"
+                    f"🔒 安全检测：{label} {ip} 出现在封禁列表中，已自动移除。"
+                    f"{label} 不可被封禁，请检查配置文件是否被篡改或存在历史残留。"
                 )
             self._save_bans()
+            return True
+        return False
+
+    def _purge_protected_from_brute_force(self):
+        """清理受保护 IP 的暴力破解追踪记录，确保受保护 IP 不会被内存锁定。"""
+        if not hasattr(self, "brute_force"):
+            return
+        to_remove = [ip for ip in self.brute_force if self._is_protected(ip)]
+        for ip in to_remove:
+            del self.brute_force[ip]
+            logger.warning(
+                f"🔒 安全检测：受保护 IP {ip} 出现在暴力破解追踪表中，已自动移除。"
+                f"受保护 IP 不参与登录锁定和自动封禁。"
+            )
 
     # ==================== IP 访问控制 ====================
 
@@ -182,27 +458,31 @@ class SecurityManager:
 
         设计说明：
         - 白名单 IP 在第②步被放行，不再执行封禁检查，因此手动/自动封禁对白名单 IP 无效
-        - 这符合「白名单 = 永远信任」的语义，防止管理员 IP 被意外封禁
+        - 白名单只代表 IP 访问控制信任；登录密码错误仍会进入暴力破解阶梯锁定
 
         Returns:
             (allowed, reason) - 是否允许 及 拒绝原因
         """
+        ip = self._normalize_ip(ip)
+
         # ① 受保护 IP 永远放行（最高优先级）
         if self._is_protected(ip):
             return True, ""
 
         # ② 黑白名单检查（先于封禁检查）
         if self.ip_mode == "whitelist":
-            if self.ip_list and ip in self.ip_list:
+            if self._is_whitelisted(ip):
                 # 白名单命中 → 直接放行，封禁检查不适用
                 return True, ""
             else:
                 return False, "IP 不在白名单中，无权访问"
 
         if self.ip_mode == "blacklist":
-            if self.ip_list and ip in self.ip_list:
+            if ip in self.ip_list:
                 return False, "IP 在黑名单中，无权访问"
             # 黑名单未命中 → 继续检查封禁
+        elif self.ip_mode != "disabled":
+            return False, "IP 访问控制配置无效，已按安全策略拒绝访问"
 
         # ③ 封禁列表检查（disabled 模式或黑名单未命中时执行）
         ban = self.ban_map.get(ip)
@@ -222,30 +502,62 @@ class SecurityManager:
         """返回 robots.txt 内容"""
         return _ROBOTS_TXT
 
-    def check_spider(self, ip: str, path: str, user_agent: str) -> Tuple[bool, str]:
+    def _can_check_spider(self, ip: str) -> bool:
+        """防爬虫总开关与不可封禁 IP 豁免。"""
+        if not self.anti_spider_enabled:
+            return False
+
+        ip = self._normalize_ip(ip)
+
+        # 受保护 IP 豁免
+        if self._is_protected(ip):
+            return False
+
+        # 白名单模式下豁免
+        if self._is_whitelisted(ip):
+            return False
+
+        return True
+
+    def check_spider_signature(
+        self, ip: str, path: str, user_agent: str
+    ) -> Tuple[bool, str]:
         """
-        检测是否为爬虫行为。
+        检测与会话无关的爬虫/扫描指纹。
+
+        该检查不参与匿名频率窗口，因此可在认证解析前对公开页、非公开页、
+        API 和静态资源统一执行。是否排除错误页由调用方决定。
+        """
+        if not self._can_check_spider(ip):
+            return False, ""
+
+        user_agent = (user_agent or "").strip()
+        if not user_agent:
+            return True, "缺失 User-Agent"
+
+        # 1. 可疑 User-Agent（对已登录和未登录请求都生效）
+        for pattern in _SUSPICIOUS_UA_PATTERNS:
+            if pattern.search(user_agent):
+                return True, f"可疑 User-Agent: {user_agent[:80]}"
+
+        # 2. 扫描行为路径特征（对已登录和未登录请求都生效）
+        for pat in _SCAN_PATH_PATTERNS:
+            if re.search(pat, path, re.I):
+                return True, f"扫描行为检测（路径特征）: {path}"
+
+        return False, ""
+
+    def check_spider_rate_limit(self, ip: str) -> Tuple[bool, str]:
+        """
+        检测未认证请求频率。
 
         Returns:
             (is_spider, reason) - 是否为爬虫 及 原因（空字符串表示正常）
         """
-        if not self.anti_spider_enabled:
+        if not self._can_check_spider(ip):
             return False, ""
 
-        # 受保护 IP 豁免
-        if self._is_protected(ip):
-            return False, ""
-
-        # 白名单模式下豁免
-        if self.ip_mode == "whitelist" and ip in self.ip_list:
-            return False, ""
-
-        # 1. 可疑 User-Agent
-        for pattern in _SUSPICIOUS_UA_PATTERNS:
-            if pattern.search(user_agent or ""):
-                return True, f"可疑 User-Agent: {user_agent[:80]}"
-
-        # 2. 访问频率（1分钟滑动窗口速率限制）
+        ip = self._normalize_ip(ip)
         now = time.time()
         window = self._request_timestamps[ip]
         cutoff = now - 60
@@ -259,12 +571,18 @@ class SecurityManager:
                 f"请求频率过高：{len(window)} 次/分钟（阈值 {self.anti_spider_rate_limit}）",
             )
 
-        # 3. 扫描行为路径特征
-        for pat in _SCAN_PATH_PATTERNS:
-            if re.search(pat, path, re.I):
-                return True, f"扫描行为检测（路径特征）: {path}"
-
         return False, ""
+
+    def check_spider(self, ip: str, path: str, user_agent: str) -> Tuple[bool, str]:
+        """
+        检测未认证请求是否为爬虫行为。
+
+        兼容旧调用方：先查请求指纹，再查匿名频率。
+        """
+        is_spider, reason = self.check_spider_signature(ip, path, user_agent)
+        if is_spider:
+            return True, reason
+        return self.check_spider_rate_limit(ip)
 
     def check_authenticated_rate_limit(
         self,
@@ -274,14 +592,23 @@ class SecurityManager:
         *,
         is_heartbeat: bool = False,
     ) -> Tuple[bool, str]:
-        """检查已登录请求的速率，心跳请求仅记录不触发封禁。"""
+        """检查已登录请求的速率。
+
+        只有专用心跳接口豁免；X-GCP-Auto-Refresh 是客户端可伪造请求头，
+        不能作为后端限速豁免依据。
+        """
         if not self.anti_spider_enabled:
             return False, ""
+        ip = self._normalize_ip(ip)
         if self._is_protected(ip):
             return False, ""
-        if self.ip_mode == "whitelist" and ip in self.ip_list:
+        if self._is_whitelisted(ip):
             return False, ""
         if not session_id:
+            return False, ""
+
+        # 心跳直接放行，不参与速率窗口计数；自动刷新仍计入窗口，防止伪造请求头绕过。
+        if is_heartbeat:
             return False, ""
 
         now = time.time()
@@ -290,9 +617,6 @@ class SecurityManager:
         while window and window[0] < cutoff:
             window.popleft()
         window.append(now)
-
-        if is_heartbeat:
-            return False, ""
 
         if len(window) > self.authenticated_rate_limit:
             return (
@@ -303,7 +627,10 @@ class SecurityManager:
 
     def auto_ban_spider(self, ip: str, reason: str):
         """防爬虫触发时自动临时封禁（受保护 IP 豁免）"""
+        ip = self._normalize_ip(ip)
         if self._is_protected(ip):
+            return
+        if self._is_whitelisted(ip):
             return
         if ip not in self.ban_map:
             self.ban_ip(
@@ -323,11 +650,11 @@ class SecurityManager:
         """记录一次访问（内存 + 持久化文件）"""
         entry = AccessLogEntry(
             timestamp=time.time(),
-            ip=ip,
-            method=method,
-            path=path,
+            ip=self._clean_text(ip, 128),
+            method=self._clean_text(method, 16),
+            path=self._clean_text(path, 256),
             status=status,
-            note=note,
+            note=self._clean_text(note, 512),
         )
         self.access_log.append(entry)
         self._append_log_to_file(entry)
@@ -387,17 +714,25 @@ class SecurityManager:
                             continue
                         try:
                             data = json.loads(line)
+                            try:
+                                timestamp = float(data.get("timestamp", 0) or 0)
+                            except (TypeError, ValueError):
+                                timestamp = 0.0
+                            try:
+                                status = int(data.get("status", 0) or 0)
+                            except (TypeError, ValueError):
+                                status = 0
                             entry = AccessLogEntry(
-                                timestamp=data.get("timestamp", 0),
-                                ip=data.get("ip", ""),
-                                method=data.get("method", ""),
-                                path=data.get("path", ""),
-                                status=data.get("status", 0),
-                                note=data.get("note", ""),
+                                timestamp=timestamp,
+                                ip=self._clean_text(data.get("ip", ""), 128),
+                                method=self._clean_text(data.get("method", ""), 16),
+                                path=self._clean_text(data.get("path", ""), 256),
+                                status=status,
+                                note=self._clean_text(data.get("note", ""), 512),
                             )
                             self.access_log.append(entry)
                             loaded += 1
-                        except (json.JSONDecodeError, KeyError):
+                        except (json.JSONDecodeError, KeyError, TypeError):
                             continue
             except Exception as e:
                 logger.debug(f"🔒 加载访问日志文件 {log_file.name} 失败: {e}")
@@ -415,8 +750,13 @@ class SecurityManager:
         cutoff = time.time() - retention_days * 86400
         deleted = 0
         try:
-            log_files = list(self._web_data_dir.glob("access_log*.jsonl"))
+            log_files = [self._log_file] + [
+                self._web_data_dir / f"access_log.{i}.jsonl"
+                for i in range(1, _LOG_FILE_MAX_ROTATIONS + 1)
+            ]
             for f in log_files:
+                if not f.exists():
+                    continue
                 try:
                     mtime = f.stat().st_mtime
                     if mtime < cutoff:
@@ -450,7 +790,25 @@ class SecurityManager:
         end = start + size
         page_logs = all_logs[start:end]
 
-        return [asdict(e) for e in page_logs], total
+        def _entry_to_dict(entry: AccessLogEntry) -> dict:
+            try:
+                timestamp = float(entry.timestamp)
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            try:
+                status = int(entry.status)
+            except (TypeError, ValueError):
+                status = 0
+            return {
+                "timestamp": timestamp,
+                "ip": self._clean_text(entry.ip, 128),
+                "method": self._clean_text(entry.method, 16),
+                "path": self._clean_text(entry.path, 256),
+                "status": status,
+                "note": self._clean_text(entry.note, 512),
+            }
+
+        return [_entry_to_dict(e) for e in page_logs], total
 
     # ==================== IP 封禁管理 ====================
 
@@ -461,7 +819,7 @@ class SecurityManager:
         封禁 IP。受保护 IP 无法封禁，尝试封禁时输出警告日志。
 
         Args:
-            ip: 要封禁的 IP
+            ip: 要封禁的 IP（IPv4/IPv6 均可，自动规范化为标准形式）
             reason: 封禁原因
             duration: 封禁时长（秒），None=永久
 
@@ -471,6 +829,12 @@ class SecurityManager:
         if not ip:
             return False, "IP 地址不能为空"
 
+        ip = self._normalize_ip(ip)
+        reason = self._clean_text(reason, 128) or "手动封禁"
+
+        if not self._is_valid_ip(ip):
+            return False, f"无效的 IP 地址格式: {ip}"
+
         if self._is_protected(ip):
             logger.warning(
                 f"🔒 尝试封禁受保护 IP {ip} 被拒绝（原因：{reason}）。"
@@ -478,8 +842,21 @@ class SecurityManager:
             )
             return False, f"IP {ip} 在受保护名单中，无法封禁"
 
+        if self._is_whitelisted(ip):
+            logger.warning(
+                f"🔒 尝试封禁白名单 IP {ip} 被拒绝（原因：{reason}）。"
+                "白名单 IP 不写入封禁表；如需拒绝访问，请先从白名单移除。"
+            )
+            return False, f"IP {ip} 在白名单中，无法封禁"
+
         expires_at = None
         if duration is not None:
+            try:
+                duration = float(duration)
+            except (TypeError, ValueError):
+                return False, "封禁时长必须是数字秒数或留空"
+            if duration <= 0:
+                return False, "封禁时长必须大于 0；永久封禁请留空"
             expires_at = time.time() + duration
 
         self.ban_map[ip] = BanEntry(
@@ -495,35 +872,32 @@ class SecurityManager:
 
     def unban_ip(self, ip: str):
         """解封 IP"""
+        ip = self._normalize_ip(ip)
         self.ban_map.pop(ip, None)
         self._save_bans()
 
     def get_ban_list(self) -> List[dict]:
-        """获取封禁列表，自动清理过期条目，同时确保受保护 IP 不出现在列表中"""
+        """获取封禁列表，自动清理过期条目和不可封禁 IP 残留。"""
         now = time.time()
         expired = [
             ip
             for ip, ban in self.ban_map.items()
             if ban.expires_at is not None and now > ban.expires_at
         ]
-        # 顺便检查是否有受保护 IP 混入（防御性检查）
-        protected_leaked = [ip for ip in self.ban_map if self._is_protected(ip)]
-        if protected_leaked:
-            for ip in protected_leaked:
-                del self.ban_map[ip]
-                logger.warning(
-                    f"🔒 安全检测：受保护 IP {ip} 出现在封禁列表中，已自动移除。"
-                )
+        # 顺便检查是否有受保护/白名单 IP 混入（防御性检查）
+        self._purge_unbannable_from_bans()
 
         for ip in expired:
             if ip in self.ban_map:
                 del self.ban_map[ip]
-        if expired or protected_leaked:
+        if expired:
             self._save_bans()
 
         result = []
         for ip, ban in self.ban_map.items():
             entry = asdict(ban)
+            entry["ip"] = self._clean_text(entry.get("ip", ""), 128)
+            entry["reason"] = self._clean_text(entry.get("reason", ""), 128)
             if ban.expires_at is not None:
                 entry["remaining_seconds"] = max(0, int(ban.expires_at - now))
             else:
@@ -540,25 +914,48 @@ class SecurityManager:
                 data = json.load(f)
             now = time.time()
             loaded_count = 0
-            expired_count = 0
+            discarded_count = 0
+            if not isinstance(data, list):
+                logger.warning("🔒 封禁数据格式异常：根节点不是数组，已忽略")
+                return
             for item in data:
+                if not isinstance(item, dict):
+                    discarded_count += 1
+                    continue
+                raw_ip = item.get("ip", "")
+                normalized_ip = self._normalize_ip(raw_ip)
+                if not self._is_valid_ip(normalized_ip):
+                    discarded_count += 1
+                    continue
+                try:
+                    banned_at = float(item.get("banned_at", 0) or 0)
+                except (TypeError, ValueError):
+                    banned_at = 0.0
+                expires_at = item.get("expires_at")
+                if expires_at is not None:
+                    try:
+                        expires_at = float(expires_at)
+                    except (TypeError, ValueError):
+                        discarded_count += 1
+                        continue
                 ban = BanEntry(
-                    ip=item["ip"],
-                    reason=item.get("reason", ""),
-                    banned_at=item.get("banned_at", 0),
-                    expires_at=item.get("expires_at"),
+                    ip=normalized_ip,
+                    reason=self._clean_text(item.get("reason", ""), 128),
+                    banned_at=banned_at,
+                    expires_at=expires_at,
                 )
                 # 过滤掉已过期的临时封禁（永久封禁 expires_at=None 永远保留）
                 if ban.expires_at is not None and now > ban.expires_at:
-                    expired_count += 1
+                    discarded_count += 1
                     continue
                 self.ban_map[ban.ip] = ban
                 loaded_count += 1
-            # 若有过期记录被清理，回写文件
-            if expired_count > 0:
+            # 若有过期或异常记录被清理，回写文件
+            if discarded_count > 0:
                 self._save_bans()
                 logger.info(
-                    f"🔒 启动清理：已移除 {expired_count} 条过期封禁记录（保留 {loaded_count} 条有效记录）"
+                    f"🔒 启动清理：已移除 {discarded_count} 条过期或异常封禁记录"
+                    f"（保留 {loaded_count} 条有效记录）"
                 )
         except Exception as e:
             logger.warning(f"🔒 加载封禁数据失败: {e}")
@@ -582,61 +979,277 @@ class SecurityManager:
         Returns:
             (is_locked, wait_seconds) - 是否被锁定及剩余等待秒数
         """
+        ip = self._normalize_ip(ip)
+        if self._is_protected(ip):
+            self.brute_force.pop(ip, None)
+            return False, 0
+
         tracker = self.brute_force.get(ip)
         if tracker is None:
             return False, 0
 
         now = time.time()
+
+        # 窗口期衰减：超时无新失败则自动清零计数
+        if (
+            self.brute_force_window > 0
+            and (now - tracker.last_attempt) > self.brute_force_window
+        ):
+            self.brute_force.pop(ip, None)
+            return False, 0
+
         if tracker.locked_until > now:
             remaining = int(tracker.locked_until - now) + 1
             return True, remaining
 
         return False, 0
 
-    def record_login_failure(self, ip: str):
-        """记录一次登录失败"""
+    def record_login_failure(self, ip: str) -> dict:
+        """记录一次登录失败并返回操作详情。
+
+        Returns:
+            dict with keys: action, attempts, lock_seconds, banned
+                action: 'rate_ban' | 'permanent_ban' | 'tier_lock' | 'recorded'
+        """
+        ip = self._normalize_ip(ip)
+        if self._is_protected(ip):
+            self.brute_force.pop(ip, None)
+            return {
+                "action": "protected",
+                "attempts": 0,
+                "banned": False,
+                "ban_blocked": False,
+                "lock_seconds": 0,
+            }
+
         now = time.time()
         tracker = self.brute_force.get(ip)
+
+        # 防御性衰减：正常登录流程会先调用 check_brute_force()，这里仍自行清理一次，
+        # 避免未来新增调用路径时把窗口期之前的失败次数继续叠加。
+        if (
+            tracker is not None
+            and self.brute_force_window > 0
+            and (now - tracker.last_attempt) > self.brute_force_window
+        ):
+            self.brute_force.pop(ip, None)
+            tracker = None
+
         if tracker is None:
-            tracker = BruteForceTracker(attempts=0, locked_until=0.0, first_attempt=now)
+            tracker = BruteForceTracker(last_attempt=now)
+            tracker.rate_timestamps = []
             self.brute_force[ip] = tracker
 
         tracker.attempts += 1
+        tracker.last_attempt = now
 
+        max_threshold, max_seconds = self.brute_force_tiers[-1]
+
+        # 计算当前阶梯对应的锁定时长
         lock_seconds = 0
-        for threshold, seconds in _BRUTE_FORCE_TIERS:
+        for threshold, seconds in self.brute_force_tiers:
             if tracker.attempts >= threshold:
                 lock_seconds = seconds
 
+        # === 分支 1: 频率检测（速度限制，用于对抗脚本攻击）===
+        allow_auto_ban = not self._is_whitelisted(ip)
+        if (
+            allow_auto_ban
+            and self.brute_force_rate_window > 0
+            and self.brute_force_rate_count > 1
+        ):
+            cutoff = now - self.brute_force_rate_window
+            tracker.rate_timestamps = [
+                t for t in tracker.rate_timestamps if t >= cutoff
+            ]
+            tracker.rate_timestamps.append(now)
+            if len(tracker.rate_timestamps) >= self.brute_force_rate_count:
+                duration = self.brute_force_ban_duration
+                ban_duration = duration if duration > 0 else None
+                ban_success, _ = self.ban_ip(
+                    ip,
+                    reason=(
+                        f"[暴力破解] 频率异常（第{tracker.attempts}次，"
+                        f"{self.brute_force_rate_window}秒内失败{len(tracker.rate_timestamps)}次）"
+                    ),
+                    duration=ban_duration,
+                )
+                if ban_success:
+                    logger.warning(
+                        f"🔒 IP {ip} 登录频率异常，已封禁。"
+                        f"（第{tracker.attempts}次，"
+                        f"{self.brute_force_rate_window}秒内{len(tracker.rate_timestamps)}次失败）"
+                    )
+                return {
+                    "action": "rate_ban",
+                    "attempts": tracker.attempts,
+                    "banned": ban_success,
+                    "ban_blocked": not ban_success,
+                    "lock_seconds": 0,
+                    "rate_count": len(tracker.rate_timestamps),
+                    "rate_window": self.brute_force_rate_window,
+                }
+
+        # === 分支 2: 已达最大阶梯且锁已过期后再次尝试 → 封禁 ===
+        if tracker.attempts >= max_threshold:
+            tracker.reached_max_tier = True
+        if (
+            allow_auto_ban
+            and tracker.reached_max_tier
+            and tracker.locked_until <= now
+            and tracker.attempts > max_threshold
+        ):
+            duration = self.brute_force_ban_duration
+            ban_duration = duration if duration > 0 else None
+            ban_success, _ = self.ban_ip(
+                ip,
+                reason=(
+                    f"[暴力破解] 已达最大阶梯阈值（第{tracker.attempts}次），"
+                    f"解锁后继续尝试"
+                ),
+                duration=ban_duration,
+            )
+            if ban_success:
+                logger.warning(
+                    f"🔒 IP {ip} 登录失败次数已达最大阈值（{tracker.attempts}次），已封禁"
+                )
+            return {
+                "action": "permanent_ban",
+                "attempts": tracker.attempts,
+                "banned": ban_success,
+                "ban_blocked": not ban_success,
+                "lock_seconds": 0,
+            }
+
+        # === 分支 3: 阶梯锁定 ===
         if lock_seconds > 0:
             tracker.locked_until = now + lock_seconds
-            logger.warning(
-                f"🔒 IP {ip} 密码错误第 {tracker.attempts} 次，锁定 {lock_seconds} 秒"
-            )
+            if tracker.attempts >= 15:
+                logger.warning(
+                    f"🔒 IP {ip} 密码错误第 {tracker.attempts} 次，锁定 {lock_seconds} 秒"
+                )
+            return {
+                "action": "tier_lock",
+                "attempts": tracker.attempts,
+                "banned": False,
+                "lock_seconds": lock_seconds,
+            }
+
+        # === 分支 4: 仅记录，未锁定 ===
+        return {
+            "action": "recorded",
+            "attempts": tracker.attempts,
+            "banned": False,
+            "lock_seconds": 0,
+        }
 
     def reset_login_failures(self, ip: str):
         """登录成功后重置失败计数"""
+        ip = self._normalize_ip(ip)
         self.brute_force.pop(ip, None)
+
+    # ==================== 内存清理 ====================
+
+    def cleanup_stale_tracking_data(self, max_age_seconds: int = 3600):
+        """清理超过指定时间无活动的请求追踪数据，释放内存。
+
+        包括滑动窗口计数器（60 秒窗口，清洗阈值 1 小时）和
+        暴力破解追踪器（按可配置窗口期清洗，最少保留 24 小时兜底）。
+        """
+        now = time.time()
+        cutoff = now - max_age_seconds
+
+        for ip in list(self._request_timestamps.keys()):
+            dq = self._request_timestamps.get(ip)
+            if dq is None:
+                continue
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if not dq:
+                try:
+                    del self._request_timestamps[ip]
+                except KeyError:
+                    pass
+
+        for key in list(self._authenticated_request_timestamps.keys()):
+            dq = self._authenticated_request_timestamps.get(key)
+            if dq is None:
+                continue
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if not dq:
+                try:
+                    del self._authenticated_request_timestamps[key]
+                except KeyError:
+                    pass
+
+        # 暴力破解追踪器清理：仅在用户启用窗口期衰减时生效
+        # 若用户关闭衰减（brute_force_window=0），则永远不清理，
+        # 保留原设计语义：防止慢速暴力破解攻击者利用清理重置计数。
+        if self.brute_force_window > 0:
+            bf_cutoff = now - max(self.brute_force_window, 86400)
+            for ip in list(self.brute_force.keys()):
+                tracker = self.brute_force.get(ip)
+                if tracker is None:
+                    continue
+                if tracker.locked_until <= now and tracker.last_attempt < bf_cutoff:
+                    del self.brute_force[ip]
 
     # ==================== 配置更新 ====================
 
     def update_config(self, config: dict):
-        """运行时更新安全配置，并检查受保护 IP 是否与封禁表冲突"""
+        """运行时更新安全配置，并检查不可封禁 IP 是否与封禁表冲突。"""
         self.ip_mode = config.get("web_panel_ip_mode", "disabled")
-        self.ip_list = list(config.get("web_panel_ip_list", []))
+        if self.ip_mode not in _VALID_IP_MODES:
+            logger.warning(
+                f"🔒 配置警告：web_panel_ip_mode={self.ip_mode!r} 不是合法模式，"
+                "运行时将按失败关闭处理，仅受保护 IP 可访问。"
+            )
+        raw_ip_list = config.get("web_panel_ip_list", [])
         old_protected = set(self.protected_ips)
-        self.protected_ips = list(config.get("web_panel_protected_ips", []))
-        self.anti_spider_enabled = config.get("web_panel_anti_spider", False)
-        self.anti_spider_rate_limit = config.get("web_panel_anti_spider_rate_limit", 60)
-        self.anti_spider_ban_duration = config.get(
-            "web_panel_anti_spider_ban_duration", 300
+        raw_protected_ips = config.get("web_panel_protected_ips", [])
+
+        # 配置校验（与 __init__ 中逻辑一致）
+        SecurityManager._validate_ip_list_entries(raw_ip_list, "web_panel_ip_list")
+        SecurityManager._validate_ip_list_entries(
+            raw_protected_ips, "web_panel_protected_ips"
         )
-        self.authenticated_rate_limit = config.get(
+        self.ip_list = self._normalize_valid_ip_list(raw_ip_list)
+        self.protected_ips = self._normalize_valid_ip_list(raw_protected_ips)
+
+        self.anti_spider_enabled = config.get("web_panel_anti_spider", False)
+        self.anti_spider_rate_limit = self._int_config(
+            config, "web_panel_anti_spider_rate_limit", 60, min_value=1
+        )
+        self.anti_spider_ban_duration = self._int_config(
+            config, "web_panel_anti_spider_ban_duration", 300, min_value=1
+        )
+        self.authenticated_rate_limit = self._int_config(
+            config,
             "web_panel_authenticated_rate_limit",
             max(_DEFAULT_AUTHENTICATED_RATE_LIMIT, self.anti_spider_rate_limit * 4),
+            min_value=1,
         )
 
-        # 若受保护 IP 名单发生变化，重新检查封禁表
+        # 暴力破解可配置参数
+        self.brute_force_window = self._int_config(
+            config, "web_panel_brute_force_window", 3600, min_value=0
+        )
+        self.brute_force_rate_window = self._int_config(
+            config, "web_panel_brute_force_rate_window", 10, min_value=0
+        )
+        self.brute_force_rate_count = self._int_config(
+            config, "web_panel_brute_force_rate_count", 3, min_value=1
+        )
+        self.brute_force_ban_duration = self._int_config(
+            config, "web_panel_brute_force_ban_duration", 0, min_value=0
+        )
+        self.brute_force_tiers = self._parse_tiers(
+            config.get("web_panel_brute_force_tiers", "")
+        )
+
+        # 若受保护/白名单语义发生变化，重新检查封禁表
         new_protected = set(self.protected_ips)
-        if new_protected != old_protected:
-            self._purge_protected_from_bans()
+        if new_protected != old_protected or self.ip_mode == "whitelist":
+            self._purge_unbannable_from_bans()
+            self._purge_protected_from_brute_force()
