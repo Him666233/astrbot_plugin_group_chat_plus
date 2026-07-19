@@ -4,9 +4,6 @@
 # Web 面板密码安全（Argon2id 内存硬化哈希，防 GPU 暴力破解）
 argon2-cffi>=23.1.0
 
-# 拼音转换（用于打字错误生成器）
-pypinyin>=0.44.0
-
 # Web 管理面板依赖（HTTP 服务器）
 # 注意：aiohttp 是 AstrBot 平台本身的核心依赖，通过 pip/源码部署时会由 AstrBot 自动安装，
 # 因此本文件中不重复声明。
