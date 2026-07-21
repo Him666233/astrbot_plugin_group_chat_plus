@@ -435,6 +435,7 @@ IP 相关机制优先级如下：
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `poke_message_mode` | string | `”bot_only”` | 戳一戳响应模式：`ignore`（完全忽略）、`bot_only`（仅响应戳机器人）、`all`（响应所有戳一戳）。**只有当前模式允许本插件实际处理的真实 poke**，才会自动生成两层标注：`[戳一戳事件]`（持久化，注入到消息格式中冒号前的系统元数据区，随消息保存到历史）与 `[戳一戳提示]`（运行时，追加在上下文分隔符之外，仅当前轮 AI 可见，保存时由过滤规则自动移除）。平台侧只提供 Poke 组件且正文为空时，会使用 `[ComponentType.Poke]` 作为内容占位；被该模式提前忽略的 poke 不会进入这一步 |
+| `reply_bot_skip_probability` | bool | `true` | 引用机器人发出的消息时按@机器人消息处理，跳过概率筛选并直接触发回复；引用其他用户不会触发 |
 | `poke_bot_skip_probability` | bool | `true` | 戳机器人时跳过概率检查，直接进入AI决策 |
 | `poke_bot_probability_boost_reference` | float | `0.3` | 戳一戳概率提升参考值 |
 | `poke_reverse_on_poke_probability` | float | `0.0` | 被戳后立即反戳的概率（0 = 不反戳）。若反戳动作真实成功，会先以用户视角保存发起者的戳一戳事件，再以 assistant 视角保存 AI 反戳动作，两条记录均写入官方存储和自定义存储，绑定当前会话 |

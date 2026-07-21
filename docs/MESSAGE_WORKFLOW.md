@@ -335,6 +335,7 @@ Phase 9 · 回复后处理（概率提升/打字延迟/错别字等）
 | 配置项 | 作用 |
 |--------|------|
 | `poke_message_mode` | 戳一戳响应模式：`ignore`（忽略）、`bot_only`（仅响应戳机器人）、`all`（响应所有） |
+| `reply_bot_skip_probability` | 引用机器人发出的消息时按@机器人消息处理，跳过概率筛选；引用其他用户不触发 |
 | `poke_bot_skip_probability` | 戳机器人时跳过概率检查 |
 | `poke_enabled_groups` | 启用戳一戳的群（空=全部） |
 | `enable_poke_trace_prompt` | 记录谁戳了机器人，并告知AI |
