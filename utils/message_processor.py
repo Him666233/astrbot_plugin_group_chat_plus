@@ -13,7 +13,7 @@ v1.0.4 更新：
 import re
 from datetime import datetime
 from astrbot.api.all import *
-from astrbot.api.message_components import At
+from astrbot.api.message_components import At, Reply
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -840,21 +840,26 @@ class MessageProcessor:
             return True
 
     @staticmethod
-    def is_at_message(event: AstrMessageEvent) -> bool:
+    def is_at_message(
+        event: AstrMessageEvent,
+        reply_bot_skip_probability: bool = True,
+    ) -> bool:
         """
-        判断消息是否@了bot
+        判断消息是否直接指向bot
 
-        @消息需跳过读空气直接回复
+        @机器人或按配置引用机器人消息时跳过概率筛选并直接回复
 
-        支持两种@方式：
+        支持三种直接触发方式：
         1. At组件（标准方式）
-        2. 文本形式的@ （兼容旧版本QQ，如：@小明）
+        2. Reply组件引用机器人发出的消息
+        3. 文本形式的@ （兼容旧版本QQ，如：@小明）
 
         Args:
             event: 消息事件
+            reply_bot_skip_probability: 是否将引用机器人消息视为直接触发
 
         Returns:
-            True=@了bot，False=没有@
+            True=直接指向bot，False=没有直接指向bot
         """
         try:
             # 方法1: 检查消息链中是否有At组件指向机器人（优先使用）
@@ -870,6 +875,15 @@ class MessageProcessor:
                         ):
                             if DEBUG_MODE:
                                 logger.info("检测到@机器人的消息（At组件）")
+                            return True
+
+                    if reply_bot_skip_probability and isinstance(component, Reply):
+                        reply_sender_id = getattr(component, "sender_id", None)
+                        if reply_sender_id is not None and str(
+                            reply_sender_id
+                        ) == str(bot_id):
+                            if DEBUG_MODE:
+                                logger.info("检测到引用机器人消息（Reply组件）")
                             return True
 
             # 方法2: 检查消息文本中是否包含@机器人（兼容旧版本QQ）

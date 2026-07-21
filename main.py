@@ -1909,6 +1909,9 @@ class ChatPlus(Star):
         self.poke_message_mode = config.get(
             "poke_message_mode", "bot_only"
         )  # 戳一戳消息处理模式
+        self.reply_bot_skip_probability = config.get(
+            "reply_bot_skip_probability", True
+        )  # 引用机器人跳过概率
         self.poke_bot_skip_probability = config.get(
             "poke_bot_skip_probability", True
         )  # 戳机器人跳过概率
@@ -5978,8 +5981,11 @@ class ChatPlus(Star):
             (is_at_message, has_trigger_keyword, matched_trigger_keyword)
             🆕 v1.2.0: 新增返回匹配到的触发关键词
         """
-        # 判断是否是@消息
-        is_at_message = MessageProcessor.is_at_message(event)
+        # 判断是否是@消息或启用了直接触发的引用机器人消息
+        is_at_message = MessageProcessor.is_at_message(
+            event,
+            reply_bot_skip_probability=self.reply_bot_skip_probability,
+        )
 
         # 只在debug模式或是@消息时记录
         if self.debug_mode:
