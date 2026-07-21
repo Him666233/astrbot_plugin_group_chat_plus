@@ -771,6 +771,45 @@ class MessageCleaner:
         return "".join(parts)
 
     @staticmethod
+    def _format_reply_component_with_content(
+        reply_component, message_content, self_id: str = None
+    ) -> str:
+        """使用已经解析好的引用内容构建统一的引用文本。"""
+        sender_id = getattr(reply_component, "sender_id", None)
+        sender_nickname = getattr(reply_component, "sender_nickname", None)
+        if not sender_nickname:
+            sender_nickname = getattr(reply_component, "sender_name", None)
+        if not sender_nickname:
+            sender = getattr(reply_component, "sender", None)
+            sender_nickname = getattr(sender, "nickname", None)
+
+        if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
+            sender_nickname = None
+        is_self = self_id and sender_id and str(sender_id) == str(self_id)
+        self_suffix = "(你)" if is_self else ""
+
+        if sender_nickname and sender_id and message_content:
+            reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
+        elif sender_id and message_content:
+            reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
+        elif sender_nickname and message_content:
+            reply_text = f"[引用 >>> {sender_nickname}{self_suffix}: {message_content}]"
+        elif message_content:
+            reply_text = f"[引用 >>> {message_content}]"
+        elif sender_nickname and sender_id:
+            reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+        elif sender_id:
+            reply_text = (
+                f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+            )
+        elif sender_nickname:
+            reply_text = f"[引用 >>> {sender_nickname}{self_suffix}: (无法获取引用内容)]"
+        else:
+            return ""
+
+        return reply_text.rstrip() + "\n"
+
+    @staticmethod
     def _format_reply_component(reply_component, self_id: str = None) -> str:
         """
         格式化引用消息组件为文本表示
@@ -783,25 +822,6 @@ class MessageCleaner:
             格式化后的引用消息文本
         """
         try:
-            # 尝试提取引用的消息内容
-            # Reply组件包含：sender_id, sender_nickname, message_str, chain 等字段
-
-            # 🆕 获取发送者ID和昵称（根据AstrBot的Reply组件定义）
-            sender_id = None
-            sender_nickname = None
-
-            if hasattr(reply_component, "sender_id"):
-                sender_id = reply_component.sender_id
-
-            if hasattr(reply_component, "sender_nickname"):
-                sender_nickname = reply_component.sender_nickname
-            # 兼容旧字段名
-            elif hasattr(reply_component, "sender_name"):
-                sender_nickname = reply_component.sender_name
-            elif hasattr(reply_component, "sender"):
-                if hasattr(reply_component.sender, "nickname"):
-                    sender_nickname = reply_component.sender.nickname
-
             # 🔧 优先从 Reply 组件的 chain 中提取消息文本
             # chain 包含被引用消息的完整组件链（Plain/Image/Video/File/
             # Forward/Reply 等），遍历 chain 可以保留非文本组件在原始位置
@@ -834,44 +854,12 @@ class MessageCleaner:
                             "[消息清理] Reply chain 和 message_str 均无法提取内容"
                         )
 
-            # 检测被引用消息的发送者是否为AI自己
-            if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
-                sender_nickname = None
-            is_self = self_id and sender_id and str(sender_id) == str(self_id)
-            self_suffix = "(你)" if is_self else ""
-
-            # 🆕 构建引用消息格式：使用 >>> 明确分隔，让 AI 知道后面是引用内容
-            # [引用 >>> 发送者名字(你)(ID:xxx): 消息内容]（被引用者是AI自己时加(你)标记）
-            # 末尾追加 \n 使引用内容与正文之间有明显间隔
-            reply_text = ""
-            if sender_nickname and sender_id and message_content:
-                reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
-            elif sender_id and message_content:
-                reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
-            elif sender_nickname and message_content:
-                reply_text = (
-                    f"[引用 >>> {sender_nickname}{self_suffix}: {message_content}]"
-                )
-            elif message_content:
-                reply_text = f"[引用 >>> {message_content}]"
-            else:
-                # 内容无法提取，但有发送者信息时保留引用框架
-                if sender_nickname and sender_id:
-                    reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_id:
-                    reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_nickname:
-                    reply_text = (
-                        f"[引用 >>> {sender_nickname}{self_suffix}: (无法获取引用内容)]"
-                    )
-                else:
-                    if DEBUG_MODE:
-                        logger.info("[消息清理] 引用消息组件无有效内容，已跳过")
-                    return ""
-
-            if reply_text:
-                return reply_text.rstrip() + "\n"
-            return ""
+            reply_text = MessageCleaner._format_reply_component_with_content(
+                reply_component, message_content, self_id=self_id
+            )
+            if not reply_text and DEBUG_MODE:
+                logger.info("[消息清理] 引用消息组件无有效内容，已跳过")
+            return reply_text
 
         except Exception as e:
             if DEBUG_MODE:
