@@ -34,6 +34,10 @@ from .ai_error_formatter import format_ai_error
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
 
+# AstrBot 的 Reply 组件会在 chain 字段中保存被引用消息的原始消息段。
+# 限制递归深度，避免异常平台数据构造循环/超深引用链。
+_MAX_REPLY_NESTING_DEPTH: int = 3
+
 
 class ImageHandler:
     """
@@ -200,22 +204,13 @@ class ImageHandler:
                     logger.info("未配置图片转文字提供商ID,提取图片URL传递给多模态AI")
                 # 提取图片URL
                 image_urls = await ImageHandler._extract_image_urls(image_components)
-                # 提取文本内容 — 保留 [图片] 标记作为占位符，与视频/语音/文件标记行为一致
-                # 多模态AI通过image_urls直接看到图片，但文本中的[图片]标记标明位置，
-                # 保存到历史时标记也会保留，确保上下文链中图片位置信息不丢失
-                text_parts = []
-                for comp in message_chain:
-                    if isinstance(comp, Plain):
-                        text_parts.append(ImageHandler._coerce_plain_text(comp.text))
-                    elif isinstance(comp, Image):
-                        text_parts.append("[图片]")
-                    else:
-                        fmt = ImageHandler._format_special_component(
-                            comp, self_id=self_id
-                        )
-                        if fmt:
-                            text_parts.append(fmt)
-                text_content = "".join(text_parts)
+                # 提取文本内容 — 保留 [图片] 标记作为占位符，与视频/语音/文件标记行为一致。
+                # Reply.chain 中的引用图片也会递归展开；图片URL列表与这些标记顺序一致。
+                text_content = ImageHandler._render_message_chain(
+                    message_chain,
+                    self_id=self_id,
+                    include_images=True,
+                )
                 if DEBUG_MODE:
                     logger.info(
                         f"🟢 [多模态模式] 提取到 {len(image_urls)} 张图片，文本内容: {text_content[:100] if text_content else '(无文本)'}"
@@ -310,26 +305,35 @@ class ImageHandler:
         has_text = False
         image_components = []
 
-        for component in message_chain:
-            if isinstance(component, Image):
-                has_image = True
-                image_components.append(component)
-            elif isinstance(component, Plain):
-                # 检查是否有非空白文字
-                if ImageHandler._coerce_plain_text(component.text).strip():
+        def walk_chain(chain: List[BaseMessageComponent], depth: int = 0) -> None:
+            nonlocal has_image, has_text
+
+            for component in chain:
+                if isinstance(component, Image):
+                    has_image = True
+                    image_components.append(component)
+                elif isinstance(component, Plain):
+                    # 检查是否有非空白文字
+                    if ImageHandler._coerce_plain_text(component.text).strip():
+                        has_text = True
+                elif isinstance(component, Reply):
+                    # 引用本身也视为文字内容，防止「引用+图片」被当作纯图片丢弃。
                     has_text = True
-            elif isinstance(component, Reply):
-                # 引用消息也视为有文字内容，防止「引用+图片」的消息被当作纯图片丢弃
-                has_text = True
-            elif Video is not None and isinstance(component, Video):
-                # 视频消息视为有内容，防止纯视频消息被丢弃
-                has_text = True
-            elif Record is not None and isinstance(component, Record):
-                # 语音消息视为有内容，防止纯语音消息被丢弃
-                has_text = True
-            elif File is not None and isinstance(component, File):
-                # 文件消息视为有内容，防止纯文件消息被丢弃
-                has_text = True
+                    if depth < _MAX_REPLY_NESTING_DEPTH:
+                        reply_chain = ImageHandler._get_reply_chain(component)
+                        if reply_chain:
+                            walk_chain(reply_chain, depth + 1)
+                elif Video is not None and isinstance(component, Video):
+                    # 视频消息视为有内容，防止纯视频消息被丢弃
+                    has_text = True
+                elif Record is not None and isinstance(component, Record):
+                    # 语音消息视为有内容，防止纯语音消息被丢弃
+                    has_text = True
+                elif File is not None and isinstance(component, File):
+                    # 文件消息视为有内容，防止纯文件消息被丢弃
+                    has_text = True
+
+        walk_chain(message_chain)
 
         # 限制单条消息处理的图片数量，防止恶意刷图
         if len(image_components) > max_images:
@@ -340,6 +344,150 @@ class ImageHandler:
             image_components = image_components[:max_images]
 
         return has_image, has_text, image_components
+
+    @staticmethod
+    def _get_reply_chain(component: Reply) -> List[BaseMessageComponent]:
+        """安全获取 Reply 组件内嵌的原始消息链。"""
+        chain = getattr(component, "chain", None)
+        if isinstance(chain, (list, tuple)):
+            return list(chain)
+        return []
+
+    @staticmethod
+    def _format_reply_component(
+        component: Reply,
+        message_content: Optional[str] = None,
+        self_id: str = None,
+    ) -> str:
+        """将引用组件格式化为包含发送者与引用正文的文本块。"""
+        try:
+            sender_nickname = getattr(
+                component, "sender_nickname", None
+            ) or getattr(component, "sender_name", None)
+            if not sender_nickname and hasattr(component, "sender"):
+                sender_nickname = getattr(component.sender, "nickname", None)
+            sender_id = getattr(component, "sender_id", None)
+
+            if message_content is None:
+                # 优先使用结构化 chain，以便保留被引用消息中的图片占位符。
+                reply_chain = ImageHandler._get_reply_chain(component)
+                if reply_chain:
+                    message_content = ImageHandler._render_message_chain(
+                        reply_chain,
+                        self_id=self_id,
+                        include_images=True,
+                        _depth=1,
+                    ).strip()
+
+                if not message_content:
+                    message_content = getattr(
+                        component, "message_str", None
+                    ) or getattr(component, "message", None)
+
+            if message_content is not None and not isinstance(message_content, str):
+                message_content = str(message_content)
+            message_content = (message_content or "").strip()
+
+            if (
+                sender_nickname
+                and sender_id
+                and str(sender_nickname) == str(sender_id)
+            ):
+                sender_nickname = None
+            is_self = self_id and sender_id and str(sender_id) == str(self_id)
+            self_suffix = "(你)" if is_self else ""
+
+            if message_content:
+                if sender_nickname and sender_id:
+                    reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
+                elif sender_id:
+                    reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
+                elif sender_nickname:
+                    reply_text = (
+                        f"[引用 >>> {sender_nickname}{self_suffix}: {message_content}]"
+                    )
+                else:
+                    reply_text = f"[引用 >>> {message_content}]"
+            elif sender_nickname and sender_id:
+                reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+            elif sender_id:
+                reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
+            elif sender_nickname:
+                reply_text = (
+                    f"[引用 >>> {sender_nickname}{self_suffix}: (无法获取引用内容)]"
+                )
+            else:
+                return ""
+
+            return reply_text.rstrip() + "\n"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _render_message_chain(
+        message_chain: List[BaseMessageComponent],
+        self_id: str = None,
+        include_images: bool = True,
+        image_descriptions: Optional[dict] = None,
+        _image_index: Optional[List[int]] = None,
+        _depth: int = 0,
+    ) -> str:
+        """
+        将消息链渲染为文本，并递归处理 Reply.chain。
+
+        image_descriptions 使用图片在展开后消息链中的顺序索引作为键，确保
+        引用图片与普通图片共用同一套图片数量限制和视觉识别结果映射。
+        """
+        if _image_index is None:
+            _image_index = [0]
+
+        result_parts = []
+        for component in message_chain:
+            if isinstance(component, Plain):
+                result_parts.append(ImageHandler._coerce_plain_text(component.text))
+            elif isinstance(component, Image):
+                image_idx = _image_index[0]
+                _image_index[0] += 1
+                if include_images:
+                    description = (image_descriptions or {}).get(image_idx)
+                    if description:
+                        result_parts.append(f"[图片内容: {description}]")
+                    else:
+                        result_parts.append("[图片]")
+            elif isinstance(component, Reply):
+                nested_content = ""
+                if _depth < _MAX_REPLY_NESTING_DEPTH:
+                    reply_chain = ImageHandler._get_reply_chain(component)
+                    if reply_chain:
+                        nested_content = ImageHandler._render_message_chain(
+                            reply_chain,
+                            self_id=self_id,
+                            include_images=include_images,
+                            image_descriptions=image_descriptions,
+                            _image_index=_image_index,
+                            _depth=_depth + 1,
+                        ).strip()
+
+                if not nested_content:
+                    nested_content = getattr(
+                        component, "message_str", None
+                    ) or getattr(component, "message", None)
+
+                formatted = ImageHandler._format_reply_component(
+                    component,
+                    message_content=nested_content or "",
+                    self_id=self_id,
+                )
+                if formatted:
+                    result_parts.append(formatted)
+            else:
+                formatted = ImageHandler._format_special_component(
+                    component, self_id=self_id
+                )
+                if formatted:
+                    result_parts.append(formatted)
+
+        return "".join(result_parts)
 
     @staticmethod
     def _format_special_component(
@@ -362,50 +510,10 @@ class ImageHandler:
         elif isinstance(component, AtAll):
             return "[At:all]"
         elif isinstance(component, Reply):
-            # 格式化引用消息，保留引用内容让AI理解上下文
-            # [引用 >>> 发送者: 内容] 格式，>>> 明确分隔引用标记与引用内容
-            # 末尾追加 \n 使引用内容与正文之间有明显间隔
-            try:
-                message_content = getattr(component, "message_str", None) or getattr(
-                    component, "message", None
-                )
-                sender_nickname = getattr(
-                    component, "sender_nickname", None
-                ) or getattr(component, "sender_name", None)
-                if not sender_nickname and hasattr(component, "sender"):
-                    sender_nickname = getattr(component.sender, "nickname", None)
-                sender_id = getattr(component, "sender_id", None)
-                if (
-                    sender_nickname
-                    and sender_id
-                    and str(sender_nickname) == str(sender_id)
-                ):
-                    sender_nickname = None
-                is_self = self_id and sender_id and str(sender_id) == str(self_id)
-                self_suffix = "(你)" if is_self else ""
-                reply_text = ""
-                if message_content:
-                    if sender_nickname and sender_id:
-                        reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
-                    elif sender_id:
-                        reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
-                    elif sender_nickname:
-                        reply_text = f"[引用 >>> {sender_nickname}{self_suffix}: {message_content}]"
-                    else:
-                        reply_text = f"[引用 >>> {message_content}]"
-                elif sender_nickname and sender_id:
-                    reply_text = f"[引用 >>> {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_id:
-                    reply_text = f"[引用 >>> 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_nickname:
-                    reply_text = (
-                        f"[引用 >>> {sender_nickname}{self_suffix}: (无法获取引用内容)]"
-                    )
-                if reply_text:
-                    return reply_text.rstrip() + "\n"
-                return ""
-            except Exception:
-                return ""
+            return ImageHandler._format_reply_component(
+                component,
+                self_id=self_id,
+            )
         elif Video is not None and isinstance(component, Video):
             return "[视频]"
         elif Record is not None and isinstance(component, Record):
@@ -432,26 +540,14 @@ class ImageHandler:
         Returns:
             纯文字内容
         """
-        text_parts = []
-
-        for component in message_chain:
-            if isinstance(component, Plain):
-                text_parts.append(ImageHandler._coerce_plain_text(component.text))
-            elif isinstance(component, Image):
-                # 跳过图片
-                continue
-            else:
-                # 其他类型的组件,尝试转为文本表示
-                formatted = ImageHandler._format_special_component(
-                    component, self_id=self_id
-                )
-                if formatted:
-                    text_parts.append(formatted)
-
-        result = "".join(text_parts).strip()
+        result = ImageHandler._render_message_chain(
+            message_chain,
+            self_id=self_id,
+            include_images=False,
+        ).strip()
         if not result:
             logger.warning(
-                f"[图片处理] _extract_text_only 提取到空文本！text_parts={text_parts[:5]}"
+                "[图片处理] _extract_text_only 提取到空文本！"
             )
         return result
 
@@ -643,15 +739,6 @@ class ImageHandler:
                 logger.error(f"无法找到提供商: {provider_id}")
                 return None
 
-            # 建立message_chain中Image组件位置到image_components索引的映射
-            # 这样可以避免使用id()，更稳定可靠
-            image_chain_to_idx = {}
-            img_count = 0
-            for chain_idx, component in enumerate(message_chain):
-                if isinstance(component, Image):
-                    image_chain_to_idx[chain_idx] = img_count
-                    img_count += 1
-
             # 对每张图片进行转文字
             image_descriptions = {}
             for idx, img_component in enumerate(image_components):
@@ -718,33 +805,13 @@ class ImageHandler:
                 logger.warning("没有成功转换任何图片")
                 return None
 
-            # 构建新的消息文本,将图片替换为描述
-            result_parts = []
-            for chain_idx, component in enumerate(message_chain):
-                if isinstance(component, Plain):
-                    result_parts.append(ImageHandler._coerce_plain_text(component.text))
-                elif isinstance(component, Image):
-                    # 如果这张图片有描述,使用描述替换
-                    # 通过chain_idx找到对应的image_components索引
-                    if chain_idx in image_chain_to_idx:
-                        img_idx = image_chain_to_idx[chain_idx]
-                        if img_idx in image_descriptions:
-                            result_parts.append(
-                                f"[图片内容: {image_descriptions[img_idx]}]"
-                            )
-                        else:
-                            result_parts.append("[图片]")
-                    else:
-                        result_parts.append("[图片]")
-                else:
-                    # 其他组件使用统一的格式化方法
-                    formatted = ImageHandler._format_special_component(
-                        component, self_id=self_id
-                    )
-                    if formatted:
-                        result_parts.append(formatted)
-
-            result_text = "".join(result_parts)
+            # 构建新的消息文本，将普通图片和 Reply.chain 中的引用图片替换为描述。
+            result_text = ImageHandler._render_message_chain(
+                message_chain,
+                self_id=self_id,
+                include_images=True,
+                image_descriptions=image_descriptions,
+            )
             if DEBUG_MODE:
                 logger.info(f"图片转文字完成,处理后的消息: {result_text[:100]}...")
             return result_text
