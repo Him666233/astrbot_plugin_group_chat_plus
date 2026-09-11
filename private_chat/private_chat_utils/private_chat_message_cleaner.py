@@ -30,6 +30,8 @@ from astrbot.api.all import *
 from astrbot.api.message_components import Plain, At, Image, Reply
 from astrbot.core.message.components import Forward
 
+from ...utils.reply_chain_utils import format_reply_component
+
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
 
@@ -462,71 +464,23 @@ class MessageCleaner:
         """
         格式化引用消息组件为文本表示
 
+        🆕 统一走 `utils/reply_chain_utils.format_reply_component`：
+        与群聊一致地输出 `[引用 >>> 发送者(你)(ID:xxx): 正文]`；当 `message_str`
+        为空（被引用消息是纯图片）时下钻 `Reply.chain` 还原正文，
+        图片渲染为 `[图片]` 占位标记，避免丢失引用内容。
+
         Args:
             reply_component: Reply组件
+            self_id: 机器人自身ID，用于给「引用自己的消息」加 (你) 标记
 
         Returns:
             格式化后的引用消息文本
         """
         try:
-            # 尝试提取引用的消息内容
-            # Reply组件包含：sender_id, sender_nickname, message_str等字段
-
-            # 🆕 获取发送者ID和昵称（根据AstrBot的Reply组件定义）
-            sender_id = None
-            sender_nickname = None
-
-            if hasattr(reply_component, "sender_id"):
-                sender_id = reply_component.sender_id
-
-            if hasattr(reply_component, "sender_nickname"):
-                sender_nickname = reply_component.sender_nickname
-            # 兼容旧字段名
-            elif hasattr(reply_component, "sender_name"):
-                sender_nickname = reply_component.sender_name
-            elif hasattr(reply_component, "sender"):
-                if hasattr(reply_component.sender, "nickname"):
-                    sender_nickname = reply_component.sender.nickname
-
-            # 尝试获取消息内容
-            message_content = None
-            if hasattr(reply_component, "message_str"):
-                message_content = reply_component.message_str
-            elif hasattr(reply_component, "message"):
-                message_content = reply_component.message
-
-            # 检测被引用消息的发送者是否为AI自己
-            if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
-                sender_nickname = None
-            is_self = self_id and sender_id and str(sender_id) == str(self_id)
-            self_suffix = "(你)" if is_self else ""
-
-            # 🆕 构建引用消息格式（与其他消息格式保持一致：发送者名字(ID:xxx)）
-            if sender_nickname and sender_id and message_content:
-                # 完整格式：[引用 发送者名字(你)(ID:xxx): 消息内容]
-                return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
-            elif sender_id and message_content:
-                # 有ID但没有昵称
-                return (
-                    f"[引用 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
-                )
-            elif sender_nickname and message_content:
-                # 有昵称但没有ID（兼容情况）
-                return f"[引用 {sender_nickname}{self_suffix}: {message_content}]"
-            elif message_content:
-                # 只有消息内容
-                return f"[引用消息: {message_content}]"
-            else:
-                # 内容无法提取，但有发送者信息时保留引用框架
-                if sender_nickname and sender_id:
-                    return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_id:
-                    return f"[引用 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_nickname:
-                    return f"[引用 {sender_nickname}{self_suffix}: (无法获取引用内容)]"
-                else:
-                    return "[引用消息]"
-
+            return (
+                format_reply_component(reply_component, self_id=self_id)
+                or "[引用消息]"
+            )
         except Exception as e:
             if DEBUG_MODE:
                 logger.info(f"[消息清理] 格式化引用消息失败: {e}")

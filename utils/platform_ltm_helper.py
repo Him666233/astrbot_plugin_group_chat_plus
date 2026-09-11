@@ -12,6 +12,8 @@ from typing import Optional, Tuple
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .reply_chain_utils import analyze_chain, has_image_in_chain
+
 # 调试模式开关
 DEBUG_MODE: bool = False
 
@@ -885,6 +887,9 @@ class PlatformLTMHelper:
         """
         检查消息中是否包含图片
 
+        会一并下钻 `Reply.chain`：群聊里「引用一张图片」时，
+        被引用的图片挂在 Reply 组件内部，只扫顶层组件会漏判。
+
         Args:
             event: 消息事件
 
@@ -892,18 +897,12 @@ class PlatformLTMHelper:
             是否包含图片
         """
         try:
-            from astrbot.api.message_components import Image
-
             if not hasattr(event, "message_obj") or not hasattr(
                 event.message_obj, "message"
             ):
                 return False
 
-            for component in event.message_obj.message:
-                if isinstance(component, Image):
-                    return True
-
-            return False
+            return has_image_in_chain(event.message_obj.message)
 
         except Exception:
             return False
@@ -913,6 +912,10 @@ class PlatformLTMHelper:
         """
         检查是否是纯图片消息（不包含文字）
 
+        引用、视频、语音、文件等非文字段均视为「有内容」，
+        避免「引用图片 + @机器人」被误判成纯图片消息。
+        会被引消息里的图片同样计入。
+
         Args:
             event: 消息事件
 
@@ -920,23 +923,12 @@ class PlatformLTMHelper:
             是否是纯图片消息
         """
         try:
-            from astrbot.api.message_components import Image, Plain
-
             if not hasattr(event, "message_obj") or not hasattr(
                 event.message_obj, "message"
             ):
                 return False
 
-            has_image = False
-            has_text = False
-
-            for component in event.message_obj.message:
-                if isinstance(component, Image):
-                    has_image = True
-                elif isinstance(component, Plain):
-                    text = component.text if isinstance(component.text, str) else ""
-                    if text.strip():
-                        has_text = True
+            has_image, has_text, _ = analyze_chain(event.message_obj.message)
 
             return has_image and not has_text
 

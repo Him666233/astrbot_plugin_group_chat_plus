@@ -18,6 +18,11 @@ from astrbot.api.message_components import Face, At, Reply
 from .private_chat_image_description_cache import ImageDescriptionCache
 from ...utils.ai_error_formatter import format_ai_error
 from ...utils.image_handler import ImageHandler as _GroupImageHandler
+from ...utils.reply_chain_utils import (
+    analyze_chain,
+    format_reply_component,
+    render_chain_text,
+)
 
 # 详细日志开关
 DEBUG_MODE: bool = False
@@ -192,6 +197,9 @@ class ImageHandler:
         """
         分析消息链，检查图片和文字
 
+        会一并下钻 `Reply.chain`：私信里「引用一张图片」时，被引用的图片挂在
+        Reply 组件内部，只扫顶层组件会漏掉它。
+
         Args:
             message_chain: 消息链
             max_images: 单条消息最大处理图片数
@@ -199,19 +207,10 @@ class ImageHandler:
         Returns:
             (是否有图片, 是否有文字, 图片组件列表)
         """
-        has_image = False
-        has_text = False
-        image_components = []
-
-        for component in message_chain:
-            if isinstance(component, Image):
-                has_image = True
-                image_components.append(component)
-            elif isinstance(component, Plain):
-                if ImageHandler._coerce_plain_text(component.text).strip():
-                    has_text = True
-            elif isinstance(component, Reply):
-                has_text = True
+        # 私信链路保持原有语义：只有 Reply 视为文字，视频/语音/文件不计入 has_text
+        has_image, has_text, image_components = analyze_chain(
+            message_chain, media_as_text=False
+        )
 
         # 限制单条消息处理的图片数量
         if len(image_components) > max_images:
@@ -242,41 +241,10 @@ class ImageHandler:
             return f"[At:{component.qq}]"
         elif isinstance(component, Reply):
             try:
-                message_content = getattr(component, "message_str", None) or getattr(
-                    component, "message", None
-                )
-                sender_nickname = getattr(
-                    component, "sender_nickname", None
-                ) or getattr(component, "sender_name", None)
-                if not sender_nickname and hasattr(component, "sender"):
-                    sender_nickname = getattr(component.sender, "nickname", None)
-                sender_id = getattr(component, "sender_id", None)
-                if (
-                    sender_nickname
-                    and sender_id
-                    and str(sender_nickname) == str(sender_id)
-                ):
-                    sender_nickname = None
-                is_self = self_id and sender_id and str(sender_id) == str(self_id)
-                self_suffix = "(你)" if is_self else ""
-                if message_content:
-                    if sender_nickname and sender_id:
-                        return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): {message_content}]"
-                    elif sender_id:
-                        return f"[引用 未知用户{self_suffix}(ID:{sender_id}): {message_content}]"
-                    elif sender_nickname:
-                        return (
-                            f"[引用 {sender_nickname}{self_suffix}: {message_content}]"
-                        )
-                    else:
-                        return f"[引用消息: {message_content}]"
-                if sender_nickname and sender_id:
-                    return f"[引用 {sender_nickname}{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_id:
-                    return f"[引用 未知用户{self_suffix}(ID:{sender_id}): (无法获取引用内容)]"
-                elif sender_nickname:
-                    return f"[引用 {sender_nickname}{self_suffix}: (无法获取引用内容)]"
-                return "[引用消息]"
+                # 🆕 统一走公共实现：与群聊一致地输出 `[引用 >>> ...]`，
+                # 且 message_str 为空（被引用消息是纯图片）时会下钻 Reply.chain 还原正文，
+                # 图片渲染为 [图片] 占位标记。
+                return format_reply_component(component, self_id=self_id) or "[引用消息]"
             except Exception:
                 return "[引用消息]"
         else:
@@ -388,14 +356,9 @@ class ImageHandler:
                 logger.error(f"[私信图片处理] 无法找到提供商: {provider_id}")
                 return None
 
-            # 建立 message_chain 中 Image 组件位置到 image_components 索引的映射
-            image_chain_to_idx = {}
-            img_count = 0
-            for chain_idx, component in enumerate(message_chain):
-                if isinstance(component, Image):
-                    image_chain_to_idx[chain_idx] = img_count
-                    img_count += 1
-
+            # 🆕 图片序号按「展开后的消息链顺序」编号（与 analyze_chain /
+            # _extract_image_urls 一致）：渲染交给 render_chain_text 统一递归处理，
+            # 避免引用消息里的图片与顶层图片串号。
             # 串行处理每张图片
             image_descriptions = {}
             ai_call_count = 0  # AI 实际调用计数器（缓存命中不计数）
@@ -480,30 +443,13 @@ class ImageHandler:
                 logger.warning("[私信图片处理] 没有成功转换任何图片")
                 return None
 
-            # 构建新的消息文本，将图片替换为描述或占位符
-            result_parts = []
-            for chain_idx, component in enumerate(message_chain):
-                if isinstance(component, Plain):
-                    result_parts.append(ImageHandler._coerce_plain_text(component.text))
-                elif isinstance(component, Image):
-                    if chain_idx in image_chain_to_idx:
-                        img_idx = image_chain_to_idx[chain_idx]
-                        if img_idx in image_descriptions:
-                            result_parts.append(
-                                f"[图片内容: {image_descriptions[img_idx]}]"
-                            )
-                        else:
-                            result_parts.append("[图片]")
-                    else:
-                        result_parts.append("[图片]")
-                else:
-                    formatted = ImageHandler._format_special_component(
-                        component, self_id=self_id
-                    )
-                    if formatted:
-                        result_parts.append(formatted)
-
-            result_text = "".join(result_parts)
+            # 构建新的消息文本：按展开顺序递归渲染，图片替换为描述或占位符
+            # （引用消息里的图片同样能对应到自己的描述）
+            result_text = render_chain_text(
+                message_chain,
+                self_id=self_id,
+                image_descriptions=image_descriptions,
+            )
             if DEBUG_MODE:
                 logger.info(f"[私信图片处理] 图片转文字完成: {result_text[:100]}...")
             return result_text
