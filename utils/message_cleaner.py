@@ -40,6 +40,8 @@ from astrbot.api.all import *
 from astrbot.api.message_components import Plain, At, AtAll, Image, Reply
 from astrbot.core.message.components import Forward
 
+from .reply_chain_utils import resolve_reply_content
+
 # 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
 try:
     from astrbot.core.message.components import Video, Record, File
@@ -624,6 +626,17 @@ class MessageCleaner:
                 message_content = reply_component.message_str
             elif hasattr(reply_component, "message"):
                 message_content = reply_component.message
+
+            # 🆕 修复：message_str 只包含被引用消息的纯文本，被引用消息是纯图片
+            # （或只含图片+表情等非文字段）时它为空字符串，会导致引用内容丢失
+            # （表现为 "(无法获取引用内容)"）。此处回退到 Reply.chain 还原正文，
+            # 图片渲染为 [图片] 占位标记，让 AI 知道引用里有一张图。
+            if not (
+                isinstance(message_content, str) and message_content.strip()
+            ):
+                chain_content = resolve_reply_content(reply_component)
+                if chain_content:
+                    message_content = chain_content
 
             # 检测被引用消息的发送者是否为AI自己
             if sender_nickname and sender_id and str(sender_nickname) == str(sender_id):
