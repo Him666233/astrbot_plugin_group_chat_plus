@@ -34,8 +34,8 @@ class _Plain(_BaseMessageComponent):
 
 
 class _Image(_BaseMessageComponent):
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, name=None, *, file=None):
+        self.name = file if file is not None else name
 
     async def convert_to_file_path(self):
         return self.name

@@ -13,9 +13,15 @@
 """
 
 import asyncio
+from copy import deepcopy
 from typing import List, Optional, Tuple, Any
 from astrbot.api.all import *
 from astrbot.api.message_components import Face, At, AtAll, Reply
+
+try:
+    from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
+except ImportError:
+    extract_quoted_message_images = None
 
 # 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
 try:
@@ -102,7 +108,39 @@ class ImageHandler:
                 # 没有消息链,使用原始文本
                 return True, event.get_message_outline(), [], False
 
-            message_chain = event.message_obj.message
+            message_chain = list(event.message_obj.message)
+            scope = (image_to_text_scope or "all").strip().lower()
+            resolve_quotes = enable_image_processing and (
+                scope == "all"
+                or (is_at_message and scope != "keyword_only")
+                or (has_trigger_keyword and scope != "at_only")
+            )
+            if resolve_quotes and extract_quoted_message_images is not None:
+                for index, component in enumerate(message_chain):
+                    if not isinstance(component, Reply):
+                        continue
+                    # Embedded images already follow the existing recursive path.
+                    if ImageHandler._analyze_message([component], max_images_per_message)[0]:
+                        continue
+                    try:
+                        sources = await asyncio.wait_for(
+                            extract_quoted_message_images(event, component),
+                            timeout=max(1.0, min(10.0, float(timeout))),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Quoted image extraction failed: %s", type(exc).__name__
+                        )
+                        continue
+                    if not sources:
+                        continue
+                    # Keep the original event intact for other plugins and storage.
+                    quoted = deepcopy(component)
+                    quoted.chain = ImageHandler._get_reply_chain(quoted) + [
+                        Image(file=source)
+                        for source in list(dict.fromkeys(sources))[:max_images_per_message]
+                    ]
+                    message_chain[index] = quoted
 
             # 检查消息中是否有图片
             has_image, has_text, image_components = ImageHandler._analyze_message(
