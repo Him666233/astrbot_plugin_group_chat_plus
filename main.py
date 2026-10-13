@@ -2323,6 +2323,9 @@ class ChatPlus(Star):
             "save_content_filter_rules", []
         )  # 保存过滤规则
 
+        # 🆕 输出控制标签开关（<refuse/> 和 <mention/> 标签解析）
+        self.enable_output_tags = config.get("enable_output_tags", True)
+
         # === 超时警告配置 ===
         self.reply_timeout_warning_threshold = config.get(
             "reply_timeout_warning_threshold", 120
@@ -11098,6 +11101,20 @@ class ChatPlus(Star):
             else:
                 logger.info("    - 工具集: 无")
 
+        # 🆕 标签说明注入：如果启用输出控制标签，追加使用说明到 system_prompt
+        # 此时所有处理已完成，req.system_prompt 为最终状态
+        if self.enable_output_tags:
+            try:
+                from .utils.tag_processor import build_tag_instructions
+
+                req.system_prompt += build_tag_instructions()
+                if self.debug_mode:
+                    logger.info(
+                        "  ✅ 已注入输出控制标签说明到 system_prompt"
+                    )
+            except ImportError:
+                pass
+
         # 🔧 修复：处理完成后立即清理event.extra字段，防止event对象污染导致上下文混乱
         # 背景：平台在网络异常等特殊情况下可能复用event对象，如果不清理extra字段，
         # 可能导致后续请求读取到错误的上下文数据，从而出现AI答非所问的问题
@@ -11215,6 +11232,20 @@ class ChatPlus(Star):
             ).strip()
             if not reply_text:
                 return
+
+            # 🆕 标签解析：检测 AI 是否主动拒绝回复（<refuse/>）
+            if self.enable_output_tags:
+                try:
+                    from .utils.tag_processor import has_refuse_tag
+
+                    if has_refuse_tag(reply_text):
+                        logger.info(
+                            "[标签解析] AI 输出 <refuse/>，跳过本次回复（不发送、不清空缓存）"
+                        )
+                        event.clear_result()
+                        return
+                except ImportError:
+                    pass  # 标签处理器不可用时忽略，不影响主流程
 
             self.raw_reply_cache[message_id] = reply_text
 
@@ -11344,6 +11375,28 @@ class ChatPlus(Star):
                         ][-max_cache_size:]
                 except Exception:
                     pass  # 缓存写入失败不影响主流程
+
+            # 🆕 标签解析：将 <mention id="xxx"/> 标签转为 At 组件
+            # 必须在错字模拟之前执行，避免错字模拟破坏标签格式
+            if self.enable_output_tags:
+                try:
+                    from .utils.tag_processor import process_mention_tags
+
+                    processed_chain = process_mention_tags(result.chain)
+                    if processed_chain is not None:
+                        result.chain = processed_chain
+                        # 重新提取文本用于后续错字/延迟模拟
+                        reply_text = "".join(
+                            self._coerce_component_text(
+                                getattr(comp, "text", None)
+                            )
+                            for comp in result.chain
+                        ).strip()
+                        if self.debug_mode:
+                            logger.info("[标签解析] 已解析 <mention/> 标签为 At 组件")
+
+                except ImportError:
+                    pass  # 标签处理器不可用时忽略，不影响主流程
 
             # 🆕 v1.0.2: 应用错字模拟（在重复检测之后，对原始内容进行装饰性修改）
             if self.typo_enabled and self.typo_generator:
