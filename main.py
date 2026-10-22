@@ -10905,15 +10905,17 @@ class ChatPlus(Star):
                         _aud_seen.add(_u)
                         _merged_audio_urls.append(_u)
         else:
-            # 回退：从快照提取第三方追加的 URL
-            for _u in req_snapshot.get("image_urls", []):
-                if _u not in _img_seen:
-                    _img_seen.add(_u)
-                    _merged_image_urls.append(_u)
+            # 回退：从快照提取第三方追加的音频 URL
             for _u in req_snapshot.get("audio_urls", []):
                 if _u not in _aud_seen:
                     _aud_seen.add(_u)
                     _merged_audio_urls.append(_u)
+
+        # 保留请求中已有的图片，即使其他插件只注入了文本或上下文。
+        for _u in req_snapshot.get("image_urls", []):
+            if _u not in _img_seen:
+                _img_seen.add(_u)
+                _merged_image_urls.append(_u)
 
         req.image_urls = _merged_image_urls
         if _merged_audio_urls:
