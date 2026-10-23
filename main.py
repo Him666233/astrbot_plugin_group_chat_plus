@@ -274,6 +274,11 @@ from .utils.image_description_cache import (
     ImageDescriptionCache,
 )  # 🆕 v1.2.0: 图片描述缓存
 from .utils._session_guard import emit_plugin_metadata as _emit_fingerprint
+from .utils.forward_media import (
+    ForwardMediaPolicy,
+    ForwardMediaProcessor,
+    allows_image_caption,
+)
 from .utils.content_filter import ContentFilterManager  # 🆕 v1.2.0: AI回复内容过滤器
 from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
 
@@ -1214,6 +1219,16 @@ class ChatPlus(Star):
         self.enable_forward_message_parsing = config.get(
             "enable_forward_message_parsing", False
         )
+        self.enable_forward_image_processing = config.get(
+            "enable_forward_image_processing", False
+        )
+        try:
+            self.forward_media_timeout = min(
+                180, max(10, int(config.get("forward_media_timeout", 90)))
+            )
+        except (ValueError, TypeError):
+            self.forward_media_timeout = 90
+        self.forward_media_processor = ForwardMediaProcessor()
 
         # 嵌套转发最大解析深度（0=不展开嵌套转发，仅保留占位式降级；硬上限10层）
         FORWARD_NESTING_HARD_LIMIT = 10
@@ -3524,6 +3539,7 @@ class ChatPlus(Star):
 
         停止主动对话功能的后台任务并保存状态
         """
+        await self.forward_media_processor.close()
         idle_flush_tasks = list(self._idle_flush_tasks.keys())
         for chat_id in idle_flush_tasks:
             await self._cancel_idle_flush_task(chat_id)
@@ -4238,13 +4254,15 @@ class ChatPlus(Star):
             # 指令消息已提前丢弃，避免不必要的 API 调用
             if self.enable_forward_message_parsing:
                 try:
-                    _forward_parsed = await ForwardMessageParser.try_parse_and_replace(
-                        event,
-                        include_sender_info=self.include_sender_info,
-                        include_timestamp=self.include_timestamp,
-                        max_nesting_depth=self.forward_max_nesting_depth,
-                        debug_mode=self.debug_mode,
-                    )
+                    _forward_parsed = await self._prepare_forward_media(event)
+                    if not _forward_parsed:
+                        _forward_parsed = await ForwardMessageParser.try_parse_and_replace(
+                            event,
+                            include_sender_info=self.include_sender_info,
+                            include_timestamp=self.include_timestamp,
+                            max_nesting_depth=self.forward_max_nesting_depth,
+                            debug_mode=self.debug_mode,
+                        )
                     if _forward_parsed and self.debug_mode:
                         logger.info("[转发消息] 群聊：已成功解析转发消息并替换为纯文本")
                 except Exception as e:
@@ -4309,6 +4327,46 @@ class ChatPlus(Star):
                 self._message_cache_snapshots.pop(_cleanup_message_id, None)
                 self._duplicate_blocked_messages.pop(_cleanup_message_id, None)
                 self._smart_batch_snapshots.pop(_cleanup_message_id, None)
+
+    async def _prepare_forward_media(self, event: AstrMessageEvent) -> bool:
+        """Keep media policy at the entry point, before probability/text caching."""
+        if not (
+            self.enable_forward_image_processing
+            and self._is_enabled(event)
+            and self.enable_image_processing
+            and self.image_to_text_provider_id
+        ):
+            return False
+        if self._should_ignore_at_all(event) or self._should_ignore_at_others(event):
+            return False
+        is_at = MessageProcessor.is_at_message(event)
+        has_keyword, _ = KeywordChecker.check_trigger_keywords_with_match(
+            event, self.trigger_keywords
+        )
+        if not allows_image_caption(self.image_to_text_scope, is_at, has_keyword):
+            return False
+        policy = ForwardMediaPolicy(
+            provider_id=self.image_to_text_provider_id,
+            prompt=self.image_to_text_prompt,
+            max_images=self.max_images_per_message,
+            timeout=self.forward_media_timeout,
+            include_sender=self.include_sender_info,
+            include_timestamp=self.include_timestamp,
+            max_depth=self.forward_max_nesting_depth,
+        )
+
+        async def describe(image):
+            return await ImageHandler.describe_image(
+                image,
+                self.context,
+                policy.provider_id,
+                policy.prompt,
+                self.image_to_text_timeout,
+                self.image_description_cache,
+                getattr(event, "session_id", ""),
+            )
+
+        return await self.forward_media_processor.prepare(event, policy, describe)
 
     async def restart_core(self):
         """

@@ -15,10 +15,12 @@
 所有配置通过方法参数传入，本模块不直接读取任何配置。
 """
 
+import asyncio
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from astrbot.api import logger
 from astrbot.core.message.components import Forward, Plain
@@ -27,10 +29,23 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 FORWARD_NESTING_HARD_LIMIT = 10
 FORWARD_API_CALL_HARD_LIMIT = 30
+ImageRenderer = Callable[[dict], Awaitable[str]]
+
+
+@dataclass
+class ForwardParseState:
+    """Structured progress for callers that need conservative failure handling."""
+
+    is_forward: bool = False
+    incomplete: bool = False
 
 
 class ForwardMessageParser:
     """转发消息解析器 - 将转发消息解析为可读纯文本"""
+
+    @staticmethod
+    def supports(event: AstrMessageEvent) -> bool:
+        return _get_call_action(event) is not None
 
     @staticmethod
     async def try_parse_and_replace(
@@ -39,6 +54,8 @@ class ForwardMessageParser:
         include_timestamp: bool,
         max_nesting_depth: int = 3,
         debug_mode: bool = False,
+        image_renderer: Optional[ImageRenderer] = None,
+        state: Optional[ForwardParseState] = None,
     ) -> bool:
         try:
             if not hasattr(event, "message_obj") or not hasattr(
@@ -71,7 +88,10 @@ class ForwardMessageParser:
             effective_max_depth = min(
                 max(max_nesting_depth, 0), FORWARD_NESTING_HARD_LIMIT
             )
-            parse_context = _create_parse_context()
+            state = state if state is not None else ForwardParseState()
+            state.is_forward = True
+            parse_context = _create_parse_context(state)
+            parse_context["image_renderer"] = image_renderer
 
             forwarder_name = event.get_sender_name() or ""
             forwarder_id = event.get_sender_id() or ""
@@ -81,10 +101,16 @@ class ForwardMessageParser:
 
             any_parsed = False
 
-            for idx in reversed(forward_indices):
+            for idx in forward_indices:
                 forward_comp = message_chain[idx]
                 forward_id = getattr(forward_comp, "id", None)
                 if not forward_id:
+                    state.incomplete = True
+                    if image_renderer is not None:
+                        message_chain[idx] = Plain(
+                            text="[转发消息]（缺少消息ID，内容尚未读取）"
+                        )
+                        any_parsed = True
                     if debug_mode:
                         logger.info("[转发消息] Forward 组件无 id 字段，跳过")
                     continue
@@ -100,6 +126,7 @@ class ForwardMessageParser:
                 )
 
                 if nodes is None:
+                    state.incomplete = True
                     logger.warning(
                         f"[转发消息] 获取转发内容失败，forward_id={forward_id}，"
                         "已替换为占位标识"
@@ -157,9 +184,74 @@ class ForwardMessageParser:
             logger.warning(f"[转发消息] 解析转发消息时发生异常（已跳过）: {e}")
             return False
 
+    @staticmethod
+    async def parse_quoted_forward(
+        event: AstrMessageEvent,
+        reply,
+        include_sender_info: bool,
+        include_timestamp: bool,
+        max_nesting_depth: int = 3,
+        image_renderer: Optional[ImageRenderer] = None,
+        state: Optional[ForwardParseState] = None,
+    ) -> Optional[str]:
+        """Resolve only quoted forwards, without depending on AstrBot core helpers."""
+        call_action = _get_call_action(event)
+        message_id = getattr(reply, "id", None)
+        if call_action is None or message_id is None:
+            return None
+        payload = None
+        message_ids = [str(message_id)]
+        if str(message_id).isdigit():
+            message_ids.append(int(message_id))
+        for value in message_ids:
+            try:
+                # This may be an ordinary quote; do not spend the whole caption
+                # budget discovering its type. At most two five-second attempts.
+                response = await asyncio.wait_for(
+                    call_action("get_msg", message_id=value), timeout=5
+                )
+                if isinstance(response, dict):
+                    payload = response.get("data", response)
+                    if isinstance(payload, dict) and isinstance(
+                        payload.get("message"), list
+                    ):
+                        break
+            except Exception:
+                continue
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("message"), list
+        ):
+            raise LookupError("Quoted message could not be retrieved")
+        segments = payload["message"]
+        if not any(
+            isinstance(segment, dict)
+            and str(segment.get("type", "")).lower()
+            in ("forward", "forward_msg", "nodes")
+            for segment in segments
+        ):
+            return None
+        state = state if state is not None else ForwardParseState()
+        state.is_forward = True
+        parse_context = _create_parse_context(state)
+        parse_context["image_renderer"] = image_renderer
+        return await _format_forward_message(
+            nodes=[payload],
+            call_action=call_action,
+            forwarder_name=str(getattr(reply, "sender_nickname", "") or ""),
+            forwarder_id=str(getattr(reply, "sender_id", "") or ""),
+            event_timestamp=payload.get("time", 0),
+            include_sender_info=include_sender_info,
+            include_timestamp=include_timestamp,
+            # The get_msg envelope is not an extra nesting level.
+            max_nesting_depth=min(max(max_nesting_depth, 0), FORWARD_NESTING_HARD_LIMIT),
+            parse_context=parse_context,
+            depth=-1,
+        )
 
-def _create_parse_context() -> dict[str, Any]:
+
+def _create_parse_context(state: Optional[ForwardParseState] = None) -> dict[str, Any]:
     return {
+        "state": state if state is not None else ForwardParseState(),
         "api_call_count": 0,
         "active_forward_ids": set(),
         "forward_cache": {},
@@ -355,11 +447,13 @@ async def _format_forward_message(
             if node_text:
                 body_lines.append(node_text)
         except Exception as e:
+            parse_context["state"].incomplete = True
             if debug_mode:
                 logger.debug(f"[转发消息] 解析节点失败（跳过）: {e}")
             continue
 
     if not body_lines:
+        parse_context["state"].incomplete = True
         return f"{indent}{header}\n{sep_start}\n{indent}（转发内容为空或解析失败）\n{sep_end}"
 
     body = "\n".join(body_lines)
@@ -437,7 +531,8 @@ async def _format_single_node(
             if isinstance(text, str) and text:
                 text_parts.append(text)
         elif seg_type == "image":
-            text_parts.append("[图片]")
+            renderer = parse_context.get("image_renderer")
+            text_parts.append(await renderer(seg_data) if renderer else "[图片]")
         elif seg_type == "video":
             text_parts.append("[视频]")
         elif seg_type == "record":
@@ -545,6 +640,7 @@ async def _handle_nested_forward_segment(
     new_depth = depth + 1
 
     if new_depth > max_nesting_depth:
+        parse_context["state"].incomplete = True
         indent = "  " * new_depth
         return f"{indent}[嵌套转发消息]（嵌套层级过深，已省略详细内容）"
 
@@ -585,6 +681,7 @@ async def _handle_nested_forward_segment(
             debug_mode=debug_mode,
         )
 
+    parse_context["state"].incomplete = True
     logger.warning(
         f"[转发消息] 嵌套转发解析失败：get_forward_msg 与 inline 回退均未获取到内容，"
         f"nested_id={nested_id or 'N/A'}，已替换为占位标识"
@@ -616,12 +713,14 @@ async def _expand_nested_forward_by_id(
 
     active_forward_ids = parse_context["active_forward_ids"]
     if nested_id_str in active_forward_ids:
+        parse_context["state"].incomplete = True
         return f"{indent}[嵌套转发消息]（检测到重复嵌套转发，已跳过重复展开）"
 
     if (
         nested_id_str not in parse_context["forward_cache"]
         and parse_context["api_call_count"] >= FORWARD_API_CALL_HARD_LIMIT
     ):
+        parse_context["state"].incomplete = True
         return f"{indent}[嵌套转发消息]（API调用次数已达上限，已省略详细内容）"
 
     nested_nodes = await _get_forward_nodes_by_id(

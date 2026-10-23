@@ -111,6 +111,7 @@
 | **平台的"群聊上下文感知"和"自动理解图片"怎么配？** | [深度指南 → 平台配置](docs/ARCHITECTURE.md#推荐的平台设置) |
 | **某个配置项是什么意思？默认值是多少？** | [配置项完整参考](docs/CONFIG_REFERENCE.md) |
 | **一条消息从收到到回复经历了什么流程？** | [消息工作流程详解](docs/MESSAGE_WORKFLOW.md) |
+| **如何识别合并转发里的图片，以及引用转发继续追问？** | [合并转发图片](docs/FORWARD_IMAGES.md) |
 | **代码文件结构和各模块职责？** | [项目结构说明](docs/PROJECT_STRUCTURE.md) |
 | **使用 AstrBot 桌面端？重启不生效？路径找不到？** | [桌面端兼容说明](docs/DESKTOP_COMPATIBILITY.md) |
 | **我用的其他插件和本插件会冲突吗？** | [深度指南 → 兼容性](docs/ARCHITECTURE.md#与其他插件的兼容性) |

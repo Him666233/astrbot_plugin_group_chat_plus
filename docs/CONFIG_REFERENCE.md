@@ -271,7 +271,7 @@
 | `image_to_text_scope` | string | `"mention_only"` | 图片处理范围：`all`（所有消息中的图片）、`mention_only`（@或关键词触发时）、`at_only`（仅@消息）、`keyword_only`（仅关键词触发时） |
 | `image_to_text_provider_id` | string | `""` | 图片转文字的AI提供商ID。**必须填写**，留空将无法处理图片 |
 | `image_to_text_prompt` | string | `"请详细描述这张图片的内容"` | 发送给图片AI的提示语 |
-| `image_to_text_timeout` | int | `60` | 图片处理API调用超时（秒）。图片转文字仍走独立的 `provider.text_chat()` 直连链路，不经过回复 Hook |
+| `image_to_text_timeout` | int | `60` | 单张图片下载与模型识别的总超时（秒）。图片转文字仍走独立的 `provider.text_chat()` 直连链路，不经过回复 Hook |
 | `max_images_per_message` | int | `10` | 单条消息最大处理图片数量（1-50） |
 | `enable_image_description_cache` | bool | `false` | 缓存图片描述结果，相同图片不重复调用API，节省费用 |
 | `image_description_cache_max_entries` | int | `500` | 图片描述缓存的最大条目数。当前主缓存文件位于 `image_cache/descriptions.jsonl`；若检测到旧版残留路径 `image_description_cache.json`，Web 面板清理逻辑会兼容处理，但该旧路径不再是当前主实现 |
@@ -371,7 +371,11 @@
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `enable_forward_message_parsing` | bool | `false` | 启用 QQ / OneBot 合并转发解析。解析器会把转发内容整理成单条可读文本并继续参与后续上下文与 AI 流程，而不是拆成多条消息 |
+| `enable_forward_image_processing` | bool | `false` | 在群聊合并转发进入文字缓存前识图。需要同时开启转发解析、图片处理并配置图片转文字提供商，遵循 `image_to_text_scope`。未触发回复也可能产生识图费用 |
+| `forward_media_timeout` | int | `90` | 每条源转发任务的总超时，包含获取、下载和识图，限制在 10-180 秒。同一转发的并发引用共享任务和剩余时间 |
 | `forward_max_nesting_depth` | int | `3` | 嵌套转发的最大解析深度（0=不展开嵌套，仅保留占位式降级；最大10）。在深度范围内会递归展开子转发，并尽量保留发送者信息与时间戳格式 |
+
+转发识图的范围、缓存和失败处理见 [合并转发图片](FORWARD_IMAGES.md)。
 
 ---
 

@@ -704,6 +704,49 @@ class ImageHandler:
         return result
 
     @staticmethod
+    async def describe_image(
+        image: Image,
+        context: Context,
+        provider_id: str,
+        prompt: str,
+        timeout: float = 60,
+        image_description_cache: Optional[ImageDescriptionCache] = None,
+        session_id: str = "",
+    ) -> Optional[str]:
+        """Describe one image using the existing provider/cache, without rendering it.
+
+        The timeout covers both downloading and inference. Errors propagate so
+        callers can distinguish failed images from successfully described ones.
+        """
+
+        async def describe():
+            provider = context.get_provider_by_id(provider_id)
+            if provider is None:
+                raise ValueError("Image caption provider is unavailable")
+            image_path = await image.convert_to_file_path()
+            if not image_path:
+                return None
+            cache = image_description_cache
+            if cache and cache.enabled:
+                cached = cache.lookup(image_path)
+                if cached:
+                    return cached
+            response = await provider.text_chat(
+                prompt=prompt,
+                contexts=[],
+                image_urls=[image_path],
+                func_tool=None,
+                system_prompt="",
+                session_id=session_id,
+            )
+            description = response.completion_text
+            if description and cache and cache.enabled and not cache.lookup(image_path):
+                cache.save(image_path, description)
+            return description
+
+        return await asyncio.wait_for(describe(), timeout=timeout)
+
+    @staticmethod
     async def _convert_images_to_text(
         message_chain: List[BaseMessageComponent],
         context: Context,
@@ -743,53 +786,20 @@ class ImageHandler:
             image_descriptions = {}
             for idx, img_component in enumerate(image_components):
                 try:
-                    # 获取图片URL或路径
-                    image_path = await img_component.convert_to_file_path()
-                    if not image_path:
-                        logger.warning(f"无法获取图片 {idx} 的路径")
-                        continue
-
-                    if DEBUG_MODE:
-                        logger.info(f"正在转换图片 {idx}: {image_path}")
-
-                    # 🆕 v1.2.0: 先检查本地缓存，命中则跳过AI调用
-                    if image_description_cache and image_description_cache.enabled:
-                        cached_desc = image_description_cache.lookup(image_path)
-                        if cached_desc:
-                            image_descriptions[idx] = cached_desc
-                            logger.info(
-                                f"[图片缓存] 图片 {idx} 命中缓存，跳过AI调用 (省钱!)"
-                            )
-                            continue
-
-                    # 调用AI进行图片转文字,添加超时控制
-                    async def call_vision_ai():
-                        response = await provider.text_chat(
-                            prompt=prompt,
-                            contexts=[],
-                            image_urls=[image_path],
-                            func_tool=None,
-                            system_prompt="",
-                            session_id=session_id,
-                        )
-                        return response.completion_text
-
-                    # 使用用户配置的超时时间
-                    description = await asyncio.wait_for(
-                        call_vision_ai(), timeout=timeout
+                    description = await ImageHandler.describe_image(
+                        img_component,
+                        context,
+                        provider_id,
+                        prompt,
+                        timeout,
+                        image_description_cache,
+                        session_id,
                     )
 
                     if description:
                         image_descriptions[idx] = description
                         if DEBUG_MODE:
                             logger.info(f"图片 {idx} 转换成功: {description[:50]}...")
-
-                        # 🆕 v1.2.0: AI转换成功后，保存到本地缓存
-                        # 🔧 防御性编程：保存前再次检查缓存中是否已存在
-                        # 场景：并发处理两条含相同图片的消息，或平台描述已提前写入缓存
-                        if image_description_cache and image_description_cache.enabled:
-                            if not image_description_cache.lookup(image_path):
-                                image_description_cache.save(image_path, description)
 
                 except asyncio.TimeoutError:
                     logger.warning(
