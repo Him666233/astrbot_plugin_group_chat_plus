@@ -946,6 +946,7 @@ class ContextManager:
         max_messages: int,
         context: "Context" = None,
         cached_messages: List[AstrBotMessage] = None,
+        extra_slack: int = 0,
     ) -> List[AstrBotMessage]:
         """
         获取历史消息记录（优先官方存储，回退自定义存储）
@@ -963,6 +964,9 @@ class ContextManager:
                 - -1: 不限制
             context: Context 对象（用于访问官方存储）
             cached_messages: 缓存的消息列表（尚未持久化的消息）
+            extra_slack: 额外多读的条数（缓存友好窗口用）。
+                调用方需要在更长的列表上做块锚定截断时传正数，
+                默认 0 表示行为与旧版完全一致。
 
         Returns:
             历史消息列表（已按时间排序，包含缓存消息）
@@ -1006,6 +1010,13 @@ class ContextManager:
             else:
                 effective_limit = min(max_messages, HARD_LIMIT)
 
+            # 缓存友好窗口：多读 extra_slack 条，供上层做块锚定截断。
+            # 上层锚点会随新消息后移；若这里只读 max_messages 条，
+            # 一条新消息就能把锚点挤出读取范围，窗口又退回每轮滑动。
+            fetch_limit = min(
+                effective_limit + max(0, int(extra_slack or 0)), HARD_LIMIT
+            )
+
             history: List[AstrBotMessage] = []
             official_success = False
 
@@ -1019,7 +1030,7 @@ class ContextManager:
                         platform_id=platform_id,
                         user_id=chat_id,
                         page=1,
-                        page_size=effective_limit,
+                        page_size=fetch_limit,
                     )
 
                     if official_history and len(official_history) > 0:
@@ -1169,8 +1180,8 @@ class ContextManager:
             )
 
             # 截断到有效限制
-            if len(history) > effective_limit:
-                history = history[-effective_limit:]
+            if len(history) > fetch_limit:
+                history = history[-fetch_limit:]
 
             logger.info(f"[上下文管理器] 最终获取历史消息 {len(history)} 条")
             return history

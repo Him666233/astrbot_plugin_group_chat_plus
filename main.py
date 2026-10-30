@@ -276,6 +276,10 @@ from .utils.image_description_cache import (
 from .utils._session_guard import emit_plugin_metadata as _emit_fingerprint
 from .utils.content_filter import ContentFilterManager  # 🆕 v1.2.0: AI回复内容过滤器
 from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
+from .utils.context_window import anchored_window
+
+# 缓存友好窗口（块锚定）：按会话存锚点，chat_id -> 窗口首条消息的稳定键
+_CONTEXT_WINDOW_ANCHORS: dict = {}
 
 
 @register(
@@ -1142,6 +1146,17 @@ class ChatPlus(Star):
         self.include_sender_info = config.get(
             "include_sender_info", True
         )  # 包含发送者信息
+
+        # === 缓存友好窗口（块锚定） ===
+        # 0 = 关闭（默认，行为与旧版完全一致）；>0 = 窗口一次前移多少条。
+        # 开启后窗口起点固定，prompt 前缀在块内保持不变，可显著提高
+        # 支持前缀缓存的供应商（DeepSeek / Anthropic 等）的缓存命中率。
+        try:
+            self.context_window_block = int(config.get("context_window_block", 0) or 0)
+        except (TypeError, ValueError):
+            self.context_window_block = 0
+        if self.context_window_block < 0:
+            self.context_window_block = 0
 
         # 单独的、不包含任何信息的 @ 消息：最近回复关联窗口配置
         _single_at_link_max_messages_raw = config.get(
@@ -7135,6 +7150,12 @@ class ChatPlus(Star):
                 max_messages=max_context,
                 context=self.context,
                 cached_messages=cached_astrbot_messages_for_fallback,
+                # 缓存友好模式：多读两个块，锚点才不会因为一条新消息就掉出读取范围
+                extra_slack=(
+                    self.context_window_block * 2
+                    if getattr(self, "context_window_block", 0) > 0
+                    else 0
+                ),
             )
             if self.debug_mode:
                 _log_msgs("历史-统一获取（官方优先+缓存）", history_messages)
@@ -7411,8 +7432,29 @@ class ChatPlus(Star):
             before_cnt = len(history_messages)
 
             # 统一策略：删除最早的消息，只保留最新的 max_context 条
-            # 由于消息已经按时间戳排序，直接截取末尾即可
-            history_messages = history_messages[-max_context:]
+            # context_window_block > 0 时改用块锚定窗口（缓存友好模式）：
+            # 窗口起点钉在锚点消息上，只有超出上限才按 block 整数倍前移，
+            # 两次前移之间是纯尾部追加，prompt 前缀可以复用。
+            _block = getattr(self, "context_window_block", 0) or 0
+            if _block > 0:
+                _result = anchored_window(
+                    chat_id,
+                    history_messages,
+                    max_context,
+                    _block,
+                    _CONTEXT_WINDOW_ANCHORS,
+                )
+                history_messages = _result.window
+                if _result.advanced or not _result.anchor_found:
+                    logger.info(
+                        f"[缓存友好窗口] chat={chat_id} 输入 {before_cnt} 条 "
+                        f"锚点{'命中' if _result.anchor_found else '重建'} "
+                        f"前移 {_result.advanced}×{_block}，"
+                        f"窗口 {len(history_messages)} 条（上限 {max_context}）"
+                    )
+            else:
+                # 原行为：由于消息已经按时间戳排序，直接截取末尾即可
+                history_messages = history_messages[-max_context:]
 
             if self.debug_mode:
                 removed_cnt = before_cnt - len(history_messages)
