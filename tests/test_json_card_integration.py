@@ -355,4 +355,3 @@ def test_json_component_subclasses_keep_component_detection(plugin):
 
     card = ExtendedJson({"prompt": "Subclass card"})
     assert "Subclass card" in plugin.reply_chain.render_chain_text([card])
-
