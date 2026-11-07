@@ -30,6 +30,7 @@ except ImportError:
 
 from .image_description_cache import ImageDescriptionCache
 from .ai_error_formatter import format_ai_error
+from .json_card_utils import is_json_component, render_json_component
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -323,6 +324,8 @@ class ImageHandler:
                         reply_chain = ImageHandler._get_reply_chain(component)
                         if reply_chain:
                             walk_chain(reply_chain, depth + 1)
+                elif is_json_component(component):
+                    has_text = True
                 elif Video is not None and isinstance(component, Video):
                     # 视频消息视为有内容，防止纯视频消息被丢弃
                     has_text = True
@@ -505,6 +508,8 @@ class ImageHandler:
         """
         if isinstance(component, Face):
             return f"[表情:{component.id}]"
+        elif is_json_component(component):
+            return render_json_component(component)
         elif isinstance(component, At):
             return f"[At:{component.qq}]"
         elif isinstance(component, AtAll):

@@ -31,6 +31,7 @@ from astrbot.api.message_components import Plain, At, Image, Reply
 from astrbot.core.message.components import Forward
 
 from ...utils.reply_chain_utils import format_reply_component
+from ...utils.json_card_utils import is_json_component, render_json_component
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
@@ -382,6 +383,8 @@ class MessageCleaner:
                     elif isinstance(component, Image):
                         # 图片组件，保留图片标记
                         raw_parts.append("[图片]")
+                    elif is_json_component(component):
+                        raw_parts.append(render_json_component(component))
                     elif isinstance(component, Reply):
                         # 引用消息组件，提取引用信息
                         reply_text = MessageCleaner._format_reply_component(

@@ -41,6 +41,7 @@ from astrbot.api.message_components import Plain, At, AtAll, Image, Reply
 from astrbot.core.message.components import Forward
 
 from .reply_chain_utils import resolve_reply_content
+from .json_card_utils import is_json_component, render_json_component
 
 # 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
 try:
@@ -498,6 +499,8 @@ class MessageCleaner:
                     elif isinstance(component, Image):
                         # 图片组件，保留图片标记
                         raw_parts.append("[图片]")
+                    elif is_json_component(component):
+                        raw_parts.append(render_json_component(component))
                     elif isinstance(component, Reply):
                         # 引用消息组件，提取引用信息
                         reply_text = MessageCleaner._format_reply_component(
