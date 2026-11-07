@@ -89,7 +89,7 @@ def _route_query(query):
 
 def _identity(query, key, pattern):
     parsed = _route_query(query)
-    if parsed is None or key not in parsed:
+    if parsed is None or key not in parsed or parsed[key][0] != key:
         return None
     value = parsed[key][1]
     return value if pattern.fullmatch(value) else None
