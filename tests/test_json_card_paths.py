@@ -124,7 +124,12 @@ def test_url_rejects_bidi_c1_controls_and_userinfo(modules):
         "javascript:alert(1)",
         "http:///missing-host",
         "https://example.org:99999/x",
+        "https://example.org/" + "\ud800" + "x",
         "https://example.org/" + "x" * 501,
+        "https://" + ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 63)) + "/x",
+        "https://-bad.example/x",
+        "https://bad-.example/x",
+        "https://%65xample.org/x",
     ):
         assert modules._url(url) == ""
     text = modules.render_json_card({"prompt": "中文" + chr(0x85) + chr(0x202E) + "正常"})
@@ -151,6 +156,7 @@ def test_public_shortlink_and_url_survive_max_output_truncation(modules):
     ("https://www.bilibili.com/video/BV123?x=1", "https://www.bilibili.com/video/BV123"),
     ("https://music.163.com/album?id=123", "https://music.163.com/album"),
     ("https://music.163.com/song?id=0", ""),
+    ("https://music.163.com/song?id=" + "1" * 21, ""),
     ("https://music.163.com/song?ID=123", ""),
     ("https://music.163.com/song?id=123&id=456", ""),
     ("https://music.163.com/song?ID=123&id=456", ""),
