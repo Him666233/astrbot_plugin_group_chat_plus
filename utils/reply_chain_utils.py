@@ -30,6 +30,7 @@ AstrBot 的 `Reply` 组件有两个内容来源：
 from typing import Any, Iterator, List, Optional, Tuple
 
 from astrbot.api.message_components import Plain, At, AtAll, Image, Face, Reply
+from .json_card_utils import is_json_component, render_json_component
 
 # 尝试导入非文本媒体组件（不同 AstrBot 版本路径可能不同）
 try:
@@ -223,6 +224,8 @@ def render_chain_text(
                 buffer.append("[At:all]")
             elif isinstance(component, Face):
                 buffer.append(f"[表情:{getattr(component, 'id', '')}]")
+            elif is_json_component(component):
+                buffer.append(render_json_component(component))
             elif isinstance(component, Reply):
                 nested = ""
                 if depth < max_depth:
@@ -277,6 +280,8 @@ def analyze_chain(
             if _coerce_plain_text(component.text).strip():
                 has_text = True
         elif isinstance(component, Reply):
+            has_text = True
+        elif is_json_component(component):
             has_text = True
         elif media_as_text:
             if Video is not None and isinstance(component, Video):

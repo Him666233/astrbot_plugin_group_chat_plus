@@ -23,6 +23,7 @@ from ...utils.reply_chain_utils import (
     format_reply_component,
     render_chain_text,
 )
+from ...utils.json_card_utils import is_json_component, render_json_component
 
 # 详细日志开关
 DEBUG_MODE: bool = False
@@ -237,6 +238,8 @@ class ImageHandler:
         """
         if isinstance(component, Face):
             return f"[表情:{component.id}]"
+        elif is_json_component(component):
+            return render_json_component(component)
         elif isinstance(component, At):
             return f"[At:{component.qq}]"
         elif isinstance(component, Reply):
