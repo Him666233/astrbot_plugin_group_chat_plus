@@ -253,3 +253,47 @@ def test_format_reply_uses_message_fallback_and_marks_bot_sender(image_handler):
     )
 
     assert formatted == "[引用 >>> 水原千鹤(你)(ID:3683026476): 旧版引用文本]\n"
+
+
+@pytest.mark.asyncio
+async def test_processes_images_preserved_from_merged_forward(image_handler):
+    handler, Plain, _, _ = image_handler
+
+    class Provider:
+        async def text_chat(self, **kwargs):
+            return types.SimpleNamespace(completion_text="一张猫的照片")
+
+    class Context:
+        def get_provider_by_id(self, provider_id):
+            assert provider_id == "vision"
+            return Provider()
+
+    class Event:
+        message_obj = types.SimpleNamespace(
+            message=[Plain("Alice: [图片][图片]")]
+        )
+        session_id = "test-session"
+
+        def get_extra(self, key, default=None):
+            if key == "_gcp_forward_image_urls":
+                return ["https://img/one.jpg", "https://img/two.jpg"]
+            return default
+
+        def get_message_outline(self):
+            return "Alice: [图片][图片]"
+
+    keep, text, urls, retained = await handler.ImageHandler.process_message_images(
+        Event(),
+        Context(),
+        enable_image_processing=True,
+        image_to_text_scope="all",
+        image_to_text_provider_id="vision",
+        image_to_text_prompt="describe",
+        is_at_message=False,
+        has_trigger_keyword=False,
+    )
+
+    assert keep is True
+    assert retained is True
+    assert urls == []
+    assert text == "Alice: [图片内容: 一张猫的照片][图片内容: 一张猫的照片]"

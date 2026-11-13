@@ -27,6 +27,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 FORWARD_NESTING_HARD_LIMIT = 10
 FORWARD_API_CALL_HARD_LIMIT = 30
+FORWARD_IMAGE_URLS_EXTRA = "_gcp_forward_image_urls"
 
 
 class ForwardMessageParser:
@@ -48,6 +49,11 @@ class ForwardMessageParser:
             message_chain = event.message_obj.message
             if not message_chain:
                 return False
+
+            # Forward components are replaced with Plain below. Preserve the
+            # image references separately so the later multimodal pipeline can
+            # still pass them to the provider.
+            _set_event_extra(event, FORWARD_IMAGE_URLS_EXTRA, [])
 
             forward_indices = []
             for i, component in enumerate(message_chain):
@@ -141,6 +147,11 @@ class ForwardMessageParser:
                     )
 
             if any_parsed:
+                _set_event_extra(
+                    event,
+                    FORWARD_IMAGE_URLS_EXTRA,
+                    _dedupe_image_refs(parse_context.get("image_refs", [])),
+                )
                 new_str_parts = []
                 for comp in message_chain:
                     if isinstance(comp, Plain):
@@ -163,7 +174,38 @@ def _create_parse_context() -> dict[str, Any]:
         "api_call_count": 0,
         "active_forward_ids": set(),
         "forward_cache": {},
+        "image_refs": [],
     }
+
+
+def _set_event_extra(event: Any, key: str, value: Any) -> None:
+    setter = getattr(event, "set_extra", None)
+    if callable(setter):
+        try:
+            setter(key, value)
+        except Exception:
+            pass
+
+
+def _dedupe_image_refs(refs: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if not isinstance(ref, str):
+            continue
+        ref = ref.strip()
+        if ref and ref not in seen:
+            seen.add(ref)
+            result.append(ref)
+    return result
+
+
+def _record_image_ref(seg_data: dict[str, Any], parse_context: dict[str, Any]) -> None:
+    for key in ("url", "file", "path", "file_id", "image_id", "image", "id"):
+        value = seg_data.get(key)
+        if isinstance(value, str) and value.strip():
+            parse_context.setdefault("image_refs", []).append(value.strip())
+            return
 
 
 def _get_call_action(event: AstrMessageEvent):
@@ -437,6 +479,7 @@ async def _format_single_node(
             if isinstance(text, str) and text:
                 text_parts.append(text)
         elif seg_type == "image":
+            _record_image_ref(seg_data, parse_context)
             text_parts.append("[图片]")
         elif seg_type == "video":
             text_parts.append("[视频]")
