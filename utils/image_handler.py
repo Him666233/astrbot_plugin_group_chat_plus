@@ -33,6 +33,7 @@ from .ai_error_formatter import format_ai_error
 
 # 详细日志开关（与 main.py 同款方式：单独用 if 控制）
 DEBUG_MODE: bool = False
+_FORWARD_IMAGE_URLS_EXTRA = "_gcp_forward_image_urls"
 
 # AstrBot 的 Reply 组件会在 chain 字段中保存被引用消息的原始消息段。
 # 限制递归深度，避免异常平台数据构造循环/超深引用链。
@@ -104,10 +105,37 @@ class ImageHandler:
 
             message_chain = event.message_obj.message
 
+            # The forward parser replaces Forward nodes with Plain text. Read
+            # the image references it preserved on the event so merged-forward
+            # images follow the same multimodal/image-to-text path as Image
+            # components.
+            forward_image_urls = []
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra):
+                try:
+                    refs = get_extra(_FORWARD_IMAGE_URLS_EXTRA, []) or []
+                    if isinstance(refs, (list, tuple)):
+                        forward_image_urls = [
+                            ref.strip()
+                            for ref in refs
+                            if isinstance(ref, str) and ref.strip()
+                        ]
+                except Exception:
+                    forward_image_urls = []
+
             # 检查消息中是否有图片
             has_image, has_text, image_components = ImageHandler._analyze_message(
                 message_chain, max_images_per_message
             )
+            if forward_image_urls:
+                remaining = max(0, max_images_per_message - len(image_components))
+                if len(forward_image_urls) > remaining:
+                    logger.warning(
+                        "[图片处理] 合并转发图片数量超过上限，仅处理前 %d 张",
+                        remaining,
+                    )
+                forward_image_urls = forward_image_urls[:remaining]
+                has_image = True
 
             # 如果没有图片，从消息链提取完整文本（含引用内容），不使用 get_message_outline()
             # 因为 get_message_outline() 通常不包含引用消息（Reply 组件）的内容
@@ -204,6 +232,7 @@ class ImageHandler:
                     logger.info("未配置图片转文字提供商ID,提取图片URL传递给多模态AI")
                 # 提取图片URL
                 image_urls = await ImageHandler._extract_image_urls(image_components)
+                image_urls.extend(forward_image_urls)
                 # 提取文本内容 — 保留 [图片] 标记作为占位符，与视频/语音/文件标记行为一致。
                 # Reply.chain 中的引用图片也会递归展开；图片URL列表与这些标记顺序一致。
                 text_content = ImageHandler._render_message_chain(
@@ -227,17 +256,46 @@ class ImageHandler:
                 logger.info(
                     f"已配置图片转文字提供商ID,尝试转换图片(超时时间: {timeout}秒)"
                 )
-            processed_message = await ImageHandler._convert_images_to_text(
-                message_chain,
-                context,
-                image_to_text_provider_id,
-                image_to_text_prompt,
-                image_components,
-                timeout,
-                image_description_cache,
-                getattr(event, "session_id", ""),
-                self_id=self_id,
-            )
+            processed_message = None
+            if image_components:
+                processed_message = await ImageHandler._convert_images_to_text(
+                    message_chain,
+                    context,
+                    image_to_text_provider_id,
+                    image_to_text_prompt,
+                    image_components,
+                    timeout,
+                    image_description_cache,
+                    getattr(event, "session_id", ""),
+                    self_id=self_id,
+                )
+
+            if forward_image_urls:
+                # The forward text already contains one [图片] marker per
+                # image. Replace the remaining markers with descriptions from
+                # the configured vision provider, keeping ordinary Image
+                # component handling unchanged.
+                base_text = processed_message or ImageHandler._render_message_chain(
+                    message_chain,
+                    self_id=self_id,
+                    include_images=True,
+                )
+                forward_text = await ImageHandler._convert_forward_urls_to_text(
+                    base_text,
+                    context,
+                    image_to_text_provider_id,
+                    image_to_text_prompt,
+                    forward_image_urls,
+                    timeout,
+                    image_description_cache,
+                    getattr(event, "session_id", ""),
+                )
+                if forward_text is not None:
+                    processed_message = forward_text
+                elif processed_message is None:
+                    processed_message = base_text.replace(
+                        "[图片]", "[图片（识别失败）]"
+                    )
 
             # 如果转换失败或超时,进行降级处理（过滤图片）
             if processed_message is None:
@@ -819,3 +877,62 @@ class ImageHandler:
         except Exception as e:
             logger.error(f"图片转文字过程发生错误: {e}")
             return None
+
+    @staticmethod
+    async def _convert_forward_urls_to_text(
+        message_text: str,
+        context: Context,
+        provider_id: str,
+        prompt: str,
+        image_urls: List[str],
+        timeout: int = 60,
+        image_description_cache: Optional[ImageDescriptionCache] = None,
+        session_id: str = "",
+    ) -> Optional[str]:
+        """Describe images collected from a merged Forward message."""
+        provider = context.get_provider_by_id(provider_id)
+        if not provider:
+            logger.error("无法找到提供商: %s", provider_id)
+            return None
+
+        descriptions: list[str] = []
+        for idx, image_url in enumerate(image_urls):
+            try:
+                description = None
+                if image_description_cache and image_description_cache.enabled:
+                    description = image_description_cache.lookup(image_url)
+                if not description:
+                    response = await asyncio.wait_for(
+                        provider.text_chat(
+                            prompt=prompt,
+                            contexts=[],
+                            image_urls=[image_url],
+                            func_tool=None,
+                            system_prompt="",
+                            session_id=session_id,
+                        ),
+                        timeout=timeout,
+                    )
+                    description = response.completion_text
+                    if (
+                        description
+                        and image_description_cache
+                        and image_description_cache.enabled
+                    ):
+                        image_description_cache.save(image_url, description)
+                if description:
+                    descriptions.append(str(description))
+            except asyncio.TimeoutError:
+                logger.warning("合并转发图片 %d 转文字超时", idx)
+            except Exception as exc:
+                logger.error("合并转发图片 %d 转文字失败: %s", idx, exc)
+
+        if not descriptions:
+            return None
+
+        result = message_text
+        for description in descriptions:
+            if "[图片]" not in result:
+                break
+            result = result.replace("[图片]", f"[图片内容: {description}]", 1)
+        return result
