@@ -3072,7 +3072,7 @@ class ContextManager:
                 logger.info(f"========== {log_prefix} 开始保存 ==========")
                 logger.info(f"{log_prefix} unified_msg_origin: {unified_msg_origin}")
                 logger.info(f"{log_prefix} 缓存消息: {len(cached_messages)} 条")
-                logger.info(f"{log_prefix} 用户消息长度: {len(user_message)} 字符")
+                logger.info(f"{log_prefix} 用户消息长度: {len(user_message or '')} 字符")
                 if bot_message is not None:
                     logger.info(f"{log_prefix} AI回复长度: {len(bot_message)} 字符")
                 else:
