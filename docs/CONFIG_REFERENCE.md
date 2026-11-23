@@ -185,6 +185,7 @@
 | `initial_probability` | float | `0.02` | 基础回复概率。每条消息有 2% 的概率通过第一层筛选。值越高，AI越活跃 |
 | `after_reply_probability` | float | `0.8` | 传统模式下的回复后提升概率。仅在关闭 `enable_attention_mechanism` 时生效；AI刚成功回复后，会对整个群聊会话临时使用该概率，促进连续对话。该提升不区分用户，新的成功回复会刷新持续时间。若开启注意力机制，则这一项不会参与当前会话计算，而是由注意力机制按用户接管 |
 | `probability_duration` | int | `120` | 传统模式下回复后提升的持续时间（秒）。这是按整个群聊会话生效的时间窗口，不是按单个用户计算；若配置异常，系统会自动矫正为安全值 |
+| `group_probability_overrides` | text | `{}` | 按群覆盖基础概率和回复后连聊概率的 JSON 字符串。键为群号，值可写 `initial_probability`、`after_reply_probability`，省略的字段回退全局值。仅群聊匹配，私聊不匹配。`{}` 表示全部使用全局概率。修改后需重启生效 |
 
 ### 概率硬限制
 

@@ -2574,6 +2574,9 @@ class ChatPlus(Star):
             "enable_probability_hard_limit": self.enable_probability_hard_limit,
             "probability_min_limit": self.probability_min_limit,
             "probability_max_limit": self.probability_max_limit,
+            "group_probability_overrides": config.get(
+                "group_probability_overrides", "{}"
+            ),
         }
         ProbabilityManager.initialize(probability_config)
 

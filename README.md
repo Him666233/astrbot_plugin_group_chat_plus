@@ -447,6 +447,8 @@ sqlite3 data/data_v4.db "DELETE FROM platform_message_history;"
   // 显示名：初始读空气概率
   "after_reply_probability": 1.0,
   // 显示名：回复后的读空气概率（传统模式）
+  "group_probability_overrides": "{}",
+  // 显示名：按群概率覆盖(JSON格式) — 仅群聊。示例 {"123456789":{"initial_probability":0.03,"after_reply_probability":0.2}}；省略字段回退全局，{} 表示全部全局
   "probability_duration": 90,
   // 显示名：概率提升持续时间(秒)
   "decision_ai_include_persona": true,
