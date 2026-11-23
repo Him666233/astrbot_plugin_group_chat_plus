@@ -1653,6 +1653,12 @@
         "hint": "开启后，读空气回复概率会根据时间段动态调整，模拟人类作息规律。影响initial_probability和after_reply_probability。与注意力机制、频率调整器等功能自动配合，不会产生冲突。建议开启以获得更拟人化的效果",
         "default": false
     },
+    "group_probability_overrides": {
+        "description": "按群概率覆盖(JSON格式)",
+        "type": "text",
+        "hint": "为特定群聊覆盖读空气基础概率和回复后连聊概率。仅群聊生效，私聊永不匹配。格式:\n{\"群号\": {\"initial_probability\": 0.03, \"after_reply_probability\": 0.2}}\n省略的字段回退全局配置；留空 {} 表示全部使用全局概率。修改后需重启 AstrBot 生效。",
+        "default": "{}"
+    },
     "reply_time_periods": {
         "description": "【模式1】普通回复时间段配置(JSON格式)",
         "type": "text",

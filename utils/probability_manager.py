@@ -11,12 +11,13 @@ v1.1.0 更新：
 - 硬性限制在所有调整的最末尾应用
 
 作者: Him666233
-版本: V1.2.3.hotfix.2
+版本: V1.2.4
 """
 
 import time
 import asyncio
 import copy
+import json
 from datetime import datetime
 from typing import Dict, Any, Optional, TYPE_CHECKING
 from astrbot.api.all import *
@@ -79,6 +80,8 @@ class ProbabilityManager:
     _enable_probability_hard_limit: bool = False
     _probability_min_limit: float = 0.05
     _probability_max_limit: float = 0.8
+    # 群号 -> 仅包含已配置的概率字段。私聊不查这张表。
+    _group_probability_overrides: Dict[str, Dict[str, float]] = {}
 
     @staticmethod
     def initialize(config: dict):
@@ -114,6 +117,19 @@ class ProbabilityManager:
         ProbabilityManager._probability_min_limit = config["probability_min_limit"]
         ProbabilityManager._probability_max_limit = config["probability_max_limit"]
 
+        try:
+            overrides = ProbabilityManager._parse_group_probability_overrides(
+                config.get("group_probability_overrides", "{}")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as err:
+            logger.warning(
+                f"[概率管理器] group_probability_overrides 解析失败，已忽略: {err}"
+            )
+            overrides = {}
+        ProbabilityManager._group_probability_overrides = overrides
+        if overrides:
+            logger.info(f"按群概率覆盖已启用: {overrides}")
+
         if DEBUG_MODE:
             logger.info("[概率管理器] 已初始化，动态时间调整功能已就绪")
 
@@ -132,6 +148,50 @@ class ProbabilityManager:
         """
         chat_type = "private" if is_private else "group"
         return f"{platform_name}_{chat_type}_{chat_id}"
+
+    @staticmethod
+    def _parse_group_probability_overrides(raw: Any) -> Dict[str, Dict[str, float]]:
+        """解析按群概率覆盖表。非法 JSON 或非对象由调用方捕获后清空。"""
+        if raw is None or raw == "":
+            return {}
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(parsed, dict):
+            raise ValueError("group_probability_overrides 必须是 JSON 对象")
+
+        result: Dict[str, Dict[str, float]] = {}
+        for group_id, conf in parsed.items():
+            if not isinstance(conf, dict):
+                logger.warning(
+                    f"[概率管理器] 群 {group_id} 的概率覆盖不是对象，已跳过"
+                )
+                continue
+            entry: Dict[str, float] = {}
+            for field in ("initial_probability", "after_reply_probability"):
+                if field not in conf:
+                    continue
+                try:
+                    value = float(conf[field])
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"[概率管理器] 群 {group_id} 的 {field} 无法转换为浮点数，已跳过该字段"
+                    )
+                    continue
+                entry[field] = max(0.0, min(1.0, value))
+            if entry:
+                result[str(group_id)] = entry
+        return result
+
+    @staticmethod
+    def _group_override_value(
+        is_private: bool, chat_id: str, field: str
+    ) -> Optional[float]:
+        """仅群聊命中覆盖表。私聊即使 ID 与群号相同也回退全局值。"""
+        if is_private:
+            return None
+        entry = ProbabilityManager._group_probability_overrides.get(str(chat_id))
+        if not entry or field not in entry:
+            return None
+        return entry[field]
 
     @staticmethod
     def _clamp_probability(value: Any, fallback: float, label: str) -> float:
@@ -244,8 +304,18 @@ class ProbabilityManager:
         guard_session(chat_key, probability=0.05)
 
         # ========== 第一步：获取基础概率（考虑基础覆盖 + 传统回复后提升） ==========
+        override_initial = ProbabilityManager._group_override_value(
+            is_private, chat_id, "initial_probability"
+        )
+        effective_initial = (
+            initial_probability if override_initial is None else override_initial
+        )
+        if override_initial is not None:
+            logger.info(
+                f"[按群概率] 会话 {chat_id} 使用群覆盖基础概率: {effective_initial}"
+            )
         base_probability = ProbabilityManager._clamp_probability(
-            initial_probability, 0.0, f"会话 {chat_key} 的 initial_probability"
+            effective_initial, 0.0, f"会话 {chat_key} 的 initial_probability"
         )
         base_source = "initial_probability"
 
@@ -496,6 +566,14 @@ class ProbabilityManager:
         """
         chat_key = ProbabilityManager.get_chat_key(platform_name, is_private, chat_id)
         current_time = time.time()
+        override_boost = ProbabilityManager._group_override_value(
+            is_private, chat_id, "after_reply_probability"
+        )
+        if override_boost is not None:
+            boosted_probability = override_boost
+            logger.info(
+                f"[按群概率] 会话 {chat_id} 使用群覆盖连聊概率: {boosted_probability}"
+            )
         safe_probability = ProbabilityManager._clamp_probability(
             boosted_probability,
             0.8,
